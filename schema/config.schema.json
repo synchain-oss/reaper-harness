@@ -1,0 +1,999 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/synchain-oss/reaper-harness/schema/config.schema.json",
+  "title": "reaper-harness configuration (schema 1)",
+  "description": "Generated from src/Config.psm1 (Get-HarnessConfigSpec); the validator there is authoritative. Do not edit by hand: run.ps1 -WriteSchema regenerates it.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,40}$",
+      "description": "goes into result file names"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "plugins": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]{0,39}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "bundle": {
+            "type": "string",
+            "pattern": "^[^\\\\/:*?\"<>|\\u0000-\\u001f]{1,120}\\.vst3$",
+            "description": "bundle directory name, looked up in -PluginDir"
+          },
+          "expectPdc": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          }
+        },
+        "required": ["bundle"],
+        "additionalProperties": false
+      },
+      "minProperties": 1
+    },
+    "signal": {
+      "type": "object",
+      "properties": {
+        "seconds": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 600
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "noiseDb": {
+          "type": "number",
+          "minimum": -200,
+          "maximum": 0
+        },
+        "sine": {
+          "type": "object",
+          "properties": {
+            "hz": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 20000
+            },
+            "db": {
+              "type": "number",
+              "minimum": -200,
+              "maximum": 0
+            }
+          },
+          "required": ["hz"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "renderTimeoutSec": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "luaTimeoutSec": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "learnTimeoutSec": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "lockWaitSec": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 86400
+        },
+        "lagSearch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4096
+        },
+        "headSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 600
+        },
+        "instances": {
+          "type": "object",
+          "properties": {
+            "cycles": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "warmup": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "play": {
+              "type": "boolean"
+            },
+            "maxHandleGrowth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "maxPrivateGrowthMB": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "layouts": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]{0,39}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/layout"
+      },
+      "minProperties": 1
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/scenario"
+      },
+      "minItems": 1
+    },
+    "negative": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/negativeScenario"
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "properties": {
+        "modules": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\u0000-\\u001f]{1,260}\\.psm1$"
+          },
+          "uniqueItems": true
+        },
+        "lua": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\u0000-\\u001f]{1,260}\\.lua$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["schema", "name", "plugins", "layouts", "scenarios"],
+  "additionalProperties": false,
+  "$defs": {
+    "paramValue": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "object",
+          "properties": {
+            "normalized": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "display": {
+              "type": "string",
+              "pattern": "^[^\\u0000-\\u001f]{0,128}$"
+            }
+          },
+          "required": ["normalized"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "fx": {
+      "type": "object",
+      "properties": {
+        "plugin": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,39}$",
+          "description": "id from plugins"
+        },
+        "bypass": {
+          "type": "boolean"
+        },
+        "params": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[^\\u0000-\\u001f]{1,128}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/paramValue"
+          },
+          "description": "parameter name -> value, set by name and read back by the Lua driver"
+        }
+      },
+      "required": ["plugin"],
+      "additionalProperties": false
+    },
+    "track": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[^\"\\u0000-\\u001f]{1,64}$"
+        },
+        "source": {
+          "type": "boolean",
+          "description": "the track carries the test signal"
+        },
+        "folder": {
+          "type": "boolean",
+          "description": "a REAPER folder (bus) track; its children are the following tracks that name it as parent"
+        },
+        "parent": {
+          "type": "string",
+          "pattern": "^[^\"\\u0000-\\u001f]{1,64}$",
+          "description": "name of the folder track this track belongs to"
+        },
+        "volume": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 4,
+          "description": "linear track volume"
+        },
+        "fx": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fx"
+          }
+        }
+      },
+      "required": ["name", "source"],
+      "additionalProperties": false
+    },
+    "layout": {
+      "type": "object",
+      "properties": {
+        "tracks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/track"
+          },
+          "minItems": 1
+        }
+      },
+      "required": ["tracks"],
+      "additionalProperties": false
+    },
+    "compareVariant": {
+      "type": "object",
+      "properties": {
+        "layout": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,39}$"
+        },
+        "block": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 8192,
+          "description": "audio device block size in samples"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["offline", "1x", "online"],
+          "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+        },
+        "bypass": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "matrix": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["offline", "1x", "online"],
+            "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "sr": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 8000,
+            "maximum": 384000,
+            "description": "sample rate in Hz"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "block": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "description": "audio device block size in samples"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+        },
+        "kind": {
+          "type": "string",
+          "not": {
+            "enum": ["hang", "guard"]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "render"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "render"
+              },
+              "layout": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["offline", "1x", "online"],
+                "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "mono": {
+                "type": "boolean"
+              },
+              "bypass": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,39}$"
+                    },
+                    "minItems": 1,
+                    "uniqueItems": true
+                  }
+                ]
+              },
+              "compare": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": ["dry", "repeat"]
+                  },
+                  {
+                    "$ref": "#/$defs/compareVariant"
+                  }
+                ]
+              },
+              "maxDiffDb": {
+                "type": "number",
+                "minimum": -400,
+                "maximum": 0,
+                "description": "allowed residual in dBFS; absent means bit-identical"
+              },
+              "lag": {
+                "type": "integer",
+                "minimum": -4096,
+                "maximum": 4096,
+                "description": "expected lag in samples (the test render later than the reference is positive), default 0"
+              },
+              "peakMaxDb": {
+                "type": "number",
+                "minimum": -400,
+                "maximum": 24,
+                "description": "the test render must not peak above this"
+              },
+              "notSilent": {
+                "type": "boolean",
+                "description": "the test render must peak above -120 dBFS"
+              },
+              "matrix": {
+                "$ref": "#/$defs/matrix"
+              }
+            },
+            "required": ["id", "kind", "layout"],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "device"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "device"
+              },
+              "layout": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "matrix": {
+                "$ref": "#/$defs/matrix"
+              }
+            },
+            "required": ["id", "kind", "layout"],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "savereopen"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "savereopen"
+              },
+              "layout": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["offline", "1x", "online"],
+                "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "bypass": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,39}$"
+                    },
+                    "minItems": 1,
+                    "uniqueItems": true
+                  }
+                ]
+              },
+              "matrix": {
+                "$ref": "#/$defs/matrix"
+              }
+            },
+            "required": ["id", "kind", "layout"],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "instances"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "instances"
+              },
+              "plugins": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]{0,39}$"
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "cycles": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000
+              },
+              "warmup": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "play": {
+                "type": "boolean"
+              },
+              "maxHandleGrowth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "maxPrivateGrowthMB": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              }
+            },
+            "required": ["id", "kind"],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    "negativeScenario": {
+      "type": "object",
+      "required": ["id", "kind", "expect", "expectDetail"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+        },
+        "kind": {
+          "type": "string",
+          "not": {
+            "enum": ["hang", "guard"]
+          }
+        },
+        "expect": {
+          "enum": ["PASS", "FAIL", "SKIPPED", "INCOMPLETE", "REFUSED"]
+        },
+        "expectDetail": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "render"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "render"
+              },
+              "layout": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["offline", "1x", "online"],
+                "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "mono": {
+                "type": "boolean"
+              },
+              "bypass": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,39}$"
+                    },
+                    "minItems": 1,
+                    "uniqueItems": true
+                  }
+                ]
+              },
+              "compare": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": ["dry", "repeat"]
+                  },
+                  {
+                    "$ref": "#/$defs/compareVariant"
+                  }
+                ]
+              },
+              "maxDiffDb": {
+                "type": "number",
+                "minimum": -400,
+                "maximum": 0,
+                "description": "allowed residual in dBFS; absent means bit-identical"
+              },
+              "lag": {
+                "type": "integer",
+                "minimum": -4096,
+                "maximum": 4096,
+                "description": "expected lag in samples (the test render later than the reference is positive), default 0"
+              },
+              "peakMaxDb": {
+                "type": "number",
+                "minimum": -400,
+                "maximum": 24,
+                "description": "the test render must not peak above this"
+              },
+              "notSilent": {
+                "type": "boolean",
+                "description": "the test render must peak above -120 dBFS"
+              },
+              "expect": {
+                "type": "string",
+                "enum": ["PASS", "FAIL", "SKIPPED", "INCOMPLETE", "REFUSED"]
+              },
+              "expectDetail": {
+                "type": "string",
+                "description": "regex (.NET, case sensitive) the outcome detail must match"
+              }
+            },
+            "required": ["id", "kind", "layout", "expect", "expectDetail"],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "device"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "device"
+              },
+              "layout": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "expect": {
+                "type": "string",
+                "enum": ["PASS", "FAIL", "SKIPPED", "INCOMPLETE", "REFUSED"]
+              },
+              "expectDetail": {
+                "type": "string",
+                "description": "regex (.NET, case sensitive) the outcome detail must match"
+              }
+            },
+            "required": ["id", "kind", "layout", "expect", "expectDetail"],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "savereopen"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "savereopen"
+              },
+              "layout": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["offline", "1x", "online"],
+                "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "bypass": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,39}$"
+                    },
+                    "minItems": 1,
+                    "uniqueItems": true
+                  }
+                ]
+              },
+              "expect": {
+                "type": "string",
+                "enum": ["PASS", "FAIL", "SKIPPED", "INCOMPLETE", "REFUSED"]
+              },
+              "expectDetail": {
+                "type": "string",
+                "description": "regex (.NET, case sensitive) the outcome detail must match"
+              }
+            },
+            "required": ["id", "kind", "layout", "expect", "expectDetail"],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "instances"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "instances"
+              },
+              "plugins": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]{0,39}$"
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "cycles": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000
+              },
+              "warmup": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "play": {
+                "type": "boolean"
+              },
+              "maxHandleGrowth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "maxPrivateGrowthMB": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "expect": {
+                "type": "string",
+                "enum": ["PASS", "FAIL", "SKIPPED", "INCOMPLETE", "REFUSED"]
+              },
+              "expectDetail": {
+                "type": "string",
+                "description": "regex (.NET, case sensitive) the outcome detail must match"
+              }
+            },
+            "required": ["id", "kind", "expect", "expectDetail"],
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  }
+}

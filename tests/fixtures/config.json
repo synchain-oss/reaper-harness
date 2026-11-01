@@ -1,0 +1,42 @@
+{
+  "$schema": "../../schema/config.schema.json",
+  "schema": 1,
+  "name": "fixture",
+  "notes": "Self-test configuration: two stand-in plugins, a chain and a folder bus. The self-test runs it against a stand-in for REAPER.",
+  "plugins": {
+    "gain": { "bundle": "Fixture Gain.vst3" },
+    "bus": { "bundle": "Fixture Bus.vst3", "expectPdc": 0 }
+  },
+  "signal": { "seconds": 0.5, "seed": 7, "noiseDb": -24, "sine": { "hz": 440, "db": -30 } },
+  "limits": { "renderTimeoutSec": 30, "luaTimeoutSec": 30, "learnTimeoutSec": 30, "lockWaitSec": 60, "instances": { "cycles": 3, "warmup": 1 } },
+  "layouts": {
+    "chain": {
+      "tracks": [
+        { "name": "Voice", "source": true, "fx": [ { "plugin": "gain", "params": { "Gain": 0.5 } }, { "plugin": "bus" } ] }
+      ]
+    },
+    "bus": {
+      "tracks": [
+        { "name": "Bus", "source": false, "folder": true, "fx": [ { "plugin": "bus" } ] },
+        { "name": "Vox 1", "source": true, "parent": "Bus", "fx": [ { "plugin": "gain" } ] },
+        { "name": "Vox 2", "source": true, "parent": "Bus", "volume": 0.5, "fx": [ { "plugin": "gain", "params": { "Gain": { "normalized": 0.25, "display": "0.25" } } } ] }
+      ]
+    }
+  },
+  "scenarios": [
+    { "id": "chain", "kind": "render", "layout": "chain", "matrix": { "mode": ["offline", "1x"], "sr": [44100, 48000] } },
+    { "id": "chain-repeat", "kind": "render", "layout": "chain", "compare": "repeat" },
+    { "id": "chain-block", "kind": "render", "layout": "chain", "block": 64, "compare": { "block": 1024 } },
+    { "id": "chain-bypass", "kind": "render", "layout": "chain", "bypass": true },
+    { "id": "bus", "kind": "render", "layout": "bus", "maxDiffDb": -120, "notSilent": true, "peakMaxDb": 6 },
+    { "id": "bus-device", "kind": "device", "layout": "bus", "block": 1024 },
+    { "id": "bus-reopen", "kind": "savereopen", "layout": "bus", "bypass": ["bus"] },
+    { "id": "instances", "kind": "instances", "plugins": ["gain", "bus"] },
+    { "id": "ext-count", "kind": "fixture-count", "count": 3 }
+  ],
+  "negative": [
+    { "id": "neg-bus-is-not-chain", "kind": "render", "layout": "bus", "compare": { "layout": "chain" }, "expect": "FAIL", "expectDetail": "^identical=no lag=0 " },
+    { "id": "neg-ext-count", "kind": "fixture-count", "count": 0, "expect": "FAIL", "expectDetail": "^counted 0, expected at least 1$" }
+  ],
+  "extensions": { "modules": ["ext/FixtureExtension.psm1"], "lua": ["ext/fixture-steps.lua"] }
+}

@@ -16,26 +16,54 @@ your own REAPER setup.
   The harness refuses to start when that directory could be REAPER's default resource directory,
   ends only the processes it started itself, and checks before and after every round that the
   default resource directory has not changed.
+- **Tests the build you gave it.** Every round proves, from the module list of the REAPER process
+  and from REAPER's own `fx_ident`, that the plugin binaries loaded are the private copies of your
+  build and not an installed release with the same name.
+- **No silent passes.** Outcomes are PASS, FAIL, INCOMPLETE (no conclusion), SKIPPED or REFUSED;
+  INCOMPLETE never counts as PASS. Built-in negative cases prove in every round that the comparer,
+  the watchdog and the guards still work.
 - **Local only.** It drives an installed copy of REAPER 7 in a real desktop session; you need a
   REAPER licence under REAPER's own terms. It is not meant for hosted CI runners. Its self-test
   needs no REAPER and runs anywhere.
 
-## What is here so far
+## What it tests
 
-The safety base and the comparer: the guard for the private configuration directory, the process
-host that starts REAPER (watchdog, dialog handling, module list), the GUI locks and the WAV
-comparer, each with its self-test. The scenarios and the command that runs them come next.
-[docs/SAFETY.md](docs/SAFETY.md) describes what is guaranteed and why.
+| kind | |
+|---|---|
+| `render` | renders a layout (tracks, folders, FX chains, parameters set by name) and compares it with a dry render, a repeat render or a variant (another block size, render mode, bypass or layout): bit-identical, or within a residual, at an expected lag, with peak and silence checks |
+| `device` | the dummy device runs at the configured block size and sample rate; every FX is loaded, not offline, reports the expected latency and reads back its parameters |
+| `savereopen` | saving and reopening keeps every FX and parameter, and the reopened project renders bit-identically |
+| `instances` | adding and removing instances many times does not grow handles or memory beyond limits |
 
-Requirements: Windows 10 or 11, PowerShell 7.4+.
+Extensions add product-specific kinds and driver steps ([docs/EXTENDING.md](docs/EXTENDING.md)).
+
+## Quick start
+
+Requirements: Windows 10 or 11, PowerShell 7.4+, REAPER 7 (x64).
 
 ```powershell
-# a private configuration directory (never under %APPDATA%)
+# once: a private configuration directory (never under %APPDATA%)
 pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Init
 
-# the self-test (no REAPER needed)
+# check a configuration and the machine (never starts REAPER)
+pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Config my-plugin.json -PluginDir D:\build\VST3
+
+# run
+pwsh run.ps1 -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\build\VST3 -ResultDir D:\reaper-harness\results
+
+# the self-test of the harness itself (no REAPER needed)
 pwsh run.ps1 -SelfTest
 ```
+
+Exit codes: 0 PASS, 1 FAIL, 2 INCOMPLETE, 3 SKIPPED, 64 refused or usage error.
+
+## Documentation
+
+- [docs/USAGE.md](docs/USAGE.md): running it, options, exit codes
+- [docs/CONFIG.md](docs/CONFIG.md): the configuration file; `schema/config.schema.json` is its JSON Schema
+- [docs/SAFETY.md](docs/SAFETY.md): what it guarantees and why
+- [docs/RESULTS.md](docs/RESULTS.md): the result file
+- [docs/EXTENDING.md](docs/EXTENDING.md): extension modules and Lua steps
 
 REAPER is a trademark of Cockos Incorporated. This project is not affiliated with or endorsed by
 Cockos.

@@ -1,0 +1,49 @@
+{
+  "Name": "Fixture Bus",
+  "Version": "1.0.0",
+  "Factory Info": {
+    "Vendor": "Fixture Audio",
+    "URL": "",
+    "E-Mail": "",
+    "Flags": {
+      "Unicode": true,
+      "Classes Discardable": false,
+      "Component Non Discardable": false,
+    },
+  },
+  "Compatibility": {
+    "Classes": [
+    ],
+  },
+  "Classes": [
+    {
+      "CID": "0123456789ABCDEF0123456789ABCDEF",
+      "Category": "Audio Module Class",
+      "Name": "Fixture Bus",
+      "Vendor": "Fixture Audio",
+      "Version": "1.0.0",
+      "SDKVersion": "VST 3.7.12",
+      "Sub Categories": [
+        "Fx",
+      ],
+      "Class Flags": 1,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "FEDCBA9876543210FEDCBA9876543210",
+      "Category": "Component Controller Class",
+      "Name": "Fixture BusController",
+      "Vendor": "Fixture Audio",
+      "Version": "1.0.0",
+      "SDKVersion": "VST 3.7.12",
+      "Sub Categories": [
+      ],
+      "Class Flags": 0,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+  ],
+}
