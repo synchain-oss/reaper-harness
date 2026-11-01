@@ -1,0 +1,9 @@
+{
+  "total_count": 4,
+  "check_runs": [
+    { "id": 101, "name": "harness-gate", "status": "completed", "conclusion": "success", "head_sha": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72", "details_url": "https://github.com/synchain-oss/reaper-harness/actions/runs/5000000002/job/5000000021" },
+    { "id": 102, "name": "branch-gate", "status": "completed", "conclusion": "success", "head_sha": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72", "details_url": "https://github.com/synchain-oss/reaper-harness/actions/runs/5000000003/job/5000000031" },
+    { "id": 103, "name": "claude-pr-review", "status": "completed", "conclusion": "success", "head_sha": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72", "details_url": "https://github.com/synchain-oss/reaper-harness/actions/runs/5000000001/job/5000000011" },
+    { "id": 104, "name": "compliance", "status": "completed", "conclusion": "success", "head_sha": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72", "details_url": "https://github.com/synchain-oss/reaper-harness/actions/runs/5000000002/job/5000000022" }
+  ]
+}

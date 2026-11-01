@@ -1,0 +1,19 @@
+{
+  "number": 7,
+  "state": "open",
+  "draft": false,
+  "merged": false,
+  "title": "feat(example): add the example module",
+  "body": "## 做了什么\n加入示例模块。\n\n## 为什么\n演示维护者脚本的自测数据。\n\n## 怎么测的\n自测。\n\n## DCO\n- [x] 所有提交均已签名\n\nSigned-off-by: DLsnows <noreply@synchain.ca>\n",
+  "html_url": "https://github.com/synchain-oss/reaper-harness/pull/7",
+  "mergeable": true,
+  "mergeable_state": "clean",
+  "merge_commit_sha": null,
+  "user": { "login": "DLsnows", "type": "User" },
+  "head": {
+    "ref": "feat/example",
+    "sha": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72",
+    "repo": { "full_name": "synchain-oss/reaper-harness" }
+  },
+  "base": { "ref": "feature/v1", "sha": "9d1b7a5c3e2f40869b7a1c5d3e2f4086a9b7c1d5" }
+}

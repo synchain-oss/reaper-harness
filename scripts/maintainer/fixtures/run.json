@@ -1,0 +1,14 @@
+{
+  "id": 5000000001,
+  "name": "Claude PR Review",
+  "path": ".github/workflows/claude-review.yml",
+  "event": "pull_request",
+  "status": "completed",
+  "conclusion": "success",
+  "head_sha": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72",
+  "head_branch": "feat/example",
+  "run_started_at": "2026-11-01T10:00:00Z",
+  "created_at": "2026-11-01T10:00:00Z",
+  "updated_at": "2026-11-01T10:02:30Z",
+  "html_url": "https://github.com/synchain-oss/reaper-harness/actions/runs/5000000001"
+}
