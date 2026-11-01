@@ -772,6 +772,11 @@ export function selfTest() {
     t("--model missing", true, swap("args", "--model claude-opus-5-5\n", ""));
     t("disallowedTools without Bash", true, swap("args", `"${DENY}"`, `"${DENY.replace("Bash,", "")}"`));
     t("disallowedTools without the /proc rule", true, swap("args", ",Read(//proc/**)", ""));
+    // Every entry of the minimum deny list on its own. Written out here, not taken from MUST_DENY: an entry
+    // dropped from MUST_DENY must turn this red too
+    const minimum = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task"];
+    minimum.push("Read(./.git/**)", "Read(//proc/**)", "Read(//home/runner/work/_temp/**)");
+    for (const d of minimum) t(`deny list without ${d}`, true, swap("args", `"${DENY}"`, `"${DENY.split(",").filter((x) => x !== d).join(",")}"`));
     t("a Bash(...) allow rule", true, swap("args", "Read(//proc/**)", "Read(//proc/**),Bash(git:*)"));
     const second = `      - uses: anthropics/claude-code-action@${PIN} # v1.0.248\n      - name: Post`;
     t("two claude-code-action steps", true, throws(() => stepConfig(FIXTURE.replace("      - name: Post", second))));
@@ -795,7 +800,9 @@ export function selfTest() {
         false,
         !(line === rec.line && lines.length === 1 && lines[0] === rec.line && fs.readFileSync(sumFile, "utf8") === `${rec.line}\n`),
     );
-    t("posted record: log only without GITHUB_STEP_SUMMARY", false, !recordPosted(postedRecord("7", "abc"), { log: () => {}, summaryFile: "" }).includes("id=7 "));
+    const nl = "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb"; // sha256("abc\n")
+    t("posted record: the body is hashed as posted, trailing newline included", false, postedRecord("1", "abc\n").sha256 !== nl);
+    t("posted record: log only without GITHUB_STEP_SUMMARY", false,!recordPosted(postedRecord("7", "abc"), { log: () => {}, summaryFile: "" }).includes("id=7 "));
     cleanupTempDir(sumDir);
     return caseResult(cases);
 }

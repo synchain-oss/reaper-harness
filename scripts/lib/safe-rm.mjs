@@ -203,6 +203,12 @@ export function selfTestCases() {
         ["safe-rm: target elsewhere", true, fixed({ targetReal: path.join(tmp, "elsewhere") })],
         ["safe-rm: target is the root", true, fixed({ targetReal: root })],
         ["safe-rm: home directory", true, fixed({ targetReal: home })],
+        // The cases below put the danger exactly at the allowed location, so no later check can catch it instead
+        ["safe-rm: a malformed rel even when listed", true, fixed({ rel: [".."], allowed: [[".."]], targetReal: path.dirname(root), home: "" })],
+        ["safe-rm: the fixed directory is the home directory", true, fixed({ home: path.join(root, ".harness-review") })],
+        ["safe-rm: the fixed directory is an ancestor of the home directory", true, fixed({ home: path.join(root, ".harness-review", "u") })],
+        ["safe-rm: a drive root (no home directory to compare with)", true, dangerousReason(path.parse(tmp).root, "")],
+        ["safe-rm: a temp directory that is the home directory", true, temp({ home: path.join(tmp, "harness-x-1") })],
         ["safe-rm: temp directory made here", false, temp()],
         ["safe-rm: temp directory not made here", true, temp({ entry: undefined })],
         ["safe-rm: temp directory moved", true, temp({ real: path.join(root, "harness-x-1") })],

@@ -185,22 +185,25 @@ export function parseCommitList(text) {
     return list;
 }
 
-function readCommits({ range, json, expect }, cwd) {
-    if (json) {
-        const list = parseCommitList(fs.readFileSync(json, "utf8"));
-        // The list endpoint returns at most 250 commits, and fewer if only one page was fetched: compare with the PR
-        if (expect !== undefined && list.length !== Number(expect)) {
-            throw new Error(`the commit list has ${list.length} commits, the PR reports ${expect}`);
-        }
-        if (list.length < 1 || list.length >= 250) throw new Error(`${list.length} commits is outside 1-249`);
-        return list.map((c) => ({
-            sha: c.sha,
-            parents: c.parents.length,
-            author: c.commit.author,
-            committer: c.commit.committer,
-            message: c.commit.message,
-        }));
+/** A PR commit list as commits. expect: the commit count the PR reports (undefined: not compared). */
+export function commitsFromJson(text, expect) {
+    const list = parseCommitList(text);
+    // The list endpoint returns at most 250 commits, and fewer if only one page was fetched: compare with the PR
+    if (expect !== undefined && list.length !== Number(expect)) {
+        throw new Error(`the commit list has ${list.length} commits, the PR reports ${expect}`);
     }
+    if (list.length < 1 || list.length >= 250) throw new Error(`${list.length} commits is outside 1-249`);
+    return list.map((c) => ({
+        sha: c.sha,
+        parents: c.parents.length,
+        author: c.commit.author,
+        committer: c.commit.committer,
+        message: c.commit.message,
+    }));
+}
+
+function readCommits({ range, json, expect }, cwd) {
+    if (json) return commitsFromJson(fs.readFileSync(json, "utf8"), expect);
     const out = git(["log", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e", range], { cwd });
     return out
         .split("\x1e")
@@ -247,6 +250,7 @@ export function selfTest() {
     c("same: co-author trailer", true, commit(msg(j("Co-Authored", "-By: Someone <s@example.com>"), SIGNOFF)));
     c("same: co-author trailer with a blank before the colon", true, commit(msg(j("Co-authored", "-by : Someone <s@example.com>"), SIGNOFF)));
     c("same: co-author trailer indented", true, commit(msg(j(" Co-authored", "-by: Someone <s@example.com>"), SIGNOFF)));
+    c("same: co-author line outside the trailer block", true, commit(msg(j("Co-authored", "-by: Someone <s@example.com>"), "", SIGNOFF)));
     c("same: session trailer", true, commit(msg(j("Cla", "ude-Session: abc"), SIGNOFF)));
     c("same: generated-with line", true, commit(msg(j("Generated with Cla", "ude Code"), "", SIGNOFF)));
     c("same: AI email", true, commit(msg(j("see noreply@anthr", "opic.com"), "", SIGNOFF)));
@@ -264,6 +268,7 @@ export function selfTest() {
     c("dependabot", false, commit("ci(deps): bump x", { author: BOT, committer: WEB }));
     c("forged dependabot author", true, commit("ci(deps): bump x", { author: BOT }));
     c("dependabot messages are still scanned", true, commit(`ci(deps): bump x\n\n${OUTSIDER.email}`, { author: BOT, committer: WEB }));
+    c("fork: a dependabot-looking commit gets no exemption", true, commit("ci(deps): bump x", { author: BOT, committer: WEB }), "fork");
     const own = `Signed-off-by: ${OUTSIDER.name} <${OUTSIDER.email}>`;
     c("fork: real author email with own sign-off", false, commit(msg(own), { author: OUTSIDER, committer: OUTSIDER }), "fork");
     c("fork: sign-off does not match the author", true, commit(msg(SIGNOFF), { author: OUTSIDER, committer: OUTSIDER }), "fork");
@@ -312,6 +317,10 @@ export function selfTest() {
     throws("commit list: truncated JSON", () => parseCommitList(page("a").slice(0, -2)));
     throws("commit list: entry lacks fields", () => parseCommitList('[{"sha":"a"}]'));
     throws("commit list: trailing garbage", () => parseCommitList(`${page("a")} x`));
+    t("commit list: count equals the PR's", false, commitsFromJson(page("a", "b"), "2").length === 2 ? [] : ["x"]);
+    throws("commit list: count differs from the PR's", () => commitsFromJson(page("a", "b"), "3"));
+    throws("commit list: empty", () => commitsFromJson("[]"));
+    throws("commit list: 250 commits (the list endpoint's limit)", () => commitsFromJson(page(...Array.from({ length: 250 }, (_, i) => `s${i}`))));
     const botCommit = { author: BOT, committer: WEB };
     t("dependabot: author and committer both match", false, isDependabot(botCommit) ? [] : ["not recognized"]);
     t("dependabot: committer is not GitHub", true, isDependabot({ ...botCommit, committer: ME }) ? [] : ["x"]);

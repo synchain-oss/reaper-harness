@@ -78,11 +78,17 @@ function ghLogin(env) {
     return (run("gh", ["api", "user", "--jq", ".login"], { ...env, GH_TOKEN: token }).stdout || "").trim();
 }
 
+/** The output of `gitleaks version` must be exactly the pinned version (a leading v aside). */
+export function versionErrors(output, want) {
+    const have = (output || "").trim().replace(/^v/, "");
+    return have === want ? [] : [`gitleaks must be ${want} (.gitleaks-version), found ${have || "nothing"}`];
+}
+
 function gitleaksCheck(revArgs, cwd, env) {
     const bin = localSetting("HARNESS_GITLEAKS", "harness.gitleaks", { env, cwd }) || "gitleaks";
     const want = fs.readFileSync(path.join(ROOT, ".gitleaks-version"), "utf8").trim();
-    const have = (run(bin, ["version"], env).stdout || "").trim().replace(/^v/, "");
-    if (have !== want) return [`gitleaks must be ${want} (.gitleaks-version), found ${have || "nothing"}`];
+    const wrong = versionErrors(run(bin, ["version"], env).stdout, want);
+    if (wrong.length) return wrong;
     // gitleaks runs git log -p itself; external diff and textconv drivers would rewrite the patches
     const logOpts = [...revArgs, "--no-ext-diff", "--no-textconv"].join(" ");
     const r = spawnSync(bin, ["git", "--no-banner", "--no-color", "--redact", "-v", `--log-opts=${logOpts}`, "."], { cwd, env, encoding: "utf8" });
@@ -150,6 +156,10 @@ export function selfTest() {
     t("remote: DLsnows", false, checkRemote(url, () => "DLsnows"));
     t("remote: a local path needs no account", false, checkRemote("/tmp/x.git", () => ""));
     const z = "0".repeat(40);
+    const del = [["(delete)", z, "refs/heads/feat/x", "a".repeat(40)]];
+    const pushTo = (login) => prePush({ updates: del, remote: "origin", url, cwd: ROOT, env: {}, needles: [], login });
+    t("push: a GitHub remote checks the account", true, pushTo(() => "someone-else"));
+    t("push: a GitHub remote with the DLsnows account", false, pushTo(() => "DLsnows"));
     t("input: four fields", false, parseUpdates(`refs/heads/feat/x ${"a".repeat(40)} refs/heads/feat/x ${z}\n`).length ? [] : ["x"]);
     let threw = false;
     try {
@@ -158,6 +168,10 @@ export function selfTest() {
         threw = true;
     }
     cases.push({ label: "input: a malformed line fails", bad: true, passed: threw });
+    t("gitleaks: the pinned version", false, versionErrors("8.30.1\n", "8.30.1"));
+    t("gitleaks: the pinned version with a leading v", false, versionErrors("v8.30.1", "8.30.1"));
+    t("gitleaks: another version", true, versionErrors("8.30.0", "8.30.1"));
+    t("gitleaks: no output", true, versionErrors(undefined, "8.30.1"));
 
     // End to end through the real sh shell into a local bare repository. Bad commits are made in the temp repository
     // without hooks; the hook is attached only to the push.
@@ -181,10 +195,10 @@ export function selfTest() {
         cases.push({ label: `end to end: ${label}`, bad, passed: bad ? ok === null : ok !== null });
     };
     const signed = "\n\nSigned-off-by: DLsnows <noreply@synchain.ca>";
-    const commit = (file, text, msg, gitOpts = []) => {
+    const commit = (file, text, msg, gitOpts = [], commitOpts = []) => {
         repo.write(file, text);
         repo.git(["add", "."]);
-        repo.git([...gitOpts, "commit", "-q", "-m", msg]);
+        repo.git([...gitOpts, "commit", "-q", ...commitOpts, "-m", msg]);
     };
     const bad = (label, ...args) => {
         commit(...args);
@@ -210,14 +224,17 @@ export function selfTest() {
         bad("added content with a personal needle", "docs/d.md", `${FAKE_NEEDLE}\n`, `docs(test): smuggle${signed}`);
         bad("a new path with a card number (empty file: no +++ line)", j("docs/R", "H-01.md"), "", `docs(test): path${signed}`);
         bad("a message without sign-off", "docs/e.md", "x\n", "docs(test): unsigned");
-        bad("an author who is not the maintainer", "docs/f.md", "x\n", `docs(test): someone else${signed}`, other);
+        bad("an author who is not the maintainer", "docs/f.md", "x\n", `docs(test): someone else${signed}`, [], ["--author=Other <other@example.com>"]);
+        bad("a committer who is not the maintainer", "docs/f.md", "x\n", `docs(test): someone else${signed}`, other, [`--author=${MAINTAINER}`]);
         const leak = j("gh", "p_", "Zr8XcV2nQ7tLm4Kp9Ws6Yb3Hd5Fg1Jq0Ae2T");
         bad("gitleaks catches a credential", "src/g.txt", `auth = "${leak}"\n`, `docs(test): credential${signed}`);
         const allow = { HARNESS_ALLOW_TAG_PUSH: "1" };
         repo.git(["tag", "-a", "v0.0.1", "-m", "v0.0.1"]);
         push("an annotated tag with the switch", false, "refs/tags/v0.0.1", [], allow);
-        repo.git([...other, "tag", "-a", "v0.0.2", "-m", `release ${FAKE_NEEDLE}`]);
-        push("an annotated tag with a bad tagger and message", true, "refs/tags/v0.0.2", [], allow);
+        repo.git([...other, "tag", "-a", "v0.0.2", "-m", "v0.0.2"]);
+        push("an annotated tag by another tagger", true, "refs/tags/v0.0.2", [], allow);
+        repo.git(["tag", "-a", "v0.0.4", "-m", `release ${FAKE_NEEDLE}`]);
+        push("an annotated tag with a personal needle in its message", true, "refs/tags/v0.0.4", [], allow);
         commit("docs/h.md", "clean\n", `docs(test): not on the remote${signed}`);
         repo.git(["tag", "v0.0.3"]);
         push("a tag on a commit the remote lacks", true, "refs/tags/v0.0.3", [], allow);

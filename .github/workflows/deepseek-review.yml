@@ -4,10 +4,10 @@
 # reviews a PR once in place of claude-review. Manual trigger only, it never runs by itself: Actions -> DeepSeek PR
 # Review -> Run workflow -> enter the PR number. Never required; its comment carries no head mark and no
 # machine-readable footer and is not part of the merge criteria (they only take the claude-review summary).
-# Off by default, two switches must both be on: the workflow is disabled in the repository (disabled_manually), and
-# the job-level if is exactly vars.ENABLE_DEEPSEEK == 'true' (without that variable the job shows as skipped).
-# To enable: check the OpenCode Go balance -> gh workflow enable deepseek-review.yml -> gh variable set
-# ENABLE_DEEPSEEK -b true (both in synchain-oss/reaper-harness); switch both back off afterwards.
+# Off by default, and both conditions must hold for it to run: someone dispatches it by hand, and the job-level if,
+# exactly vars.ENABLE_DEEPSEEK == 'true', is met (without that variable the job shows as skipped).
+# To use it: check the OpenCode Go balance -> gh variable set ENABLE_DEEPSEEK -b true (in synchain-oss/reaper-harness)
+# -> dispatch; delete the variable afterwards.
 # The review skeleton (diff prefetch, symlink refusal, read-only tool limits, refusing fork PRs, posting the comment)
 # lives in the deepseek-review.yml of Synchain-oss/ci-workflows; this file only holds this repository's focus and
 # notes. Differences from claude-review: no rounds and no incremental review (no previous summary or disposition

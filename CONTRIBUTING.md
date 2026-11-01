@@ -44,8 +44,8 @@ All repository checks run on Node 22 (the exact version is in `.node-version`) w
 node --test "scripts/**/*.test.mjs"        # every self-test, plus the mutation check of the privacy rules
 node scripts/check-spdx.mjs                # SPDX header on every source file
 node scripts/check-workflows.mjs           # workflow hardening; runs actionlint when HARNESS_ACTIONLINT points at it
-node scripts/check-privacy.mjs --needles-file <your needle file>
-node scripts/check-commits.mjs commits --range origin/dev..HEAD --tier fork
+node scripts/check-privacy.mjs --needles-file <your needle file>     # or --needles ci-optional
+node scripts/check-commits.mjs commits --range origin/dev..HEAD --tier fork --needles ci-optional
 ```
 
 - Every check prints only positions and redacted fragments, and exits with 0 (pass), 1 (findings) or 64 (usage
@@ -53,8 +53,8 @@ node scripts/check-commits.mjs commits --range origin/dev..HEAD --tier fork
 - Every new source file carries the line `SPDX-License-Identifier: MIT` in a comment within its first five lines.
 - The personal-data scan (`check-privacy.mjs`) has generic rules for local paths, personal email addresses, host
   names, internal planning numbers and AI attribution. A needle file of your own (one string per line, never
-  committed) adds the personal strings that must not appear; contributors without one can rely on the generic rules
-  and the maintainer's CI.
+  committed) adds the personal strings that must not appear. Without one, pass `--needles ci-optional`: the scan runs
+  the generic rules only and says so; the maintainer's CI adds the rest.
 
 ## 5. Changes that will be rejected
 

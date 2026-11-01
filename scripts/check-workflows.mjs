@@ -480,6 +480,7 @@ export function selfTest() {
         ["workflow_run trigger", true, check(swap("on:\n  pull_request:", "on:\n  workflow_run:"))],
         ["job without timeout", true, check(swap("    timeout-minutes: 5\n", ""))],
         ["uses not pinned", true, check(swap(`@${PIN} # v7.0.1`, "@v7"))],
+        ["a tag ref with a version comment", true, check(swap(`@${PIN} # v7.0.1`, "@v7 # v7.0.1"))],
         ["pinned without a version comment", true, check(swap(" # v7.0.1", ""))],
         ["an action off the allow list", true, action("softprops/action-gh-release")],
         ["an owner-prefix look-alike", true, action("actions-x/checkout")],
@@ -503,6 +504,8 @@ export function selfTest() {
         // Constructs the reader cannot follow: the ones that could smuggle a uses past the checks
         ["a step written as a flow mapping", true, check(swap(checkout, "      - { uses: softprops/action-gh-release@v2 }"))],
         ["a quoted uses key", true, check(swap(checkout, '      - "uses": softprops/action-gh-release@main'))],
+        // The reader takes this line for a plain list item; only the uses count cross-check catches it
+        ["a uses key with a blank before the colon", true, check(swap(checkout, "      - uses : softprops/action-gh-release@v2"))],
         ["steps as a flow sequence", true, check(swap(`    steps:\n${checkout}`, "    steps: [{uses: softprops/action-gh-release@v2}]"))],
         ["a quoted if key on a required job", true, check(swap("    timeout-minutes: 5", `    timeout-minutes: 5\n    "if": x`))],
         ["an anchor", true, check(swap("    runs-on: ubuntu-latest", "    runs-on: &os ubuntu-latest"))],
@@ -555,6 +558,7 @@ export function selfTest() {
         ["claude-review without the 重点 section", true, rswap("claude", "## 重点（按优先级）", "重点：")],
         ["claude-review if ending in || true", true, rswap("claude", `      ${SAME_REPO[2]}`, `      ${SAME_REPO[2]} || true`)],
         ["claude-review if with an extra clause", true, rswap("claude", `      ${SAME_REPO[2]}`, `      ${SAME_REPO[2]} &&\n      github.actor != 'x'`)],
+        ["claude-review if repeating a clause", true, rswap("claude", `      ${SAME_REPO[2]}`, `      ${SAME_REPO[2]} &&\n      ${SAME_REPO[2]}`)],
         [
             "claude-review if wrapped in ${{ }} with other blanks",
             false,

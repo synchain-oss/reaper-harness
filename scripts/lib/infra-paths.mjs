@@ -85,7 +85,8 @@ export function selfTestCases() {
         ".pr_agent.toml",
         ".claude/settings.json",
     ];
-    const plain = ["run.ps1", "src/Guard.psm1", "lua/driver.lua", "docs/USAGE.md", "scripts/checker.mjs", "README.md", "tests/check-x.mjs"];
+    // scripts/check-x/y.mjs: * in scripts/check-*.mjs does not cross a directory
+    const plain = ["run.ps1", "src/Guard.psm1", "lua/driver.lua", "docs/USAGE.md", "scripts/checker.mjs", "README.md", "tests/check-x.mjs", "scripts/check-x/y.mjs"];
     const cases = [
         ...infra.map((p) => ({ label: `infra-paths: ${p} is infrastructure`, bad: true, passed: isInfraPath(p) })),
         ...plain.map((p) => ({ label: `infra-paths: ${p} is not infrastructure`, bad: false, passed: !isInfraPath(p) })),
@@ -94,6 +95,7 @@ export function selfTestCases() {
         cases.push({ label: `bot config: ${label}`, bad, passed: (botConfigErrors(files, allowed).length > 0) === bad });
     bot("a committed .pr_agent.toml", true, ["docs/.pr_agent.toml"]);
     bot("a committed .mcp.json", true, ["x/.mcp.json"]);
+    bot("a .mcp.json at the root (**/ matches the root too)", true, [".mcp.json"]);
     bot("a registered exemption", false, ["AGENTS.md"], ["agents.md"]);
     bot("ordinary files", false, ["README.md", "scripts/check-spdx.mjs"]);
     return cases;
