@@ -1,0 +1,7 @@
+# Local results, work directories and generated audio: never committed.
+/results/
+/work/
+*.wav
+*.rpp-bak
+.DS_Store
+node_modules/
