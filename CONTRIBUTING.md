@@ -112,6 +112,10 @@ not change; a new format would get a new version number.
   the comment ids it answers. Optional keys come in this order, separated by single spaces. The review bot only
   takes a `kind=disposition` comment as the disposition summary when it comes after the latest review summary, is
   not written by a bot account and its author has write access to the repository.
+- **Disposition summary.** A `kind=disposition` comment contains a Markdown table with the columns
+  `级别 | 位置 | 摘要 | 处置` (in Chinese, like the comments). The `处置` cell starts with one of `已修`, `修复`,
+  `采纳`, `不改`, `不采纳`, `挂账`, `暂不`, `维持`. A 【红旗】 or 【重要】 row whose `处置` starts with `不改`,
+  `不采纳`, `挂账`, `暂不` or `维持` needs a waiver recorded by the maintainer before the pull request is merged.
 - Text written by a model never carries these markers: before posting, the bot breaks up any `<!--` in the summary.
 
 ### 6.3 Merge criteria
