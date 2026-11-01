@@ -6,8 +6,8 @@
 #                 requests gitleaks and the privacy scan over BASE..HEAD; on pushes the same over the pushed
 #                 commits plus the commit check at the push tier
 #   harness-gate  needs every other job and runs with if: always(): any failure, cancellation or skip turns it red.
-#                 This is the check the merge criteria require, so a job added here only counts once it is in its needs
-#                 (check-workflows.mjs fails when one is left out).
+#                 This is the check the rulesets require (.github/required-checks.json), so a job added here only
+#                 counts once it is in its needs (check-workflows.mjs fails when one is left out).
 # Pull request commits are judged by branch-gate (DCO, identity, AI attribution, title and body); the commit
 # scans here are an after-the-fact alarm: pushed commits are already public through refs/pull. A finding means
 # closing the PR, deleting the branch and reopening from a fresh one.

@@ -209,9 +209,10 @@ jobs:
           #   the runner installation (credentials and diagnostic logs), the runner's _temp, dot files and dot directories at
           #   the top of the home directory. Known premise: the action's own public code below _actions is readable and holds
           #   no secret.
-          # - Re-check the deny list and the paths whenever the action or the runner image changes (the image is pinned in
-          #   runs-on, never *-latest, so a change is always an edit of this file); check-workflows.mjs keeps
-          #   the minimum (review-bot.mjs MUST_DENY).
+          # - Re-check the deny list and the paths whenever the action or the runner's OS release changes. runs-on pins the
+          #   OS release (never *-latest); GitHub still rolls out new images within it weekly, which keep the directory
+          #   layout. Moving to another release means editing runs-on here and re-checking this list.
+          #   check-workflows.mjs keeps the minimum (review-bot.mjs MUST_DENY).
           claude_args: |
             --model claude-opus-5-5
             --tools "Read,Glob,Grep"

@@ -3,8 +3,10 @@
 // Commit and pull request hygiene. The subcommands share one set of criteria; the commit-msg and
 // pre-push hooks call into this file as well:
 //   commits     --range <A..B> | --json <PR commit list> [--expect <n>]  [--tier same|fork|push]
+//               [--pr-author <login>]
 //               DCO, Signed-off-by as the only trailer, AI attribution, subject format, author and
-//               committer email
+//               committer email; dependabot's commits skip the subject, sign-off and identity rules only in
+//               a pull request dependabot opened (--pr-author) or in the push tier
 //   pr-text     title and body from --title / --body-file, else the PR_TITLE / PR_BODY environment
 //               variables; [--fork --author "Name <email>" | --commits-json <PR commit list>];
 //               privacy rules, AI attribution, the body's last line is the sign-off
@@ -32,6 +34,7 @@ const SAME_AUTHORS = ["noreply@synchain.ca", "140901583+dlsnows@users.noreply.gi
 const WEB_FLOW = "noreply@github.com";
 const COMMITTERS = ["noreply@synchain.ca", WEB_FLOW];
 const DEPENDABOT = "49699333+dependabot[bot]@users.noreply.github.com";
+const DEPENDABOT_LOGIN = "dependabot[bot]";
 export const SUBJECT =
     /^(?:feat|fix|docs|test|refactor|perf|ci|build|chore|style|revert|harden|release|merge)\([a-z0-9][a-z0-9/-]*\): \S/;
 const GIT_SUBJECT = /^(?:Merge (?:remote-tracking )?branch '[^']+'(?: of \S+)?(?: into \S+)?|Revert ".+")$/;
@@ -40,17 +43,26 @@ const SIGNOFF_LINE = /^\s*signed-off-by\s*:/i;
 const TRAILER = /^\s*[A-Za-z0-9][A-Za-z0-9-]*\s*:(?!\/\/)\s*\S/;
 const AI_TRAILER = new RegExp(j("^\\s*(?:co-authored", "-by|cla", "ude-session)\\s*:"), "i");
 
-/** Privacy and AI attribution: in the fork tier AI attribution only warns, and an outside author's own email in a sign-off is no leak. */
-function textFindings(text, { fork = false, personal = [], label = "" } = {}) {
+/**
+ * Privacy and AI attribution: in the fork tier AI attribution only warns (aiWarns), and an outside author's own
+ * email in a sign-off is no leak.
+ */
+function textFindings(text, { fork = false, aiWarns = fork, personal = [], label = "" } = {}) {
     const errors = [];
     const warns = [];
     const lines = text.split(/\r?\n/);
     for (const f of scan(text, {}, { personal })) {
         if (fork && f.rule.id === "personal-email" && SIGNOFF_LINE.test(lines[f.line - 1])) continue;
-        (fork && f.rule.group === "ai" ? warns : errors).push(`${label}line ${f.line} [${f.rule.id}] ${redact(f)}`);
+        (aiWarns && f.rule.group === "ai" ? warns : errors).push(`${label}line ${f.line} [${f.rule.id}] ${redact(f)}`);
     }
     return { errors, warns };
 }
+
+/**
+ * An AI attribution trailer on any line. git keeps lines starting with # when the message comes from -m, so a
+ * trailer written as a comment line counts too.
+ */
+export const hasAiTrailer = (lines) => lines.some((l) => AI_TRAILER.test(l.replace(/^\s*#+/, "")));
 
 /** Trailer lines of the last paragraph. As git does: all lines are trailers, or at least a quarter are and one is a sign-off. */
 function trailers(text) {
@@ -73,7 +85,7 @@ export function checkMessage(message, opts = {}) {
     const lines = text.split("\n");
     const subjectOk = merge || SUBJECT.test(lines[0]) || GIT_SUBJECT.test(lines[0]);
     if (!subjectOk) errors.push("the subject must be type(scope): description");
-    if (lines.some((l) => AI_TRAILER.test(l))) (fork ? warns : errors).push("AI attribution trailers are not allowed");
+    if (hasAiTrailer(lines)) (fork ? warns : errors).push("AI attribution trailers are not allowed");
     if (trailers(text).some((l) => !SIGNOFF_LINE.test(l))) (fork ? warns : errors).push("Signed-off-by is the only allowed trailer");
     if (merge) return { errors, warns };
     const signoffs = lines.filter((l) => SIGNOFF_LINE.test(l)).map((l) => l.trim());
@@ -94,12 +106,27 @@ export function checkMessage(message, opts = {}) {
 export const isDependabot = (c) =>
     c.author.email.toLowerCase() === DEPENDABOT && c.committer.email.toLowerCase() === WEB_FLOW;
 
-/** One commit: c = { sha, parents, author: {name, email}, committer: {name, email}, message }. */
-export function checkCommit(c, { tier = "same", personal = [] } = {}) {
+/**
+ * Whether a dependabot commit skips the subject, sign-off and identity rules. Author and committer emails can be
+ * set by anyone with push access, the login of a pull request's author cannot: in a pull request (tier same)
+ * only one dependabot opened counts. The push tier knows no pull request author and keeps the email pair; fork
+ * pull requests never qualify.
+ */
+export function dependabotExempt(c, { tier, prAuthor }) {
+    if (!isDependabot(c)) return false;
+    return tier === "push" || (tier === "same" && prAuthor === DEPENDABOT_LOGIN);
+}
+
+/** One commit: c = { sha, parents, author: {name, email}, committer: {name, email}, message }; prAuthor: the PR author's login. */
+export function checkCommit(c, { tier = "same", prAuthor, personal = [] } = {}) {
     const ae = c.author.email.toLowerCase();
     const ce = c.committer.email.toLowerCase();
-    // dependabot is exempt from the subject and sign-off rules only; the privacy rules still apply
-    if (isDependabot(c) && tier !== "fork") return textFindings(c.message, { fork: true, personal });
+    if (dependabotExempt(c, { tier, prAuthor })) {
+        // Only the subject, sign-off and identity rules are waived: privacy rules and AI attribution stay errors
+        const { errors } = textFindings(c.message, { fork: true, aiWarns: false, personal });
+        if (hasAiTrailer(c.message.split(/\r?\n/))) errors.push("AI attribution trailers are not allowed");
+        return { errors, warns: [] };
+    }
     const errors = [];
     if (tier === "same" && !SAME_AUTHORS.includes(ae)) errors.push("the author email is not on the same-repository allow list");
     if (tier !== "fork" && !COMMITTERS.includes(ce)) errors.push("the committer email is not on the allow list");
@@ -233,7 +260,7 @@ const apiCommit = (sha) => ({ sha, parents: [{}], commit: { author: ME, committe
 export function selfTest() {
     const cases = [];
     const t = (label, bad, errors) => cases.push({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 });
-    const c = (label, bad, x, tier) => t(label, bad, checkCommit(x, { tier }).errors);
+    const c = (label, bad, x, tier, prAuthor) => t(label, bad, checkCommit(x, { tier, prAuthor }).errors);
     const throws = (label, fn) => {
         let threw = false;
         try {
@@ -251,6 +278,10 @@ export function selfTest() {
     c("same: co-author trailer with a blank before the colon", true, commit(msg(j("Co-authored", "-by : Someone <s@example.com>"), SIGNOFF)));
     c("same: co-author trailer indented", true, commit(msg(j(" Co-authored", "-by: Someone <s@example.com>"), SIGNOFF)));
     c("same: co-author line outside the trailer block", true, commit(msg(j("Co-authored", "-by: Someone <s@example.com>"), "", SIGNOFF)));
+    // git commit -m keeps lines starting with #
+    c("same: co-author trailer written as a # line", true, commit(msg(j("# Co-authored", "-by: Someone <s@example.com>"), "", SIGNOFF)));
+    c("same: co-author trailer after ## and blanks", true, commit(msg(j("  ##  Co-authored", "-by: Someone <s@example.com>"), "", SIGNOFF)));
+    c("same: an ordinary # line", false, commit(msg("# 1 of 2: see the issue", "", SIGNOFF)));
     c("same: session trailer", true, commit(msg(j("Cla", "ude-Session: abc"), SIGNOFF)));
     c("same: generated-with line", true, commit(msg(j("Generated with Cla", "ude Code"), "", SIGNOFF)));
     c("same: AI email", true, commit(msg(j("see noreply@anthr", "opic.com"), "", SIGNOFF)));
@@ -265,10 +296,19 @@ export function selfTest() {
     const merge = "Merge remote-tracking branch 'origin/feature/v1' into feat/x";
     c("same: git's default merge subject", false, commit(`${merge}\n\n${SIGNOFF}`));
     c("same: merge commit needs no sign-off", false, commit("Merge pull request #3 from synchain-oss/feat/x", { parents: 2 }));
-    c("dependabot", false, commit("ci(deps): bump x", { author: BOT, committer: WEB }));
-    c("forged dependabot author", true, commit("ci(deps): bump x", { author: BOT }));
-    c("dependabot messages are still scanned", true, commit(`ci(deps): bump x\n\n${OUTSIDER.email}`, { author: BOT, committer: WEB }));
-    c("fork: a dependabot-looking commit gets no exemption", true, commit("ci(deps): bump x", { author: BOT, committer: WEB }), "fork");
+    // dependabot: the exemption needs a pull request dependabot opened (or the push tier); AI attribution stays an error
+    const bump = (...body) => commit(["Bump x from 1.0 to 1.1", "", ...body, "", "Signed-off-by: dependabot[bot] <support@github.com>"].join("\n"), { author: BOT, committer: WEB });
+    c("dependabot: its own pull request", false, bump("Bumps x."), "same", "dependabot[bot]");
+    c("dependabot: push tier", false, bump("Bumps x."), "push");
+    c("dependabot: a dependabot-looking commit in a PR someone else opened", true, bump("Bumps x."), "same", "DLsnows");
+    c("dependabot: no PR author given", true, bump("Bumps x."), "same");
+    c("dependabot: forged author (committer is not GitHub)", true, { ...bump("Bumps x."), committer: ME }, "same", "dependabot[bot]");
+    c("dependabot: messages are still scanned", true, bump(OUTSIDER.email), "same", "dependabot[bot]");
+    c("dependabot: an AI trailer is an error", true, bump(j("Co-authored", "-by: Someone <s@example.com>")), "same", "dependabot[bot]");
+    c("dependabot: an AI trailer as a # line is an error", true, bump(j("# Co-authored", "-by: Someone <s@example.com>")), "same", "dependabot[bot]");
+    c("dependabot: an AI attribution line is an error", true, bump(j("Generated with Cla", "ude Code")), "same", "dependabot[bot]");
+    c("dependabot: push tier with an AI trailer", true, bump(j("Co-authored", "-by: Someone <s@example.com>")), "push");
+    c("fork: a dependabot-looking commit gets no exemption", true, bump("Bumps x."), "fork", "dependabot[bot]");
     const own = `Signed-off-by: ${OUTSIDER.name} <${OUTSIDER.email}>`;
     c("fork: real author email with own sign-off", false, commit(msg(own), { author: OUTSIDER, committer: OUTSIDER }), "fork");
     c("fork: sign-off does not match the author", true, commit(msg(SIGNOFF), { author: OUTSIDER, committer: OUTSIDER }), "fork");
@@ -354,7 +394,7 @@ function main(argv) {
         const needleList = personal();
         const list = readCommits({ range: opt("--range"), json: opt("--json"), expect: opt("--expect") }, cwd);
         for (const c of list) {
-            const r = checkCommit(c, { tier, personal: needleList });
+            const r = checkCommit(c, { tier, prAuthor: opt("--pr-author"), personal: needleList });
             errors.push(...r.errors.map((e) => `${c.sha.slice(0, 7)} ${e}`));
             warns.push(...r.warns.map((w) => `${c.sha.slice(0, 7)} ${w}`));
         }

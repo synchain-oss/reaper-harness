@@ -7,8 +7,9 @@
 //   - no pull_request_target and no workflow_run anywhere
 //   - every workflow has top-level permissions (never read-all / write-all) and concurrency; every job has
 //     timeout-minutes (a job calling a reusable workflow cannot, the called workflow sets its own)
-//   - runner images are pinned: no ubuntu-latest, windows-latest or macos-latest anywhere in a job (the review
-//     bot's deny list depends on paths inside the image, and *-latest moves to a new image without notice)
+//   - runner images are pinned: no ubuntu-latest, windows-latest or macos-latest in a job's runs-on or strategy
+//     (the review bot's deny list depends on paths inside the image, and *-latest moves to a new OS release
+//     without notice)
 //   - a job calling a reusable workflow: explicit job-level permissions (read scopes plus the two comment
 //     write scopes only), secrets passed one by one (no inherit), no expressions in with except inputs.pr_number
 //   - no ${{ }} inside run: untrusted text (titles, bodies, branch names, comments, dispatch inputs) only
@@ -68,6 +69,14 @@ const ALWAYS = /^(?:\$\{\{\s*)?always\(\)(?:\s*\}\})?$/;
 /** A moving runner label: it switches to a new image without notice. Pin the image instead (ubuntu-24.04, windows-2025). */
 const LATEST = /\b(?:ubuntu|windows|macos)-latest\b/i;
 
+/** A job-level key line and every line nested below it (block scalar bodies are read through valueText). */
+function jobSubtree(job, key) {
+    const at = job.own.findIndex((l) => l.indent === 4 && l.key === key);
+    if (at < 0) return [];
+    const end = job.own.findIndex((l, i) => i > at && l.indent <= 4);
+    return job.own.slice(at, end < 0 ? job.own.length : end);
+}
+
 /** Hardening problems of one workflow. required: the job names that must follow the required-job rules. */
 export function inspectWorkflow(file, text, { required = new Set(), allow = ALLOWED_ACTIONS } = {}) {
     const errors = [];
@@ -94,9 +103,10 @@ export function inspectWorkflow(file, text, { required = new Set(), allow = ALLO
         if (!job.get("timeout-minutes") && !job.get("uses")) err(job.no, `job ${job.id} lacks timeout-minutes`);
         const jobPerm = job.get("permissions");
         if (jobPerm && /^(?:read|write)-all$/.test(unquote(jobPerm.value))) err(jobPerm.no, `job ${job.id}: permissions must list minimal scopes`);
-        // Every value of the job counts, not just a one-line runs-on: a list, a block scalar or a matrix entry runs the job too
-        for (const l of job.own) {
-            const text = l.key === "runs-on" ? valueText(lines, l) : l.value;
+        // The runner comes from runs-on and the matrix in strategy (a list, a block scalar or an include entry as well);
+        // steps never name a runner, so a step name or a run script mentioning a label is no finding
+        for (const l of [...jobSubtree(job, "runs-on"), ...jobSubtree(job, "strategy")]) {
+            const text = valueText(lines, l);
             if (LATEST.test(text)) err(l.no, `job ${job.id}: pin the runner image instead of ${text.match(LATEST)[0]}`);
         }
         if (job.get("uses")) {
@@ -495,7 +505,12 @@ export function selfTest() {
         ["*-latest as a block list item", true, check(swap(runsOn, "    runs-on:\n      - ubuntu-latest"))],
         ["*-latest in a block scalar", true, check(swap(runsOn, "    runs-on: >-\n      ubuntu-latest"))],
         ["*-latest from a matrix", true, check(swap(runsOn, "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n    runs-on: ${{ matrix.os }}"))],
+        ["*-latest in a matrix block scalar", true, check(swap(runsOn, "    strategy:\n      matrix:\n        os: >-\n          ubuntu-latest\n    runs-on: ${{ matrix.os }}"))],
+        ["*-latest in a matrix include entry", true, check(swap(runsOn, "    strategy:\n      matrix:\n        include:\n          - os: windows-latest\n    runs-on: ${{ matrix.os }}"))],
         ["a pinned Windows image", false, check(swap(runsOn, "    runs-on: windows-2025"))],
+        ["a pinned matrix", false, check(swap(runsOn, "    strategy:\n      matrix:\n        os: [ubuntu-24.04, windows-2025]\n    runs-on: ${{ matrix.os }}"))],
+        ["a one-line run mentioning *-latest is no runner", false, check(swap("      - name: Run\n", "      - run: echo ubuntu-latest\n      - name: Run\n"))],
+        ["a step name mentioning *-latest is no runner", false, check(swap("      - name: Run\n", "      - name: Test on ubuntu-latest\n        run: echo test\n      - name: Run\n"))],
         [
             "*-latest in a comment or a run script is no runner",
             false,

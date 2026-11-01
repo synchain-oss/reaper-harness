@@ -2,15 +2,16 @@
 //
 // Criteria of the commit-msg hook (the shell is commit-msg next to this file). Two rules stricter than the
 // same-repository tier of check-commits: author and committer are both the maintainer identity, and there
-// is exactly one sign-off. The message goes through the generic rules and the personal needles, and so do
-// the comment lines git puts into the editor (with -m, lines starting with # stay in the history).
+// is exactly one sign-off. The message goes through the generic rules, the personal needles and the AI
+// trailer rule, and so do the comment lines git puts into the editor (with -m, lines starting with # stay
+// in the history).
 //   node scripts/hooks/commit-msg.mjs <message file>
 //   node scripts/hooks/commit-msg.mjs --self-test    pure fixtures, plus commits through the real hook in a temp repository
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { MAINTAINER, SIGNOFF, checkMessage } from "../check-commits.mjs";
+import { MAINTAINER, SIGNOFF, checkMessage, hasAiTrailer } from "../check-commits.mjs";
 import { FAKE_NEEDLE, loadPersonalNeedles, redact, scan } from "../lib/privacy-needles.mjs";
 import { assertNodeVersion, caseResult, git, isMain, j, reportSelfTest, tempRepo } from "../lib/check-kit.mjs";
 
@@ -33,6 +34,7 @@ export function checkCommitMsg(raw, { authorIdent, committerIdent, personal = []
     const message = `${kept.join("\n").trim()}\n`;
     errors.push(...checkMessage(message, { exactlyOne: true, personal }).errors);
     for (const f of scan(comments.join("\n"), {}, { personal })) errors.push(`comment line [${f.rule.id}] ${redact(f)}`);
+    if (hasAiTrailer(comments)) errors.push("comment line: AI attribution trailers are not allowed");
     return errors;
 }
 
@@ -57,6 +59,7 @@ export function selfTest() {
     t("card number", true, `ci(hooks): ${j("R", "N01")} wrap-up\n\n${SIGNOFF}\n`);
     t("card number in a comment line", true, `${good}# On branch ${j("feat/r", "h-01")}\n`);
     t("personal needle", true, `ci(hooks): add hooks\n\n${FAKE_NEEDLE}\n\n${SIGNOFF}\n`);
+    t("AI attribution trailer in a comment line (kept by -m)", true, `${good}# ${j("Co-authored", "-by: Someone <s@example.com>")}\n`);
     t("AI attribution trailer", true, `ci(hooks): add hooks\n\n${j("Co-Authored", "-By: Cla", "ude <x@example.com>")}\n${SIGNOFF}\n`);
 
     // End to end: commits in a temp repository through the real sh shell and this file
