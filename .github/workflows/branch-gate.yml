@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: MIT
+#
+# Branch and PR hygiene (required check: branch-gate). The criteria all live in scripts/check-commits.mjs; this file
+# only takes data from the event and hands it to the script through env: PR titles, bodies and branch names are
+# untrusted text and are never interpolated into run.
+#   - branch names per base: feature/* takes this repository's feat/<slug>, dev takes feature/* and dependabot/*,
+#     prod takes dev only; no private numbers or personal needles in the name (a fork may only target dev and must
+#     not use a long-lived branch name)
+#   - commits: DCO, Signed-off-by as the only trailer, AI attribution, subject format, author and committer email;
+#     the commit list is checked against the commit count the PR reports
+#   - PR title and body: privacy rules, AI attribution, the body's last line is the sign-off
+#   - with base prod: prod has no non-merge commit that dev lacks
+# Same-repository PRs use the personal needles of the secret (--needles ci, missing means red); fork PRs cannot read
+# the secret and run the generic rules only (ci-optional).
+name: Branch Gate
+
+on:
+  pull_request:
+    branches: [dev, prod, "feature/**"]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  branch-gate:
+    name: branch-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+      # dependabot's PRs count as same-repository too, but runs it triggers cannot read the secret and run the generic
+      # rules only; the PR author's login cannot be forged
+      DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+      NEEDLES: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && 'ci' || 'ci-optional' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Self-test
+        run: node scripts/check-commits.mjs --self-test
+      - name: Branch name
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: |
+          fork=()
+          if [ "$SAME_REPO" != true ]; then fork=(--fork); fi
+          node scripts/check-commits.mjs branch --head "$HEAD_REF" --base "$BASE_REF" "${fork[@]}" --needles "$NEEDLES"
+      - name: Commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" > "$RUNNER_TEMP/commits.json"
+          if [ "$SAME_REPO" = true ]; then tier=same; else tier=fork; fi
+          node scripts/check-commits.mjs commits --json "$RUNNER_TEMP/commits.json" --expect "$PR_COMMITS" \
+            --tier "$tier" --needles "$NEEDLES"
+          # dependabot's PR title and body are upstream release notes without a sign-off line: the body check is
+          # skipped only when the PR author is dependabot and every commit's author and committer match it (the same
+          # criterion check-commits uses to let dependabot commits through); a commit from anyone else means the
+          # usual check
+          if [ "$DEPENDABOT" = true ] && node scripts/check-commits.mjs dependabot --json "$RUNNER_TEMP/commits.json"; then
+            echo "DEPENDABOT_VERIFIED=true" >> "$GITHUB_ENV"
+          fi
+      - name: PR title and body
+        if: env.DEPENDABOT_VERIFIED != 'true'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: |
+          fork=()
+          if [ "$SAME_REPO" != true ]; then fork=(--fork --commits-json "$RUNNER_TEMP/commits.json"); fi
+          node scripts/check-commits.mjs pr-text "${fork[@]}" --needles "$NEEDLES"
+      - name: prod only takes what dev already has
+        if: github.base_ref == 'prod'
+        run: |
+          set -euo pipefail
+          extra=$(git rev-list --no-merges origin/prod --not origin/dev | head -n 5)
+          if [ -n "$extra" ]; then
+            echo "::error::prod has non-merge commits that dev lacks: $extra"
+            exit 1
+          fi

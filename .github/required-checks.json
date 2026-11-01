@@ -1,0 +1,20 @@
+{
+  "feature-lines": {
+    "ruleset": "feature-lines",
+    "status": "pending",
+    "strict": false,
+    "contexts": ["branch-gate", "harness-gate"]
+  },
+  "dev": {
+    "ruleset": "dev",
+    "status": "pending",
+    "strict": true,
+    "contexts": ["branch-gate", "harness-gate"]
+  },
+  "prod": {
+    "ruleset": "prod",
+    "status": "pending",
+    "strict": false,
+    "contexts": ["branch-gate", "harness-gate"]
+  }
+}

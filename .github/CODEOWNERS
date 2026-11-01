@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: MIT
+#
+# Advisory only: the rulesets require no approval, so CODEOWNERS is no merge protection. Merge protection lives in
+# .github/rulesets/ and the required checks (.github/required-checks.json).
+# Later rules win; the paths listed separately need extra care: CI, the review bot, the check scripts and the hooks.
+* @DLsnows
+/.github/ @DLsnows
+/scripts/ @DLsnows
