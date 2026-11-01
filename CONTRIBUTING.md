@@ -50,7 +50,9 @@ node scripts/check-commits.mjs commits --range origin/dev..HEAD --tier fork --ne
 
 - Every check prints only positions and redacted fragments, and exits with 0 (pass), 1 (findings) or 64 (usage
   error). Each one has a `--self-test` with bad and good cases; removing any criterion must turn a case red.
-- Every new source file carries the line `SPDX-License-Identifier: MIT` in a comment within its first five lines.
+- Every new code, script, workflow and hook file carries the line `SPDX-License-Identifier: MIT` in a comment within
+  its first five lines (`scripts/check-spdx.mjs` has the exact list of file types). Markdown and JSON files need no
+  header: `LICENSE` covers the whole repository.
 - The personal-data scan (`check-privacy.mjs`) has generic rules for local paths, personal email addresses, host
   names, internal planning numbers and AI attribution. A needle file of your own (one string per line, never
   committed) adds the personal strings that must not appear. Without one, pass `--needles ci-optional`: the scan runs
@@ -81,7 +83,8 @@ node scripts/check-commits.mjs commits --range origin/dev..HEAD --tier fork --ne
   comment gets an answer.
 - The reviewer reads its material from `.harness-review/` (written by `review-bot.mjs prepare`: `round.json`,
   `pr.diff`, `pr.json`, and from round 2 on `incremental.diff`, `previous-review.md` and `disposition.md`). From
-  round 2 on it only reviews what changed since the previously reviewed head, after reading the disposition summary.
+  round 2 on it only reviews what changed since the head of the latest usable summary (one whose last line is the
+  footer), after reading the disposition summary posted after it; with no usable summary yet it reviews everything.
 - Grades: 【红旗】 (red flag, blocks the merge), 【重要】 (important), 【建议】 (suggestion). Red flags and important
   findings are only given for problems the pull request introduces.
 
@@ -122,10 +125,13 @@ not change; a new format would get a new version number.
 
 A pull request into `feature/**` is merged (squash) when all of these hold on its current head:
 
-- the required checks `branch-gate` and `harness-gate` passed;
+- the checks `branch-gate` and `harness-gate` passed;
 - `claude-pr-review` succeeded, and the latest review summary's head mark names the current head and its footer
   reads `red=0 important=0` (a red flag or important finding is either fixed or explicitly waived by the maintainer);
 - every comment, review, review thread and bot finding has been answered.
+
+The maintainer checks these on every merge. Which checks a GitHub ruleset also enforces is recorded in
+`.github/required-checks.json`: a `pending` entry is not enabled on its ruleset yet.
 
 Pull requests that change the review and merge machinery itself (the paths in `scripts/lib/infra-paths.mjs`) are
 merged by the maintainer only. `dev` and `prod` are only merged by the maintainer; tags are only created by the

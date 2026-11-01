@@ -6,7 +6,7 @@
 #                 requests gitleaks and the privacy scan over BASE..HEAD; on pushes the same over the pushed
 #                 commits plus the commit check at the push tier
 #   harness-gate  needs every other job and runs with if: always(): any failure, cancellation or skip turns it red.
-#                 This is the job the rulesets require, so a job added here only counts once it is in its needs
+#                 This is the check the merge criteria require, so a job added here only counts once it is in its needs
 #                 (check-workflows.mjs fails when one is left out).
 # Pull request commits are judged by branch-gate (DCO, identity, AI attribution, title and body); the commit
 # scans here are an after-the-fact alarm: pushed commits are already public through refs/pull. A finding means
@@ -121,7 +121,7 @@ jobs:
           node scripts/check-privacy.mjs --commits --no-messages --needles "$NEEDLES" "$BEFORE..$AFTER"
           node scripts/check-commits.mjs commits --range "$BEFORE..$AFTER" --tier push --needles "$NEEDLES"
 
-  # Hook-in point for the Windows self-test job of the tool itself (windows-latest, the PowerShell and comparer
+  # Hook-in point for the Windows self-test job of the tool itself (windows-2025, the PowerShell and comparer
   # self-tests, still no REAPER): add the job above this line and its id to the needs of harness-gate.
   harness-gate:
     name: harness-gate

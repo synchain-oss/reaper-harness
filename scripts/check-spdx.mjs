@@ -2,6 +2,8 @@
 //
 // SPDX header gate: every tracked source file that can carry a comment has the MIT SPDX licence
 // identifier line within its first five lines, and no other SPDX licence identifier there.
+// Markdown and JSON are not checked: JSON has no comment syntax, a header in the pull request template would be
+// copied into every pull request description, and LICENSE covers the whole repository anyway.
 //   node scripts/check-spdx.mjs [--self-test]
 // Exit codes: 0 pass, 1 files without the header (or no candidate files at all), 64 usage error.
 

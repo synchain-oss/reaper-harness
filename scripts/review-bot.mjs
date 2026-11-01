@@ -5,10 +5,10 @@
 //            no shell, only Read / Glob / Grep). Every diff is pinned to --base...--head through the
 //            compare API, the same pair of commits as the checked-out workspace and the head mark in the
 //            comment: pr.diff (per-file patches plus DIFF_PARTIAL when the full diff is unavailable),
-//            pr.json, round.json; from round 2 on also the previous summary previous-review.md, the
-//            maintainer's disposition summary after it disposition.md, and incremental.diff from the
-//            previously reviewed head to this head (only when it can safely serve as an increment, see
-//            incrementalPlan).
+//            pr.json, round.json; from round 2 on also the previous usable summary previous-review.md
+//            (one that ends with the footer), the maintainer's disposition summary after it
+//            disposition.md, and incremental.diff from the head that summary reviewed to this head (only
+//            when it can safely serve as an increment, see incrementalPlan).
 //   post     takes the model's final reply and posts it as one PR comment: the first line is the hidden
 //            head mark, the machine-readable footer is always the last line, exactly once, and its three
 //            numbers equal the item counts of the 【红旗】【重要】【建议】 sections. On a mismatch, a missing
@@ -204,8 +204,13 @@ export function sliceChars(s, n) {
 /** The comment author's author_association is a repository member. Offline default only, see findPrevious. */
 export const memberAssociation = (c) => ["OWNER", "MEMBER", "COLLABORATOR"].includes(c.author_association);
 
+/** Whether a summary is usable: its last line is the machine-readable footer (post leaves it off an unusable one). */
+export const hasFooter = (body) => FOOTER.test((body || "").trimEnd().split("\n").at(-1));
+
 /**
- * The previous round: the latest review summary posted by github-actions[bot] for the same bot. A
+ * The previous round: the latest usable review summary posted by github-actions[bot] for the same bot.
+ * An unusable summary (posted without a footer) never had its findings counted, so it is no starting point:
+ * an increment on top of it could pass the merge criteria without those findings; rounds still counts it. A
  * disposition summary must come after that summary (earlier ones belong to an earlier round), must not be
  * posted by a bot and its author must pass trusted (anyone can forge the mark). prepare passes a trusted
  * that checks the author's actual permission on the repository (write or above), not author_association:
@@ -214,7 +219,7 @@ export const memberAssociation = (c) => ["OWNER", "MEMBER", "COLLABORATOR"].incl
  */
 export function findPrevious(comments, bot, trusted = memberAssociation) {
     const isReview = (c) => c.user?.login === "github-actions[bot]" && headMark(c.body)?.bot === bot;
-    const at = comments.findLastIndex(isReview);
+    const at = comments.findLastIndex((c) => isReview(c) && hasFooter(c.body));
     const last = at >= 0 ? comments[at] : null;
     const disposition = last
         ? comments
@@ -459,7 +464,8 @@ function prepare({ pr, repo, base, head, bot, out }) {
     const prev = findPrevious(comments, bot, canWrite(repo));
     if (prev.previousReview) write("previous-review.md", prev.previousReview);
     if (prev.disposition) write("disposition.md", prev.disposition);
-    let plan = { incremental: false, reason: prev.previousHead ? "上一轮审的就是当前 head" : "第 1 轮" };
+    const fresh = prev.rounds ? "之前的总结都不可用（没有机读尾注），本轮全量审" : "第 1 轮";
+    let plan = { incremental: false, reason: prev.previousHead ? "上一轮审的就是当前 head" : fresh };
     if (prev.previousHead && prev.previousHead !== head) plan = incrementalPlan(compareJson(repo, prev.previousHead, head));
     if (plan.incremental) write("incremental.diff", plan.patch);
     if (plan.partial) write("INCREMENTAL_PARTIAL", `incremental diff lists only the first ${COMPARE_FILES} files\n`);
@@ -532,7 +538,7 @@ const DENY = MUST_DENY.join(",");
 export const FIXTURE = [
     "jobs:",
     `  ${JOB}:`,
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    steps:",
     "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
     `      - uses: anthropics/claude-code-action@${PIN} # v1.0.248`,
@@ -592,7 +598,7 @@ export function selfTest() {
     t("two identical footers merge into one", false, !ok(`${S([], ["y"], [])}\n${F(0, 1, 0)}\n${F(0, 1, 0)}`));
     t("a footer mentioned inline does not count", true, !ok(`${S([], [], [])}\n例如 ${F(0, 0, 0)} 这样`));
     t("the footer template with N does not count", true, !ok(`${S([], [], [])}\n${FOOTER_TEMPLATE}`));
-    t("the old repository's footer does not count", true, !ok(`${S([], [], [])}\n${F(0, 0, 0).replace("harness-", "rinne-")}`));
+    t("another repository's footer does not count", true, !ok(`${S([], [], [])}\n${F(0, 0, 0).replace("harness-", "other-")}`));
     t("a 红旗 listed but footer says red=0", true, !ok(`${S(["run.ps1:1 写了默认资源目录"], [], [])}\n${F(0, 0, 0)}`));
     t("重要 under-reported", true, !ok(`${S([], ["a", "b"], [])}\n${F(0, 1, 0)}`));
     t("建议 over-reported", true, !ok(`${S([], [], ["a"])}\n${F(0, 0, 2)}`));
@@ -674,7 +680,7 @@ export function selfTest() {
     t("defang: an indented link reference is broken up too", false, /^\s*\[pr-agent:[^\]]+\]:/.test(defang(`  ${ref}`)));
 
     // The previous round and the disposition summary
-    const mark = (sha, bot) => `<!-- harness-review-head sha=${sha} bot=${bot} -->\n总结`;
+    const mark = (sha, bot, footer = F(0, 0, 0)) => `<!-- harness-review-head sha=${sha} bot=${bot} -->\n总结\n\n${footer}`;
     const actions = { login: "github-actions[bot]" };
     const member = { user: { login: "maintainer" }, author_association: "MEMBER" };
     const comments = [
@@ -696,28 +702,51 @@ export function selfTest() {
     t("a mark not at a line start (quoted, inline) does not count", true, quoted.disposition === null);
     const otherKind = findPrevious([comments[1], { ...member, body: disposition("review").replace("disposition", "reply") }], "claude");
     t("kind=reply is no disposition summary", true, otherKind.disposition === null);
-    const oldRepo = findPrevious([comments[1], { ...member, body: disposition("review").replace("harness-agent", "rinne-agent") }], "claude");
-    t("the old repository's agent mark does not count", true, oldRepo.disposition === null);
+    const otherRepo = findPrevious([comments[1], { ...member, body: disposition("review").replace("harness-agent", "other-agent") }], "claude");
+    t("another repository's agent mark does not count", true, otherRepo.disposition === null);
     t("round 1 has no previous round", false, findPrevious([], "claude").previousHead !== null);
     // pr-agent and the manual DeepSeek review also comment as github-actions[bot]: a model-written mark mid-text is no round
     const midMark = { user: actions, body: `## PR Reviewer Guide\n${mark("e".repeat(40), "claude")}` };
     const notRound = findPrevious([comments[1], midMark], "claude");
     t("a head mark mid-text is no previous round", true, notRound.previousHead === "b".repeat(40) && notRound.rounds === 1);
-    // The case that once slipped through: the maintainer's organisation membership is private, GITHUB_TOKEN
-    // reads author_association NONE; the head in the mark is the new head after the push
+    // An unusable summary (posted without a footer) is no starting point; rounds still counts it
+    const unusable = { user: actions, author_association: "NONE", body: mark("f".repeat(40), "claude", "**注意：本次审查总结缺少机读尾注，bot 结论不可用。**") };
+    const onlyUnusable = findPrevious([unusable], "claude");
+    t(
+        "only an unusable summary: no previous round, full review",
+        true,
+        onlyUnusable.previousHead === null && onlyUnusable.previousReview === null && onlyUnusable.rounds === 1,
+    );
+    const afterUnusable = findPrevious([comments[1], { ...member, body: `${disposition("orchestrator")}\n上一轮处置` }, unusable], "claude");
+    t(
+        "a usable summary before an unusable one stays the start, with its disposition summary",
+        false,
+        !(
+            afterUnusable.previousHead === "b".repeat(40) &&
+            afterUnusable.previousReview === comments[1].body &&
+            afterUnusable.disposition?.includes("上一轮处置") &&
+            afterUnusable.rounds === 2
+        ),
+    );
+    const footerNotLast = { ...unusable, body: `${mark("f".repeat(40), "claude")}\n尾注之后还有字` };
+    t("a footer that is not the last line is no usable summary", true, findPrevious([footerNotLast], "claude").previousHead === null);
+    const crlf = { ...comments[1], body: `${comments[1].body.replace(/\n/g, "\r\n")}\r\n` };
+    t("a footer followed by CRLF line ends is still the last line", false, findPrevious([crlf], "claude").previousHead !== "b".repeat(40));
+    // A maintainer whose organisation membership is private: GITHUB_TOKEN reads author_association NONE; the
+    // head in the mark is the new head after the push
     const real = {
         user: { login: "DLsnows", type: "User" },
         author_association: "NONE",
         body: [
-            "<!-- harness-agent v1 role=review kind=disposition round=1 head=ca052fd bot-run=38201290926 -->",
-            "## 评审处置汇总 · 第 1 轮（head ca052fd）",
+            "<!-- harness-agent v1 role=review kind=disposition round=1 head=1234567 bot-run=1 -->",
+            "## 评审处置汇总 · 第 1 轮（head 1234567）",
             "",
-            "| # | 来源 | 级别 | 位置 | 摘要 | 处置（采纳 / 不改 / 挂账） | commit 或理由 / issue |",
+            "| # | 来源 | 级别 | 位置 | 摘要 | 处置 | commit 或理由 / issue |",
             "|---|---|---|---|---|---|---|",
-            "| 1 | bot | 【重要】 | scripts/review-bot.mjs:267 | 增量 | 采纳 | d62c5dc |",
+            "| 1 | bot | 【重要】 | scripts/x.mjs:1 | 增量 | 已修 | 7654321 |",
         ].join("\n"),
     };
-    const round1 = { ...comments[1], body: mark("c477293".padEnd(40, "0"), "claude") };
+    const round1 = { ...comments[1], body: mark("1".repeat(40), "claude") };
     const writers = (c) => c.user?.login === "DLsnows";
     const found = findPrevious([round1, real], "claude", writers);
     t("private member: disposition summary accepted by permission", false, !found.disposition?.startsWith(real.body.split("\n")[0]));

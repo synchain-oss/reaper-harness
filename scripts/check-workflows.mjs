@@ -7,6 +7,8 @@
 //   - no pull_request_target and no workflow_run anywhere
 //   - every workflow has top-level permissions (never read-all / write-all) and concurrency; every job has
 //     timeout-minutes (a job calling a reusable workflow cannot, the called workflow sets its own)
+//   - runner images are pinned: no ubuntu-latest, windows-latest or macos-latest anywhere in a job (the review
+//     bot's deny list depends on paths inside the image, and *-latest moves to a new image without notice)
 //   - a job calling a reusable workflow: explicit job-level permissions (read scopes plus the two comment
 //     write scopes only), secrets passed one by one (no inherit), no expressions in with except inputs.pr_number
 //   - no ${{ }} inside run: untrusted text (titles, bodies, branch names, comments, dispatch inputs) only
@@ -63,6 +65,8 @@ const SCOPES = new Set(["actions", "attestations", "checks", "contents", "deploy
 const WRITE_SCOPES = new Set(["issues", "pull-requests"]);
 const ALLOWED_WITH_EXPR = /\$\{\{\s*inputs\.pr_number\s*\}\}/g;
 const ALWAYS = /^(?:\$\{\{\s*)?always\(\)(?:\s*\}\})?$/;
+/** A moving runner label: it switches to a new image without notice. Pin the image instead (ubuntu-24.04, windows-2025). */
+const LATEST = /\b(?:ubuntu|windows|macos)-latest\b/i;
 
 /** Hardening problems of one workflow. required: the job names that must follow the required-job rules. */
 export function inspectWorkflow(file, text, { required = new Set(), allow = ALLOWED_ACTIONS } = {}) {
@@ -90,6 +94,11 @@ export function inspectWorkflow(file, text, { required = new Set(), allow = ALLO
         if (!job.get("timeout-minutes") && !job.get("uses")) err(job.no, `job ${job.id} lacks timeout-minutes`);
         const jobPerm = job.get("permissions");
         if (jobPerm && /^(?:read|write)-all$/.test(unquote(jobPerm.value))) err(jobPerm.no, `job ${job.id}: permissions must list minimal scopes`);
+        // Every value of the job counts, not just a one-line runs-on: a list, a block scalar or a matrix entry runs the job too
+        for (const l of job.own) {
+            const text = l.key === "runs-on" ? valueText(lines, l) : l.value;
+            if (LATEST.test(text)) err(l.no, `job ${job.id}: pin the runner image instead of ${text.match(LATEST)[0]}`);
+        }
         if (job.get("uses")) {
             // Calling a reusable workflow: permissions, secrets and with values pass through the called workflow, all tightened
             if (!jobPerm) err(job.no, `job ${job.id} calls a reusable workflow and must set job-level permissions`);
@@ -387,7 +396,7 @@ const GOOD = [
     "jobs:",
     "  gate:",
     "    name: gate",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 5",
     "    steps:",
     `      - uses: actions/checkout@${PIN} # v7.0.1`,
@@ -430,8 +439,8 @@ const CI = [
 const cond = (lines) => ["    if: >-", ...lines.map((l) => `      ${l}`)];
 const FOCUS = ["1. 默认资源目录绝不碰。", "   续行缩进更深。", "2. 只结束自己的 PID。"];
 const CLAUDE = FIXTURE.replace(
-    "    runs-on: ubuntu-latest",
-    [`    name: ${JOB}`, ...cond(SAME_REPO.map((c, i) => (i < SAME_REPO.length - 1 ? `${c} &&` : c))), "    runs-on: ubuntu-latest"].join("\n"),
+    "    runs-on: ubuntu-24.04",
+    [`    name: ${JOB}`, ...cond(SAME_REPO.map((c, i) => (i < SAME_REPO.length - 1 ? `${c} &&` : c))), "    runs-on: ubuntu-24.04"].join("\n"),
 ).replace("            ## 输出", ["## 重点（按优先级）", ...FOCUS, "## 输出"].map((l) => `            ${l}`).join("\n"));
 const ON = "on:\n  pull_request:\n    types: [opened, synchronize]\n";
 const DEEPSEEK = [
@@ -472,6 +481,7 @@ export function selfTest() {
         return base.replace(a, b);
     };
     const checkout = `      - uses: actions/checkout@${PIN} # v7.0.1`;
+    const runsOn = "    runs-on: ubuntu-24.04";
     const call = (a, b) => check(swap(a, b, WORKFLOW));
     const action = (target) => check(swap(`actions/checkout@${PIN}`, `${target}@${PIN}`));
     const cases = [
@@ -479,6 +489,22 @@ export function selfTest() {
         ["pull_request_target trigger", true, check(swap("  pull_request:", "  pull_request_target:"))],
         ["workflow_run trigger", true, check(swap("on:\n  pull_request:", "on:\n  workflow_run:"))],
         ["job without timeout", true, check(swap("    timeout-minutes: 5\n", ""))],
+        ["runs-on ubuntu-latest", true, check(swap(runsOn, "    runs-on: ubuntu-latest"))],
+        ["runs-on windows-latest in other letter case", true, check(swap(runsOn, "    runs-on: Windows-Latest"))],
+        ["*-latest in a runs-on list", true, check(swap(runsOn, "    runs-on: [self-hosted, macos-latest]"))],
+        ["*-latest as a block list item", true, check(swap(runsOn, "    runs-on:\n      - ubuntu-latest"))],
+        ["*-latest in a block scalar", true, check(swap(runsOn, "    runs-on: >-\n      ubuntu-latest"))],
+        ["*-latest from a matrix", true, check(swap(runsOn, "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n    runs-on: ${{ matrix.os }}"))],
+        ["a pinned Windows image", false, check(swap(runsOn, "    runs-on: windows-2025"))],
+        [
+            "*-latest in a comment or a run script is no runner",
+            false,
+            check(
+                swap(runsOn, `${runsOn} # not ubuntu-latest`)
+                    .replace("      - name: Run", "      - name: Run # not on ubuntu-latest")
+                    .replace('echo "$TITLE"', 'echo "$TITLE ubuntu-latest"'),
+            ),
+        ],
         ["uses not pinned", true, check(swap(`@${PIN} # v7.0.1`, "@v7"))],
         ["a tag ref with a version comment", true, check(swap(`@${PIN} # v7.0.1`, "@v7 # v7.0.1"))],
         ["pinned without a version comment", true, check(swap(" # v7.0.1", ""))],
@@ -508,7 +534,7 @@ export function selfTest() {
         ["a uses key with a blank before the colon", true, check(swap(checkout, "      - uses : softprops/action-gh-release@v2"))],
         ["steps as a flow sequence", true, check(swap(`    steps:\n${checkout}`, "    steps: [{uses: softprops/action-gh-release@v2}]"))],
         ["a quoted if key on a required job", true, check(swap("    timeout-minutes: 5", `    timeout-minutes: 5\n    "if": x`))],
-        ["an anchor", true, check(swap("    runs-on: ubuntu-latest", "    runs-on: &os ubuntu-latest"))],
+        ["an anchor", true, check(swap("    runs-on: ubuntu-24.04", "    runs-on: &os ubuntu-24.04"))],
         ["job-level permissions write-all", true, check(swap("    timeout-minutes: 5", "    timeout-minutes: 5\n    permissions: write-all"))],
         // Jobs calling a reusable workflow
         ["a job calling a reusable workflow", false, check(WORKFLOW)],

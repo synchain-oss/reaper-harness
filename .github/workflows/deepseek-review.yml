@@ -78,7 +78,8 @@ jobs:
            评论、dispatch 输入）只经 env 传入、不插值进 run；下载的工具先校验 sha256 再用；required job 不带 job 级 if
            （汇总 job 恰好是 `if: always()`），所在 workflow 不按 paths 过滤；secret 只交给需要它的步骤。
         9. 公开仓卫生：无 AI 署名，commit 只带 Signed-off-by；无个人信息、本机路径、内部编号（任务卡号、私有计划的章节号
-           与决策号、参考仓继承来的编号）与私有文件名；新文件有 `SPDX-License-Identifier: MIT` 头。
+           与决策号、参考仓继承来的编号）与私有文件名；新的代码、脚本、workflow 与 hooks 文件有
+           `SPDX-License-Identifier: MIT` 头（Markdown 与 JSON 不要求，整仓由 LICENSE 覆盖）。
         10. 文档与行为一致：README（中英两份同步）、`docs/` 与 `CLAUDE.md` 写的参数、退出码、结局、默认值与代码一致；
             改行为的 PR 同改文档；新增或修改的判据配自测用例，删掉判据要有用例变红。
       extra_prompt: |
