@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 #
-# Advisory only: the rulesets require no approval, so CODEOWNERS is no merge protection. The merge criteria are in
-# CONTRIBUTING.md (Review process) and the maintainer checks them on every merge; which checks a ruleset also
-# enforces is recorded in .github/required-checks.json (pending: not enabled on the ruleset yet).
+# Advisory only: the rulesets require no approval, so CODEOWNERS is no merge protection. Merge protection is the
+# rulesets, which enforce the required checks branch-gate and harness-gate (.github/rulesets/,
+# .github/required-checks.json), and the merge criteria in CONTRIBUTING.md (Review process).
 # Later rules win; the paths listed separately need extra care: CI, the review bot, the check scripts and the hooks.
 * @DLsnows
 /.github/ @DLsnows

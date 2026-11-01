@@ -125,13 +125,13 @@ not change; a new format would get a new version number.
 
 A pull request into `feature/**` is merged (squash) when all of these hold on its current head:
 
-- the checks `branch-gate` and `harness-gate` passed;
+- the required checks `branch-gate` and `harness-gate` passed;
 - `claude-pr-review` succeeded, and the latest review summary's head mark names the current head and its footer
   reads `red=0 important=0` (a red flag or important finding is either fixed or explicitly waived by the maintainer);
 - every comment, review, review thread and bot finding has been answered.
 
-The maintainer checks these on every merge. Which checks a GitHub ruleset also enforces is recorded in
-`.github/required-checks.json`: a `pending` entry is not enabled on its ruleset yet.
+The rulesets of `feature/**`, `dev` and `prod` enforce `branch-gate` and `harness-gate` on GitHub (recorded in
+`.github/required-checks.json` and `.github/rulesets/`); the maintainer checks the other criteria on every merge.
 
 Pull requests that change the review and merge machinery itself (the paths in `scripts/lib/infra-paths.mjs`) are
 merged by the maintainer only. `dev` and `prod` are only merged by the maintainer; tags are only created by the
