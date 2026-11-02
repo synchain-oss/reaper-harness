@@ -5,7 +5,7 @@
 #                             file throws an error whose message starts with "WAV:" (never a crash)
 #   Compare-HarnessWavFiles   reads two files and compares them; returns facts (Get-HarnessCompareFacts) and the
 #                             verdict (Get-HarnessCompareVerdict)
-#   Get-HarnessCompareVerdict pure function: facts + criteria -> PASS / FAIL and one stable English line
+#   Get-HarnessCompareVerdict pure function: facts + criteria -> PASS / FAIL / INCOMPLETE and one stable English line
 #   New-HarnessSignalFile     deterministic test signal: one impulse + seeded noise (+ optional sine), float32
 #   Write-HarnessWav          writes samples in any supported format (signals, and the self-test's hand-made files)
 # Samples are decoded to double, which is lossless for every supported format, so "identical" can be decided on
@@ -62,7 +62,7 @@ public static class HarnessWav {
             pos = (int)next;
         }
         if (fmtAt < 0) throw Bad("no fmt chunk");
-        if (fmtLen < 16 || fmtAt + fmtLen > b.Length) throw Bad("fmt chunk is too short or truncated");
+        if (fmtLen < 16 || fmtLen > b.Length - fmtAt) throw Bad("fmt chunk is too short or truncated");
         if (dataAt < 0) throw Bad("no data chunk");
         int tag = BitConverter.ToUInt16(b, fmtAt);
         int channels = BitConverter.ToUInt16(b, fmtAt + 2);
@@ -243,12 +243,15 @@ function New-HarnessSignalFile {
 # Always checked: both files comparable (same rate and channel count), no NaN / Inf in either. The line starts with
 # the fixed facts (identical, lag, maxdiff, head, frames, channels, rate, format, nonfinite, peak), so negative
 # cases can match it with a regex; a failure appends "; failed: <reasons>".
+# A render with no frames comes first and is INCOMPLETE ("; incomplete: <reason>"): no sample was compared, and two
+# empty files would otherwise count as bit-identical.
 function Get-HarnessCompareVerdict {
     param([Parameter(Mandatory)]$Facts, [Nullable[double]]$MaxDiffDb = $null, [int]$Lag = 0, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent)
     $f = $Facts
     $line = 'identical={0} lag={1} maxdiff={2} head={3} frames={4}/{5} channels={6}/{7} rate={8}/{9} format={10}/{11} nonfinite={12}/{13} peak={14}/{15}' -f `
         ($f.Identical ? 'yes' : 'no'), ($f.Comparable ? [string]$f.BestLag : '?'), (Format-HarnessDb $f.MaxDiff), (Format-HarnessDb $f.HeadDiff), $f.FramesA, $f.FramesB,
         $f.ChannelsA, $f.ChannelsB, $f.RateA, $f.RateB, $f.FormatA, $f.FormatB, $f.NonFiniteA, $f.NonFiniteB, (Format-HarnessDb $f.PeakA), (Format-HarnessDb $f.PeakB)
+    if ($f.FramesA -eq 0 -or $f.FramesB -eq 0) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "$line; incomplete: a render has no frames, nothing was compared" } }
     $why = [Collections.Generic.List[string]]::new()
     if (-not $f.Comparable) { $why.Add('sample rate or channel count differ, the renders cannot be compared') }
     if ($f.NonFiniteA -gt 0 -or $f.NonFiniteB -gt 0) { $why.Add('NaN or Inf samples present') }

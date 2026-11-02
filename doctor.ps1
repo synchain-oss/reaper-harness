@@ -1,4 +1,4 @@
-#Requires -Version 7
+#Requires -Version 7.4
 # SPDX-License-Identifier: MIT
 #
 # Checks and initialisation for reaper-harness. Never starts REAPER.

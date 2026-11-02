@@ -1,4 +1,4 @@
-#Requires -Version 7
+#Requires -Version 7.4
 # SPDX-License-Identifier: MIT
 #
 # reaper-harness: drives a real REAPER through a private configuration to test VST3 plugins.

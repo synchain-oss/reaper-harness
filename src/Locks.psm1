@@ -85,18 +85,33 @@ function Exit-HarnessLocks {
     }
 }
 
-# Runs the script block while holding the set; always releases (including on errors and Ctrl-C). Throws a
-# TimeoutException and does not run the block when the locks cannot be taken.
+# Whether a lock object from Enter-HarnessLocks holds this exact name right now: anything else (no object, an object of
+# another shape, a name it does not hold, a set already released) is false.
+function Test-HarnessLockHeld {
+    param($Lock, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Lock -or -not $Lock.PSObject.Properties['Held']) { return $false }
+    foreach ($entry in @($Lock.Held)) {
+        if ($null -eq $entry -or -not $entry.PSObject.Properties['Name'] -or -not $entry.PSObject.Properties['Mutex']) { continue }
+        if ($entry.Name -ceq $Name -and $entry.Mutex -is [System.Threading.Mutex] -and -not $entry.Mutex.SafeWaitHandle.IsClosed) { return $true }
+    }
+    $false
+}
+
+# Runs the script block while holding the set, handing it the lock object (for Invoke-HarnessHost -Lock); always
+# releases (including on errors and Ctrl-C). Throws a TimeoutException and does not run the block when the locks cannot
+# be taken.
 function Invoke-WithHarnessLocks {
     param([Parameter(Mandatory)][string[]]$Names, [Parameter(Mandatory)][scriptblock]$ScriptBlock, [double]$TimeoutSeconds = 1800)
     $Lock = Enter-HarnessLocks -Names $Names -TimeoutSeconds $TimeoutSeconds
     if (-not $Lock) { throw [System.TimeoutException]::new("waited more than $TimeoutSeconds s for $($Names -join ', ')") }
-    try { & $ScriptBlock } finally { Exit-HarnessLocks $Lock }
+    try { & $ScriptBlock $Lock } finally { Exit-HarnessLocks $Lock }
 }
 
 # Starts a pwsh child that tries to take one exact mutex name without waiting; returns whether it could (taken and
 # released at once). Mutexes have thread affinity, so "held by someone else" cannot be observed inside this process.
 function Test-HarnessLockFree([Parameter(Mandatory)][string]$FullName) {
+    # The name goes into a command line of the child, so only a name of the accepted form gets that far
+    if (-not (Test-HarnessLockName $FullName)) { throw [System.InvalidOperationException]::new("USAGE: '$FullName' is not a full Local\ mutex name (Local\ followed by 1 to 100 of A-Z a-z 0-9 . _ -)") }
     $cmd = "`$m = [Threading.Mutex]::new(`$false, '$($FullName -replace "'", "''")'); try { `$got = `$m.WaitOne(0) } catch [Threading.AbandonedMutexException] { `$got = `$true }; if (`$got) { `$m.ReleaseMutex(); exit 0 } else { exit 1 }"
     $psi = [System.Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
     foreach ($a in '-NoProfile', '-NonInteractive', '-Command', $cmd) { $psi.ArgumentList.Add($a) }
@@ -123,5 +138,5 @@ function Start-HarnessLockChild([string]$Command) {
     [System.Diagnostics.Process]::Start($psi)
 }
 
-Export-ModuleMember -Function Get-HarnessDefaultGuiLock, Test-HarnessLockName, Get-HarnessGuiLockSet, Enter-HarnessLocks, Exit-HarnessLocks, Invoke-WithHarnessLocks,
+Export-ModuleMember -Function Get-HarnessDefaultGuiLock, Test-HarnessLockName, Get-HarnessGuiLockSet, Enter-HarnessLocks, Exit-HarnessLocks, Test-HarnessLockHeld, Invoke-WithHarnessLocks,
     Test-HarnessLockFree, Start-HarnessLockChild
