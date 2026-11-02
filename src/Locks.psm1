@@ -27,8 +27,9 @@ function Get-HarnessDefaultGuiLock { $script:DefaultGui }
 
 # A full mutex name the harness accepts for -ExtraGuiLock: Local\ followed by 1..100 of [A-Za-z0-9._-].
 # Global\ is not accepted: an existing Global\ object that denies the current token cannot be opened, and silently
-# falling back to some other name would mean thinking a lock is held when it is not.
-function Test-HarnessLockName([string]$Name) { $Name -cmatch '^Local\\[A-Za-z0-9._-]{1,100}$' }
+# falling back to some other name would mean thinking a lock is held when it is not. \z and not $: in .NET $ also matches
+# right before a final line end, and a name with one in it is a different mutex.
+function Test-HarnessLockName([string]$Name) { $Name -cmatch '\ALocal\\[A-Za-z0-9._-]{1,100}\z' }
 
 # The lock set for one REAPER launch: the default lock plus the extras, de-duplicated (mutex names are case
 # sensitive) and sorted ordinally. A bad name is a usage error.
@@ -97,9 +98,11 @@ function Test-HarnessLockHeld {
     $false
 }
 
-# Runs the script block while holding the set, handing it the lock object (for Invoke-HarnessHost -Lock); always
-# releases (including on errors and Ctrl-C). Throws a TimeoutException and does not run the block when the locks cannot
-# be taken.
+# Runs the script block while holding the set, handing it the lock object; always releases afterwards (including on
+# errors and Ctrl-C). Throws a TimeoutException and does not run the block when the locks cannot be taken.
+# Because it always releases, a caller that can start REAPER must not use it: when a launch reports StillRunning the
+# window may still be on the desktop and the locks have to stay held, which a block has no way to arrange. Such a caller
+# takes and releases them itself with Enter-HarnessLocks and Exit-HarnessLocks.
 function Invoke-WithHarnessLocks {
     param([Parameter(Mandatory)][string[]]$Names, [Parameter(Mandatory)][scriptblock]$ScriptBlock, [double]$TimeoutSeconds = 1800)
     $Lock = Enter-HarnessLocks -Names $Names -TimeoutSeconds $TimeoutSeconds

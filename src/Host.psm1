@@ -11,9 +11,9 @@
 #   Get-HarnessModuleVerdict whether every watched plugin binary was loaded from the expected private copy (pure)
 # Rules: only windows that belong to the started PID are looked at or clicked (if the user's own REAPER is open, its
 # dialogs are never touched); the only thing clicked automatically is "REAPER Query" (save prompt, answered "No");
-# render, plugin scan and peak building progress windows are let through; any other visible dialog that stays for
-# 0.5 s or more counts as stuck: it is closed, the process is ended and the status is Modal, which the caller turns
-# into INCOMPLETE. Processes are only ever ended by the PID this function started.
+# render, plugin scan and peak building progress windows are let through, unless the title reports trouble; any other
+# visible dialog that stays for 0.5 s or more counts as stuck: it is closed, the process is ended and the status is
+# Modal, which the caller turns into INCOMPLETE. Processes are only ever ended by the PID this function started.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -84,14 +84,18 @@ $script:KnownModals = [ordered]@{
 }
 
 # How to treat a window: Ignore (not a dialog / not visible), PressNo (save prompt), Benign (render, plugin scan and
-# peak building progress windows, which go away on their own), Fatal (stuck; Name says which).
+# peak building progress windows, which go away on their own), Fatal (stuck; Name says which). A title that starts like
+# a progress window but reports trouble ("Render failed") does not go away on its own: left alone it would only end at
+# the timeout, and the outcome would not name it.
 function Get-HarnessModalVerdict {
     param([string]$Class, [bool]$Visible, [string]$Title)
     if (-not $Visible -or $Class -cne '#32770') { return [pscustomobject]@{ Action = 'Ignore'; Name = '' } }
     if ($Title -ceq 'REAPER Query') { return [pscustomobject]@{ Action = 'PressNo'; Name = 'save-prompt' } }
-    if ($Title -imatch '^Render') { return [pscustomobject]@{ Action = 'Benign'; Name = 'render-progress' } }
-    if ($Title -imatch '^Scanning') { return [pscustomobject]@{ Action = 'Benign'; Name = 'plugin-scan-progress' } }
-    if ($Title -imatch '^Building peaks') { return [pscustomobject]@{ Action = 'Benign'; Name = 'peaks-progress' } }
+    if ($Title -inotmatch 'fail|error') {
+        if ($Title -imatch '^Render') { return [pscustomobject]@{ Action = 'Benign'; Name = 'render-progress' } }
+        if ($Title -imatch '^Scanning') { return [pscustomobject]@{ Action = 'Benign'; Name = 'plugin-scan-progress' } }
+        if ($Title -imatch '^Building peaks') { return [pscustomobject]@{ Action = 'Benign'; Name = 'peaks-progress' } }
+    }
     # The evaluation licence reminder (title "About REAPER ..."): never dismissed automatically; treated as stuck and
     # named, so the user can buy a licence
     if ($Title -imatch '^About REAPER') { return [pscustomobject]@{ Action = 'Fatal'; Name = 'license-nag' } }

@@ -32,7 +32,8 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
 function New-CaseList { , [Collections.Generic.List[object]]::new() }
 
 # Runs Action with one internal function of the guard module replaced, and always puts the original back. This reaches
-# states the self-test must not or cannot make on the machine it runs on (a mapped network drive, an unreadable identity).
+# states the self-test must not or cannot make on the machine it runs on (a mapped network drive, a link count that
+# cannot be read).
 function Invoke-WithGuardStub([string]$Inner, [scriptblock]$Stub, [scriptblock]$Action) {
     $guard = (Get-Command Assert-HarnessCfgDir).Module
     $original = & $guard { param($n) (Get-Item "function:$n").ScriptBlock } $Inner
@@ -42,13 +43,20 @@ function Invoke-WithGuardStub([string]$Inner, [scriptblock]$Stub, [scriptblock]$
 
 # Runs Action while a directory of this self-test cannot be listed (a deny entry for everyone, taken away again whatever
 # happens). Denied says whether the listing really failed; where it did not, the caller's case has not run for real.
+# Restored says whether the entry was taken away again: when it was not, the scratch directory cannot be deleted, so the
+# caller turns that into a red case.
 function Invoke-WithListingDenied([string]$Folder, [scriptblock]$Action) {
+    $outcome = [pscustomobject]@{ Denied = $false; Result = $null; Restored = $true }
     & icacls.exe $Folder /deny '*S-1-1-0:(RD)' 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ Denied = $false; Result = $null } }
+    if ($LASTEXITCODE -ne 0) { return $outcome }
     try {
-        $refused = try { $null = Get-ChildItem -LiteralPath $Folder -Force -ErrorAction Stop; $false } catch { $true }
-        [pscustomobject]@{ Denied = $refused; Result = ($refused ? (& $Action) : $null) }
-    } finally { & icacls.exe $Folder /remove:d '*S-1-1-0' 2>&1 | Out-Null }
+        $outcome.Denied = try { $null = Get-ChildItem -LiteralPath $Folder -Force -ErrorAction Stop; $false } catch { $true }
+        if ($outcome.Denied) { $outcome.Result = & $Action }
+    } finally {
+        & icacls.exe $Folder /remove:d '*S-1-1-0' 2>&1 | Out-Null
+        $outcome.Restored = $LASTEXITCODE -eq 0
+    }
+    $outcome
 }
 
 $script:ScratchPrefix = 'reaper-harness-selftest-' # New-HarnessTempDir appends 32 random hex digits
@@ -134,7 +142,10 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
         try {
             & $add 'with a subst drive pointing at APPDATA, \REAPER on that drive is refused (the directory and its parents up to the root compared by identity)' $true ((Test-Refused { Assert-HarnessCfgDir "${letter}:\REAPER" } $byIdentity) -and (Test-Refused { Assert-HarnessCfgDir "${letter}:\REAPER\Data\not-yet" } $byIdentity) -and (Test-Refused { Assert-HarnessCfgDir "${letter}:\" } $byIdentity))
             & $add 'file identity: the root of a subst drive equals the directory it points at' $false ((Get-HarnessFileIdentity "${letter}:\") -ceq (Get-HarnessFileIdentity $roam))
-        } finally { & subst.exe "${letter}:" /d 2>&1 | Out-Null }
+        } finally {
+            & subst.exe "${letter}:" /d 2>&1 | Out-Null
+            & $add 'the subst drive pointing at APPDATA was removed again' $false ($LASTEXITCODE -eq 0)
+        }
     } else {
         & $add '(no subst drive could be made on this machine: the subst cases did not run for real)' $false $true
     }
@@ -165,8 +176,10 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
     $cases
 }
 
-# What lies at the top level of the configuration directory: a link or a hard link would carry the reads and writes of
-# REAPER and of Set-HarnessIniValue out of it, and the checks of the directory itself cannot see that.
+# What lies in the configuration directory: a link or a hard link would carry the reads and writes of REAPER and of
+# Set-HarnessIniValue out of it, and the checks of the directory itself cannot see that. The top level is looked at on
+# every check, the whole tree when the path is pinned. A pin that is refused pins nothing, so those cases run here; what
+# happens after a real pin is in the child process.
 function Get-CfgEntryCases([string]$Tmp) {
     $cases = New-CaseList
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
@@ -180,31 +193,60 @@ function Get-CfgEntryCases([string]$Tmp) {
     try {
         $plain = & $newCfg 'entries-plain'
         & $add 'top level: files named like those in the default resource directory but different files pass' $false ((Assert-HarnessCfgDir $plain).Dir -like '*entries-plain')
+        # Puts another name of Source (made first when it is not there) at the path Inside a new configuration directory
         $hardFor = {
-            param([string]$DirName, [string]$FileName)
+            param([string]$DirName, [string]$Inside, [string]$Source)
             $dir = & $newCfg $DirName
-            $at = Join-Path $dir $FileName
+            $at = Join-Path $dir $Inside
             if (Test-Path -LiteralPath $at) { Remove-Item -LiteralPath $at }
-            $source = Join-Path $defaultDir $FileName
-            if (-not (Test-Path -LiteralPath $source)) { [IO.File]::WriteAllText($source, 'x') }
-            $made = try { $null = New-Item -ItemType HardLink -Path $at -Target $source -ErrorAction Stop; $true } catch { $false }
-            [pscustomobject]@{ Dir = $dir; Made = $made }
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $at)
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Source)
+            if (-not (Test-Path -LiteralPath $Source)) { [IO.File]::WriteAllText($Source, 'x') }
+            $made = try { $null = New-Item -ItemType HardLink -Path $at -Target $Source -ErrorAction Stop; $true } catch { $false }
+            [pscustomobject]@{ Dir = $dir; Made = $made; At = $at }
         }
-        $hard = & $hardFor 'entries-hard' 'reaper.ini'
+        $hard = & $hardFor 'entries-hard' 'reaper.ini' $twin
         $noHard = $hard.Made ? '' : ' (hard links cannot be made here; not run for real)'
         & $add "top level: reaper.ini as a hard link to the one in the default resource directory is refused$noHard" $true ((-not $hard.Made) -or (Test-Refused { Assert-HarnessCfgDir $hard.Dir } '*hard link*'))
-        $other = & $hardFor 'entries-hard-other' 'reaper-extra.ini'
-        & $add "top level: any other file as a hard link to its namesake is refused too$noHard" $true ((-not $other.Made) -or (Test-Refused { Assert-HarnessCfgDir $other.Dir } '*hard link*'))
-        # An identity that cannot be read proves nothing, on either side
-        $readFails = { param([string]$Failing) { param([string]$Path) if ($Path -ceq $Failing) { 'ERROR:5' } else { [HarnessFileId]::Get($Path) } }.GetNewClosure() }
+        $renamed = & $hardFor 'entries-hard-renamed' 'reaper.ini' (Join-Path $defaultDir 'reaper-render.ini')
+        & $add "top level: reaper.ini as a hard link to a file of another name in the default resource directory is refused$noHard" $true ((-not $renamed.Made) -or (Test-Refused { Assert-HarnessCfgDir $renamed.Dir } '*hard link*'))
+        $intoSub = & $hardFor 'entries-hard-into-sub' 'extra.ini' (Join-Path $defaultDir 'Data\reaper-deep.ini')
+        & $add "top level: another file as a hard link to a file in a subdirectory of the default resource directory is refused$noHard" $true ((-not $intoSub.Made) -or (Test-Refused { Assert-HarnessCfgDir $intoSub.Dir } '*hard link*'))
+        $unrelated = & $hardFor 'entries-hard-unrelated' 'extra.ini' (Join-Path $Tmp 'entries-unrelated.txt')
+        & $add "top level: a hard link to a file that has nothing to do with REAPER is refused too$noHard" $true ((-not $unrelated.Made) -or (Test-Refused { Assert-HarnessCfgDir $unrelated.Dir } '*hard link*'))
+        $initHard = & $hardFor 'entries-hard-init' 'reaper.ini' (Join-Path $defaultDir 'reaper-init.ini')
+        $initSentinel = Join-Path $initHard.Dir (Get-HarnessSentinel).Name
+        $sentinelWritten = (Get-Item -LiteralPath $initSentinel).LastWriteTimeUtc
+        & $add "-Init: a directory with the sentinel and a hard link in it is refused before anything is written$noHard" $true ((-not $initHard.Made) -or ((Test-Refused { New-HarnessCfgDir $initHard.Dir } '*hard link*') -and (Get-Item -LiteralPath $initSentinel).LastWriteTimeUtc -eq $sentinelWritten))
+        # The reader itself, and what is done with a count that cannot be read: nothing done to a real file gets there
+        $linkCount = { param([string]$Path) & (Get-Command Assert-HarnessCfgDir).Module { param($p) Get-HarnessFileLinkCount $p } $Path }
         $ownIni = (Assert-HarnessCfgDir $plain).Ini
-        & $add 'top level: the identity of the namesake in the default resource directory cannot be read: refused' $true (Invoke-WithGuardStub 'Get-HarnessFileIdentity' (& $readFails $twin) { Test-Refused { Assert-HarnessCfgDir $plain } '*cannot be read*different files*' })
-        & $add 'top level: the identity of its own file cannot be read: refused' $true (Invoke-WithGuardStub 'Get-HarnessFileIdentity' (& $readFails $ownIni) { Test-Refused { Assert-HarnessCfgDir $plain } '*cannot be read*different files*' })
-        # A name the default directory does not have is not looked at any further (its own identity does not matter)
+        & $add "link count: a file of its own has one name, a hard link and its source have two$noHard" $false ((& $linkCount $ownIni) -eq 1 -and ((-not $unrelated.Made) -or ((& $linkCount $unrelated.At) -eq 2 -and (& $linkCount (Join-Path $Tmp 'entries-unrelated.txt')) -eq 2)))
+        & $add 'link count: a path that cannot be opened has no count (below 1), a missing file and an invalid name alike' $true ((& $linkCount (Join-Path $Tmp 'nope-nope')) -lt 1 -and (& $linkCount (Join-Path $Tmp 'bad|name')) -lt 1)
+        $countSays = { param($Answer) { param([string]$Path) $Answer }.GetNewClosure() }
+        & $add 'top level: a link count that cannot be read is refused' $true ((Invoke-WithGuardStub 'Get-HarnessFileLinkCount' (& $countSays (-1)) { Test-Refused { Assert-HarnessCfgDir $plain } '*number of names*cannot be read*' }) -and (Invoke-WithGuardStub 'Get-HarnessFileLinkCount' (& $countSays 0) { Test-Refused { Assert-HarnessCfgDir $plain } '*number of names*cannot be read*' }))
+        # A name the default directory does not have is nothing special: the count is what decides
         $lonely = Join-Path $plain 'only-here.ini'
         [IO.File]::WriteAllText($lonely, 'x')
-        & $add 'top level: a file the default resource directory has no namesake for is skipped' $false (Invoke-WithGuardStub 'Get-HarnessFileIdentity' (& $readFails $lonely) { (Assert-HarnessCfgDir $plain).Dir -like '*entries-plain' })
+        & $add 'top level: a file of its own that the default resource directory has no namesake for passes' $false ((Assert-HarnessCfgDir $plain).Dir -like '*entries-plain')
         Remove-Item -LiteralPath $lonely
+        # The whole tree, when the path is pinned
+        $deep = 'plugins\Some Plugin.vst3\Contents'
+        $deepHard = & $hardFor 'tree-hard' "$deep\x.dll" (Join-Path $defaultDir 'reaper-tree.ini')
+        & $add "whole tree: a hard link in a subdirectory is refused when the path is pinned$noHard" $true ((-not $deepHard.Made) -or (Test-Refused { Initialize-HarnessCfg $deepHard.Dir } "*$deep\x.dll*hard link*"))
+        # On purpose: the check before every start stays at the top level, a tree of thousands of entries is walked once
+        & $add "top level only: the check before every start does not look below the top level$noHard" $false ((-not $deepHard.Made) -or (Assert-HarnessCfgDir $deepHard.Dir).Dir -like '*tree-hard')
+        $treeJunction = & $newCfg 'tree-junction'
+        $elsewhere = Join-Path $treeJunction "$deep\elsewhere"
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $elsewhere)
+        $null = New-Item -ItemType Junction -Path $elsewhere -Target $defaultDir
+        try { & $add 'whole tree: a junction in a subdirectory is refused when the path is pinned' $true (Test-Refused { Initialize-HarnessCfg $treeJunction } '*link or junction*') }
+        finally { [IO.Directory]::Delete($elsewhere) } # removes the link only
+        $treeClosed = & $newCfg 'tree-closed'
+        $closedSub = Join-Path $treeClosed 'plugins'
+        $subDenied = Invoke-WithListingDenied $closedSub { Test-Refused { Initialize-HarnessCfg $treeClosed } '*cannot be listed*' }
+        & $add "whole tree: a subdirectory that cannot be listed is refused when the path is pinned$($subDenied.Denied ? '' : ' (a deny entry has no effect here; not run for real)')" $true ((-not $subDenied.Denied) -or $subDenied.Result)
+        & $add 'whole tree: that deny entry was taken away again' $false ($subDenied.Restored -and (Assert-HarnessCfgDir $treeClosed).Dir -like '*tree-closed' -and @(Get-ChildItem -LiteralPath $closedSub -Force).Count -eq 0)
         # A symbolic link needs a privilege most sessions do not have (runners do); a junction does not
         $sym = & $newCfg 'entries-symlink'
         Remove-Item -LiteralPath (Join-Path $sym 'reaper.ini')
@@ -225,7 +267,8 @@ function Get-CfgEntryCases([string]$Tmp) {
         $denied = Invoke-WithListingDenied $closed { Test-Refused { Assert-HarnessCfgDir $closed } '*cannot be listed*' }
         $noDeny = $denied.Denied ? '' : ' (a deny entry has no effect here; not run for real)'
         & $add "top level: a configuration directory that cannot be listed is refused$noDeny" $true ((-not $denied.Denied) -or $denied.Result)
-    } finally { Get-ChildItem -LiteralPath $defaultDir -Filter 'reaper*.ini' -File | Remove-Item } # only this self-test's fake directory
+        & $add 'top level: that deny entry was taken away again' $false ($denied.Restored -and (Assert-HarnessCfgDir $closed).Dir -like '*entries-closed')
+    } finally { Get-ChildItem -LiteralPath $defaultDir -Recurse -Filter 'reaper*.ini' -File | Remove-Item } # only this self-test's fake directory
     $cases
 }
 
@@ -269,7 +312,10 @@ function Get-DriveCases([string]$Tmp) {
     & subst.exe "${free}:" $substHome 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         try { & $add 'drive: a subst drive pointing at a local directory is not refused' $false ((New-HarnessCfgDir "${free}:\cfg").Dir -ieq "${free}:\cfg" -and (Assert-HarnessCfgDir "${free}:\cfg").Dir -ieq "${free}:\cfg") }
-        finally { & subst.exe "${free}:" /d 2>&1 | Out-Null }
+        finally {
+            & subst.exe "${free}:" /d 2>&1 | Out-Null
+            & $add 'drive: that subst drive was removed again' $false ($LASTEXITCODE -eq 0)
+        }
     } else {
         & $add '(no subst drive could be made on this machine: the subst drive positive case did not run for real)' $false $true
     }
@@ -282,7 +328,10 @@ function Get-DriveCases([string]$Tmp) {
     }
     if ($mapped) {
         try { & $add 'drive: a real mapped network drive leading back to this machine is refused' $true (Test-Refused { Assert-HarnessCfgDir "${free}:\" } '*must be on a local drive*') }
-        finally { & net.exe use "${free}:" /delete /y 2>&1 | Out-Null }
+        finally {
+            & net.exe use "${free}:" /delete /y 2>&1 | Out-Null
+            & $add 'drive: that mapped drive was deleted again' $false ($LASTEXITCODE -eq 0)
+        }
     } else {
         & $add '(a mapped network drive is only made on a hosted runner, and it could not be made here: the mapped drive case did not run for real)' $false $true
     }
@@ -388,7 +437,9 @@ function Get-SubstResidueCases([string]$Tmp) {
             $report = @(Clear-HarnessSelftestSubst -Prefix $stalePrefix -Letters $Scope)
             [pscustomobject]@{ Report = $report; Still = [bool]((& $listed) -match ('(?m)^' + $slot + ':\\: =>')) }
         } finally {
-            & subst.exe "${slot}:" /d 2>&1 | Out-Null # only the mapping made here
+            # Only the mapping made here. Its exit code says nothing when the clean-up under test already removed the
+            # mapping, so what counts is checked once at the end: the letter is free again
+            & subst.exe "${slot}:" /d 2>&1 | Out-Null
             if (Test-Path -LiteralPath $Place) { Remove-Item -LiteralPath $Place } # empty directory, not recursive
         }
     }
@@ -402,6 +453,7 @@ function Get-SubstResidueCases([string]$Tmp) {
     & $add 'subst residue: a letter outside the clean-up range is left alone (even pointing at a scratch directory)' $true ($r -and $r.Still -and $r.Report.Count -eq 0)
     & $add 'subst residue: the clean-up range is Z..U' $false (($script:SubstLetters -join '') -ceq 'ZYXWVU')
     & $add 'subst residue: with nothing left over nothing is done' $false (@(Clear-HarnessSelftestSubst -Prefix $stalePrefix).Count -eq 0)
+    & $add 'subst residue: no mapping made for these cases is left on the letter' $false (-not ((& $listed) -match ('(?m)^' + $slot + ':\\: =>')))
     $cases
 }
 
@@ -478,7 +530,7 @@ function Get-SnapshotCases([string]$Tmp) {
     $rootRun = Invoke-WithListingDenied $aclRoot { Get-HarnessDefaultCfgSnapshot -Root $aclRoot }
     & $add "listing: a root that cannot be listed is recorded as unreadable under the name .$noDeny" $true ((-not $rootRun.Denied) -or $rootRun.Result['.'] -ceq 'unreadable')
     $openAgain = Get-HarnessDefaultCfgSnapshot -Root $aclRoot
-    & $add 'listing: the deny entries were taken away again' $false ($openAgain.Contains('locked\b.ini') -and -not $openAgain.Contains('.'))
+    & $add 'listing: the deny entries were taken away again' $false ($subRun.Restored -and $rootRun.Restored -and $openAgain.Contains('locked\b.ini') -and -not $openAgain.Contains('.'))
     # A root that Test-Path says no to but whose identity reads as an error is not a missing directory
     $weird = Get-HarnessDefaultCfgSnapshot -Root (Join-Path $Tmp 'bad|name')
     & $add 'listing: a root that cannot even be looked at is unreadable, not an empty listing' $true ($weird.Contains('.') -and $weird['.'] -ceq 'unreadable')
@@ -563,6 +615,15 @@ function Get-HostCases {
     & $add 'dialog: the render progress window is let be' $false ((& $v '#32770' $true 'Rendering to x.wav').Action -eq 'Benign')
     & $add 'dialog: the plugin scan progress window is let be' $false ((& $v '#32770' $true 'Scanning VST plugins...').Action -eq 'Benign')
     & $add 'dialog: the peak building progress window is let be' $false ((& $v '#32770' $true 'Building Peaks...').Action -eq 'Benign')
+    foreach ($progress in 'Rendering to file...', 'Render', 'Scanning VST', 'Building peaks') {
+        & $add "dialog: '$progress' is a progress window" $false ((& $v '#32770' $true $progress).Action -eq 'Benign')
+    }
+    # A title that reports trouble is no progress window, whatever it starts with: left alone it would only end at the
+    # timeout, and the outcome would not name it
+    foreach ($trouble in 'Render failed', 'Render error', 'RENDER FAILED', 'Scanning error', 'Building peaks failed') {
+        $r = & $v '#32770' $true $trouble
+        & $add "dialog: '$trouble' counts as stuck (unknown-dialog), not as a progress window" $true ($r.Action -eq 'Fatal' -and $r.Name -eq 'unknown-dialog')
+    }
     & $add 'dialog: the evaluation licence reminder is never clicked away; stuck, and named' $true (($nag = & $v '#32770' $true 'About REAPER v7.82/win64 rev 1 (Oct') -and $nag.Action -eq 'Fatal' -and $nag.Name -eq 'license-nag')
     foreach ($pair in @(@('Project Load Warning', 'project-load-warning'), @('REAPER Error', 'reaper-error'), @('Select files to save or delete', 'record-save-prompt'), @('REAPER', 'no-audio-device'), @('Brand New Box', 'unknown-dialog'))) {
         $r = & $v '#32770' $true $pair[0]

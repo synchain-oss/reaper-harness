@@ -7,8 +7,8 @@
 # holds the sentinel written by doctor.ps1 -Init, nothing at its top level leads out of it, and reaper.ini exists. If
 # any of them fails a REFUSED: error is thrown and the caller must not start REAPER.
 #   Assert-HarnessCfgDir        checks the directory and returns @{ Dir; Ini }; New-HarnessCfgDir creates one for -Init
-#   Initialize-HarnessCfg       checks it and pins the ini path into a read-only constant; from then on the -cfgfile
-#                               argument can only come from Get-HarnessCfgArgument
+#   Initialize-HarnessCfg       checks it, walks its whole tree once, and pins the ini path into a read-only constant;
+#                               from then on the -cfgfile argument can only come from Get-HarnessCfgArgument
 #   Set-HarnessIniValue         changes one key in the private ini (bytes round-trip, no other line changes)
 #   Get-HarnessDefaultCfgSnapshot / Compare-HarnessDefaultCfgSnapshot
 #                               read-only listing (size and write time) of %APPDATA%\REAPER, compared before and after
@@ -50,6 +50,17 @@ public static class HarnessFileId {
             return BitConverter.ToString(b);
         } finally { CloseHandle(h); }
     }
+    // How many names this file has on its volume, or -1 when that cannot be read. The name given is looked at itself:
+    // a link is not followed (FILE_FLAG_OPEN_REPARSE_POINT on top of the flags above).
+    public static long LinkCount(string path) {
+        IntPtr h = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return -1;
+        try {
+            byte[] b = new byte[24]; // FILE_STANDARD_INFO: two 8-byte sizes, 4-byte NumberOfLinks, two flags, padding
+            if (!GetFileInformationByHandleEx(h, 1, b, (uint)b.Length)) return -1;
+            return BitConverter.ToUInt32(b, 16);
+        } finally { CloseHandle(h); }
+    }
 }
 '@
 }
@@ -64,6 +75,10 @@ function Stop-Refuse([string]$Why) { throw [System.InvalidOperationException]::n
 # Identity string of the directory (or file) a path points to; $null if the path does not exist; 'ERROR:<code>' if
 # it exists but cannot be opened (callers must treat that as "cannot prove").
 function Get-HarnessFileIdentity([string]$Path) { [HarnessFileId]::Get($Path) }
+
+# How many names a file has on its volume, below 1 when that cannot be read. A function of its own so that the self-test
+# can stand in for a count that cannot be read: nothing it can do to a real file makes that happen.
+function Get-HarnessFileLinkCount([string]$Path) { [HarnessFileId]::LinkCount($Path) }
 
 # Resolves junctions and symbolic links level by level and returns the real path; parts that do not exist are
 # appended literally.
@@ -148,21 +163,34 @@ function Assert-HarnessOutsideDefaultDir([string]$CfgDir) {
     $real
 }
 
-# Checks what is at the top level of the directory: the layers above only look at the directory itself, while REAPER and
-# Set-HarnessIniValue read and write through whatever is in it. Refused: any entry that is a link or junction, and any
-# file that is the same file (a hard link) as the one of its name in the default resource directory. A file identity
-# that cannot be read proves nothing and is refused too. A name the default directory does not have is fine.
-function Assert-HarnessCfgEntries([string]$Folder) {
+# Checks one level of the directory: the layers above only look at the directory itself, while REAPER and
+# Set-HarnessIniValue read and write through whatever is in it. Refused: any entry that is a link or junction, a level
+# that cannot be listed, and any file with more than one name on its volume. That last one is a hard link: writing the
+# file changes it under its other name too, and that name can be anywhere on the volume and called anything, so looking
+# for it in the default resource directory could never be complete. A count that cannot be read proves nothing and is
+# refused as well. Returns the directories of this level, for the walk below. Root only sets how an entry is named in
+# the refusal.
+function Assert-HarnessCfgEntries([string]$Folder, [string]$Root = $Folder) {
     $entries = try { @(Get-ChildItem -LiteralPath $Folder -Force -ErrorAction Stop) } catch { Stop-Refuse 'the configuration directory cannot be listed, so nothing in it can be proven to stay inside it' }
-    $defaultDir = Get-HarnessDefaultCfgDir
     foreach ($entry in $entries) {
-        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { Stop-Refuse "the configuration directory holds a link or junction ($($entry.Name)): reads and writes would follow it out of the directory" }
-        if ($entry.PSIsContainer) { continue }
-        $twinId = Get-HarnessFileIdentity (Join-Path $defaultDir $entry.Name)
-        if (-not $twinId) { continue }
-        $ownId = Get-HarnessFileIdentity $entry.FullName
-        if ($twinId.StartsWith('ERROR:') -or -not $ownId -or $ownId.StartsWith('ERROR:')) { Stop-Refuse "the file identity of $($entry.Name) in the configuration directory or in the default resource directory cannot be read, so they cannot be proven to be different files" }
-        if ($ownId -ceq $twinId) { Stop-Refuse "$($entry.Name) in the configuration directory is a hard link to the file of that name in the default resource directory: the default REAPER resource directory is never touched" }
+        $shown = [IO.Path]::GetRelativePath($Root, $entry.FullName)
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { Stop-Refuse "the configuration directory holds a link or junction ($shown): reads and writes would follow it out of the directory" }
+        if ($entry.PSIsContainer) { $entry.FullName; continue }
+        $names = Get-HarnessFileLinkCount $entry.FullName
+        if ($names -lt 1) { Stop-Refuse "the number of names of $shown in the configuration directory cannot be read, so it cannot be proven to be a file of its own" }
+        if ($names -gt 1) { Stop-Refuse "$shown in the configuration directory is a hard link (the file has $names names on this volume): writing it would change the file under its other names too, wherever they are" }
+    }
+}
+
+# Every level of the tree, the same way. A link is refused and so never entered. This is what Initialize-HarnessCfg does
+# once per process, and not what every start does: a configuration directory can hold thousands of entries (plugin
+# presets, for one) and each launch checks several times, while the top level, where REAPER and the harness open files
+# by a fixed name, stays cheap enough to look at every time.
+function Assert-HarnessCfgTree([string]$Folder) {
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($Folder)
+    while ($pending.get_Count() -gt 0) {
+        foreach ($sub in (Assert-HarnessCfgEntries ($pending.Pop()) $Folder)) { $pending.Push($sub) }
     }
 }
 
@@ -171,7 +199,7 @@ function Assert-HarnessCfgDir {
     $real = Assert-HarnessOutsideDefaultDir $CfgDir
     if (-not (Test-Path -LiteralPath $real -PathType Container)) { Stop-Refuse 'the configuration directory does not exist' }
     if (-not (Test-HarnessSentinel $real)) { Stop-Refuse 'the configuration directory has no sentinel file (initialise it with doctor.ps1 -Init first)' }
-    Assert-HarnessCfgEntries $real # on every start, since a link can appear after -Init
+    $null = Assert-HarnessCfgEntries $real # on every start, since a link can appear after -Init
     $ini = Join-Path $real 'reaper.ini'
     if (-not (Test-Path -LiteralPath $ini -PathType Leaf)) { Stop-Refuse 'the configuration directory has no reaper.ini' }
     [pscustomobject]@{ Dir = $real; Ini = $ini }
@@ -197,7 +225,7 @@ function New-HarnessCfgDir {
         if (-not (Test-HarnessSentinel $real) -and @(Get-ChildItem -LiteralPath $real -Force).Count -gt 0) {
             Stop-Refuse '-CfgDir has content but no sentinel file: only a missing directory, an empty one or one initialised before is taken over; nothing was written'
         }
-        Assert-HarnessCfgEntries $real # before anything is written: the writes below would go through a link
+        $null = Assert-HarnessCfgEntries $real # before anything is written: the writes below would go through a link
     }
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $real 'plugins')
     $ini = Join-Path $real 'reaper.ini'
@@ -209,7 +237,8 @@ function New-HarnessCfgDir {
 }
 
 # Pins the ini path into a read-only constant (Constant cannot be changed even with -Force): any later assignment,
-# including one through a same-name variable that differs only by case, is a hard error.
+# including one through a same-name variable that differs only by case, is a hard error. The whole tree is walked first,
+# so a refusal leaves nothing pinned; a later call in the same process only checks what every start checks.
 function Initialize-HarnessCfg {
     param([string]$CfgDir)
     $g = Assert-HarnessCfgDir $CfgDir
@@ -217,6 +246,7 @@ function Initialize-HarnessCfg {
     if ($held) {
         if ($held.Value -cne $g.Ini) { Stop-Refuse 'this process has already pinned a different configuration directory' }
     } else {
+        Assert-HarnessCfgTree $g.Dir # once per process
         New-Variable -Name HarnessPinnedCfgIni -Value $g.Ini -Option Constant -Scope Script
     }
     $g

@@ -20,14 +20,19 @@ directory, `%APPDATA%\REAPER`, and writes your own configuration. So before ever
    (volume serial number and file ID): this catches 8.3 short names, subst drives and any other spelling. A path
    whose identity cannot be read is refused: what cannot be proven is not allowed.
 4. The directory must hold the sentinel file `doctor.ps1 -Init` writes, and `reaper.ini`.
-5. Nothing at the top level of the directory may lead out of it, since REAPER and the harness read and write through
-   those names. Any link or junction there is refused. A file with a namesake in `%APPDATA%\REAPER` is compared with
-   it by file identity: the same file (a hard link) is refused, and so is an identity that cannot be read. A directory
-   that cannot be listed is refused. A file without a namesake is not looked at any further.
+5. Nothing in the directory may lead out of it, since REAPER and the harness read and write through those names. Any
+   link or junction is refused. So is any file with more than one name on its volume, which is what a hard link is:
+   writing it changes the file under its other name too, and that name can be anywhere and called anything, so its link
+   count decides and not a search for it. A count that cannot be read is refused, and so is a directory that cannot be
+   listed. The top level is checked before every start, because a link can appear at any time and that is where files
+   are opened by a fixed name. The whole tree, at every level and without following a link, is walked once per process
+   when the path is pinned: a configuration directory can hold thousands of entries and each start checks several
+   times, so that walk is left out of the check before every start on purpose. A hard link made below the top level
+   after the pin is therefore not seen by that process.
 
 `doctor.ps1 -Init` only takes over a directory that does not exist, an empty one, or one it initialised before.
 A directory with content but no sentinel (for example a portable REAPER) is refused and nothing is written; there
-is no switch to override that. Rule 5 is checked there as well, before anything is written.
+is no switch to override that. The top level is checked by rule 5 there as well, before anything is written.
 
 The checked ini path is pinned into a read-only constant for the rest of the process; the `-cfgfile` argument can
 only come from it, and is checked again right before every start. A lint rule keeps the `-cfgfile` literal in
@@ -43,10 +48,11 @@ listed is recorded as `unreadable` (the directory itself under the name `.`), an
 unreadable on either side is not "unchanged", also when both listings say the same: what cannot be read cannot be
 proven to have stayed as it was. The comparison names those entries.
 
-The self-test reaches a mapped network drive and an unreadable identity through stand-ins for the functions that read
-them, and uses a real letter with nothing mounted on it. A real mapped drive changes the machine, so one is only made
-on a hosted runner, where it is deleted again; everywhere else that case, like a symbolic link in a session without
-the privilege for one, is counted as not run for real in the summary line.
+The self-test reaches a mapped network drive and a link count that cannot be read through stand-ins for the functions
+that read them, and uses a real letter with nothing mounted on it. A real mapped drive changes the machine, so one is
+only made on a hosted runner, where it is deleted again; everywhere else that case, like a symbolic link in a session
+without the privilege for one, is counted as not run for real in the summary line. What the self-test undoes on the
+machine (a deny entry, a subst drive, a mapped drive) is checked as undone, and a failure there turns a case red.
 
 ## Only its own processes, one GUI run at a time
 
@@ -54,7 +60,9 @@ the privilege for one, is counted as not run for real in the summary line.
 - A process the watchdog could not end is reported, not assumed gone: the launch result has `StillRunning`, true when
   the stop failed or the process was still there after the wait, and false when it is gone (a process that had already
   exited is no failure). A caller that sees `StillRunning` true records `INCOMPLETE`, does not release its GUI lock and
-  does not start the next launch: that window may still be on the desktop.
+  does not start the next launch: that window may still be on the desktop. `Invoke-WithHarnessLocks` always releases
+  when its block ends, so a caller that can start REAPER must not use it: it takes and releases the locks itself with
+  `Enter-HarnessLocks` and `Exit-HarnessLocks`.
 - Before every launch the GUI lock has to be held: `Invoke-HarnessHost` enforces it, and without the object
   `Enter-HarnessLocks` returned for a set holding the default lock it refuses before anything starts. The other two
   checks before a launch, that no other `reaper.exe` is running and the listing of the default directory, are the job
@@ -75,7 +83,7 @@ only those, are classified:
 | title | action |
 |---|---|
 | `REAPER Query` (save changes?) | answered No |
-| `Render…`, `Scanning…`, `Building peaks…` | progress windows, left alone |
+| `Render…`, `Scanning…`, `Building peaks…` | progress windows, left alone, unless the title has `fail` or `error` in it in any case: those report trouble and do not go away on their own, so they are stuck, `unknown-dialog` |
 | `About REAPER…` (the evaluation licence reminder) | never clicked away: stuck, `license-nag` |
 | `Project Load Warning`, `REAPER Error`, `Select files to save or delete`, `REAPER` (no audio device) | stuck, named |
 | anything else | stuck, `unknown-dialog` with the title (paths masked) |

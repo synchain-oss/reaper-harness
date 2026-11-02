@@ -74,6 +74,10 @@ function Wait-BoxShown($Process, [string]$Title, [int]$Seconds) {
 }
 
 # ---- pinning ----
+# An ordinary tree below the top level: pinning walks it and has nothing to say
+$plugin = Join-Path $CfgA 'plugins\Some Plugin.vst3\Contents\x86_64-win'
+$null = New-Item -ItemType Directory -Force -Path $plugin
+[IO.File]::WriteAllText((Join-Path $plugin 'Some Plugin.vst3'), 'x')
 $pinned = Initialize-HarnessCfg $CfgA
 Write-Case 'pin: Initialize pins the configuration directory; the value of the configuration file argument only comes from the constant, without quotes' $false ((Get-HarnessCfgArgument) -ceq $pinned.Ini)
 Write-Case 'pin: another configuration directory after pinning is refused' $true (Test-Throws { $null = Initialize-HarnessCfg $CfgB } 'REFUSED:*')
@@ -151,6 +155,21 @@ $sentinelText = Get-Content -LiteralPath $sentinelFile -Raw
 Remove-Item -LiteralPath $sentinelFile
 try { Write-Case 'checked again before every start: with the sentinel deleted the start is refused and the stand-in is never called' $true ((Test-Throws { $null = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -Launcher (New-StandIn 'exit 0' $seenB) } 'REFUSED:*sentinel*') -and -not $seenB.Called) }
 finally { [IO.File]::WriteAllText($sentinelFile, $sentinelText) }
+# What can appear after the pin: the top level is checked again before every start, the tree below it is not
+$otherFile = Join-Path $Work 'other-name.ini'
+[IO.File]::WriteAllText($otherFile, 'x')
+$linkTo = { param($At) try { $null = New-Item -ItemType HardLink -Path $At -Target $otherFile -ErrorAction Stop; $true } catch { $false } }
+$lateTop = Join-Path $pinned.Dir 'late.ini'
+$lateTopMade = & $linkTo $lateTop
+$noLink = $lateTopMade ? '' : ' (hard links cannot be made here; not run for real)'
+$seenC = @{ Called = $false }
+try { Write-Case "after the pin: a hard link that appears at the top level is refused at the next start and the stand-in is never called$noLink" $true ((-not $lateTopMade) -or ((Test-Throws { $null = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -Launcher (New-StandIn 'exit 0' $seenC) } 'REFUSED:*hard link*') -and -not $seenC.Called)) }
+finally { if ($lateTopMade) { Remove-Item -LiteralPath $lateTop } }
+Write-Case 'after the pin: with that hard link gone the check passes again' $false ((Get-HarnessCfgArgument) -ceq $pinned.Ini)
+$lateSub = Join-Path $plugin 'late.dll'
+$lateSubMade = & $linkTo $lateSub
+try { Write-Case "after the pin: the tree below the top level is walked once, not again by the next check or by pinning the same directory again$noLink" $false ((-not $lateSubMade) -or ((Get-HarnessCfgArgument) -ceq $pinned.Ini -and (Initialize-HarnessCfg $CfgA).Ini -ceq $pinned.Ini)) }
+finally { if ($lateSubMade) { Remove-Item -LiteralPath $lateSub } }
 $sampled = @{ N = 0 }
 $elsewhere = Join-Path $Work 'elsewhere\Some Plugin.vst3'
 $kernel = Join-Path ([Environment]::SystemDirectory) 'kernel32.dll'
@@ -211,6 +230,7 @@ Write-Case 'box command: an apostrophe in the title or the path stays inside its
 # run) WinForms refuses to show it and the stand-in exits at once, so these cases could say nothing about the dialog
 # handling. Then, and only then, they are reported as not run; the parent fails when they are missing although this
 # session has a desktop. The window verdicts themselves are pure functions and run everywhere (Get-HostCases).
+# Invoke-WithHarnessLocks is fine here because no REAPER is involved: every stand-in is gone when its case is judged.
 $dialogCases = {
     param($guiLock)
     $outNo = Join-Path $Work 'box-no.txt'
@@ -247,6 +267,9 @@ $probeExit = { $p = & $lockChild $probe; $p.WaitForExit(); $p.ExitCode }.GetNewC
 $set = (Get-HarnessGuiLockSet -Extra 'Local\b-x', 'Local\A-y', 'Local\b-x') -join '|'
 Write-Case 'locks: the lock set is the default plus extras, de-duplicated and in ordinal order; a bad name is a usage error' $true (
     $set -ceq "Local\A-y|$gui|Local\b-x" -and (Test-Throws { Get-HarnessGuiLockSet -Extra 'Global\x' } 'USAGE:*') -and (Test-Throws { Get-HarnessGuiLockSet -Extra 'Local\a b' } 'USAGE:*'))
+Write-Case 'locks: a lock name is the whole text: a line end after it or anything before it makes it no lock name' $true (
+    -not (Test-HarnessLockName "Local\x`n") -and -not (Test-HarnessLockName "Local\x`r`n") -and -not (Test-HarnessLockName 'xLocal\x') -and -not (Test-HarnessLockName "`nLocal\x") -and (Test-HarnessLockName 'Local\x.y_z-1') -and
+    (Test-Throws { Get-HarnessGuiLockSet -Extra "Local\x`n" } 'USAGE:*'))
 # Taking and releasing a set directly (what a caller does around Invoke-HarnessHost)
 $freeLock = $gui.Replace('-gui', '-free')
 $held = Enter-HarnessLocks -Names @($freeLock, $gui) -TimeoutSeconds 5 -Quiet
@@ -254,6 +277,8 @@ Write-Case 'locks: while this process holds the set, another process can take ne
 Exit-HarnessLocks $held
 Write-Case 'locks: after Exit-HarnessLocks both are free again' $false ((Test-HarnessLockFree -FullName $gui) -and (Test-HarnessLockFree -FullName $freeLock))
 Write-Case 'locks: Invoke-WithHarnessLocks hands the block the lock object it holds' $false (Invoke-WithHarnessLocks -Names @($gui) -TimeoutSeconds 5 { param($given) Test-HarnessLockHeld -Lock $given -Name $gui })
+$blockThrew = Test-Throws { Invoke-WithHarnessLocks -Names @($gui) -TimeoutSeconds 5 { throw 'from inside the block' } } '*from inside the block*'
+Write-Case 'locks: Invoke-WithHarnessLocks always releases, also when its block throws' $true ($blockThrew -and (Test-HarnessLockFree -FullName $gui))
 Write-Case 'locks: Test-HarnessLockFree only takes a full Local\ name: anything else is a usage error before it reaches a command line' $true ((Test-Throws { Test-HarnessLockFree -FullName "Local\a'; exit 0; '" } 'USAGE:*') -and (Test-Throws { Test-HarnessLockFree -FullName 'Global\x' } 'USAGE:*'))
 $holder = & $lockChild "if (-not (Enter-HarnessLocks -Names '$gui' -TimeoutSeconds 5 -Quiet)) { exit 2 }; Start-Sleep -Seconds 60"
 try {
