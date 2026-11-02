@@ -363,7 +363,7 @@ async function main(argv) {
         const paths = JSON.parse(fs.readFileSync(file, "utf8"));
         print({ hits: await infraHits(paths, opt("--module") ? path.resolve(opt("--module")) : DEFAULT_INFRA) });
     } else if (cmd === "message") {
-        // control characters are refused, not scanned: an ESC in the middle of a path or a needle would hide it from every rule
+        // control and invisible characters are refused, not scanned: one in the middle of a path or a needle would hide it from every rule
         const text = plainText(fs.readFileSync(file), "the commit message");
         print(messageErrors(text, { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }));
     } else if (cmd === "same-authors") {

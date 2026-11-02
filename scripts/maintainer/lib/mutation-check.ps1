@@ -11,8 +11,9 @@
 #   > <replacement; several > lines are joined; a bare > is an empty line; no > line = delete>
 #   pwsh scripts/maintainer/lib/mutation-check.ps1 [-Only <text in the label or file>] [-Id 5,9] [-FromId 120]   (ids as listed by -List) [-Parallel 3] [-List] [-Check]
 # A run= name is a script (push, pr-open, pr-comment, pr-merge, new-worktree), maint (maint.mjs --self-test), shared (the
-# shared-module and source-hygiene rules of self-test.ps1) or pre-push (scripts/hooks/pre-push.mjs --self-test). A file outside this
-# directory is named relative to it (../hooks/pre-push.mjs, ../../.github/workflows/ci.yml) and needs a run=.
+# shared-module and source-hygiene rules of self-test.ps1), pre-push (scripts/hooks/pre-push.mjs --self-test), check-secrets
+# (scripts/check-secrets.mjs --self-test) or privacy (scripts/check-privacy.mjs --self-test). A file outside this directory is
+# named relative to it (../hooks/pre-push.mjs, ../../.github/workflows/ci.yml) and needs a run=.
 # A mutation is killed only when a named case of one of its self-tests turns red ("self-test failed: <case>"). A self-test that
 # exits red without naming a case is a CRASH: the script fell over, which says nothing about the criterion, so it is not a kill.
 # A mutated file that no longer parses is an ERROR, not a kill: the self-tests would turn red for the wrong reason.
@@ -110,6 +111,8 @@ $worker = {
     foreach ($name in $Mutation.Run) {
         $out = if ($name -eq 'maint') { & $NodePath (Join-Path $copy 'lib/maint.mjs') --self-test 2>&1 }
         elseif ($name -eq 'pre-push') { & $NodePath (Join-Path $dir 'scripts/hooks/pre-push.mjs') --self-test 2>&1 }
+        elseif ($name -eq 'check-secrets') { & $NodePath (Join-Path $dir 'scripts/check-secrets.mjs') --self-test 2>&1 }
+        elseif ($name -eq 'privacy') { & $NodePath (Join-Path $dir 'scripts/check-privacy.mjs') --self-test 2>&1 }
         elseif ($name -eq 'shared') { & ([Environment]::ProcessPath) -NoProfile -File (Join-Path $copy 'self-test.ps1') -Only none 2>&1 }
         else { & ([Environment]::ProcessPath) -NoProfile -File (Join-Path $copy "$name.ps1") -SelfTest 2>&1 }
         $code = $LASTEXITCODE
@@ -144,7 +147,7 @@ $workRoot = Join-Path ([IO.Path]::GetTempPath()) "harness-mutation-$([guid]::New
 New-Item -ItemType Directory -Force -Path $workRoot | Out-Null
 try {
     # the unmutated copy first: a red baseline would make every "killed" meaningless
-    $baselineEntry = [pscustomobject]@{ Id = 0; File = 'self-test.ps1'; Label = 'baseline (no change)'; Run = @('push', 'pr-open', 'pr-comment', 'pr-merge', 'new-worktree', 'maint', 'shared', 'pre-push'); Find = @(); Replace = @() }
+    $baselineEntry = [pscustomobject]@{ Id = 0; File = 'self-test.ps1'; Label = 'baseline (no change)'; Run = @('push', 'pr-open', 'pr-comment', 'pr-merge', 'new-worktree', 'maint', 'shared', 'pre-push', 'check-secrets', 'privacy'); Find = @(); Replace = @() }
     $baseline = if ($Check) { [pscustomobject]@{ Status = 'SURVIVED'; Detail = '' } } else { & $worker $baselineEntry $maintainerDir $nodeCommand $workRoot $false }
     # a script block cannot cross into the parallel runspaces as a variable; its text can
     $workerText = $worker.ToString()

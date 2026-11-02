@@ -189,6 +189,21 @@ export function selfTest() {
         check("--text rejects UTF-16", true, run(["--text", file("t16.md", utf16("clean\n"))], local).code === 1);
         const nul = run(["--text", file("tnul.md", "clean\0\n")], local);
         check("--text rejects NUL and reports the offset", true, nul.code === 1 && nul.out.includes("byte offset 5"));
+        // Characters nobody sees: in the middle of a path or a needle they hide it from every rule
+        for (const [label, ch, code] of [
+            ["a zero-width space", "\u200b", "200B"],
+            ["a soft hyphen", "\u00ad", "00AD"],
+            ["a direction override", "\u202e", "202E"],
+            ["a word joiner", "\u2060", "2060"],
+            ["a C1 control character", "\u0085", "0085"],
+            ["a CR without its LF", "\r", "000D"],
+            ["a format character beyond the first plane", "\u{e0001}", "E0001"],
+        ]) {
+            const r = run(["--text", file("thidden.md", `clean${ch}text\n`)], local);
+            check(`--text rejects ${label}`, true, r.code === 1 && r.out.includes(`U+${code}`));
+        }
+        check("--text takes CRLF line ends", false, run(["--text", file("tcrlf.md", "clean\r\nmore\r\n")], local).code === 0);
+        check("--text drops a byte order mark", false, run(["--text", file("tbom.md", "\ufeffclean\n")], local).code === 0);
         // Called through a junction or symlink the CLI still runs instead of silently doing nothing
         const link = path.join(aux, "scripts-link");
         fs.symlinkSync(path.dirname(SELF), link, process.platform === "win32" ? "junction" : "dir");

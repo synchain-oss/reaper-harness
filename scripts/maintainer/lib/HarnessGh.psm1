@@ -106,8 +106,9 @@ function Invoke-HarnessExternal {
 }
 
 <#
-  What a failed command says: the command with its subcommand ("-C <path>" only says where git runs, the subcommand says what
-  failed), the exit code and the whole stderr, cut at about 4 KB (git and gitleaks explain themselves after the first line).
+  What a failed command says: the command by its first three words that are not options ("-C <path>" only says where git runs, and
+  --paginate must not push the endpoint out of the message: gh's stderr does not name it), the exit code and the whole stderr, cut at
+  about 4 KB (git explains itself after the first line).
 #>
 function Format-HarnessExternalError {
     param([string]$Exe, [string[]]$Arguments, [int]$ExitCode, [AllowEmptyString()][string]$ErrText)
@@ -115,7 +116,7 @@ function Format-HarnessExternalError {
     if ($shown.Count -ge 2 -and $shown[0] -ceq '-C') { $shown = @($shown | Select-Object -Skip 2) }
     $stderrText = ([string]$ErrText).Trim()
     if ($stderrText.Length -gt 4096) { $stderrText = "$($stderrText.Substring(0, 4096))... (stderr cut at 4096 characters)" }
-    "$Exe $(@($shown | Select-Object -First 2) -join ' ') failed (exit code $ExitCode): $stderrText"
+    "$Exe $(@($shown | Where-Object { $_ -cnotmatch '^-' } | Select-Object -First 3) -join ' ') failed (exit code $ExitCode): $stderrText"
 }
 
 function Invoke-HarnessGh {
@@ -549,20 +550,22 @@ function Get-HarnessReviewState {
     Invoke-HarnessMaint -Command 'review-state' -Content $json -Extra @('--writers', ($writers -join ','), '--bot', $Bot)
 }
 
-<# The two notices of pr-agent (a persistent review was updated, a review could not be generated), within the first 5 lines: they say nothing to answer. #>
+<#
+  The two notices of pr-agent say nothing to answer: a persistent review was updated, a review could not be generated. The whole
+  comment has to be that one line: the words alone can be written by a model above a list of findings.
+#>
 function Test-HarnessPrAgentNotice {
     param([AllowEmptyString()][AllowNull()][string]$Body)
-    @((($Body ?? '') -split "`r?`n") | Select-Object -First 5 | Where-Object { $_ -match '\[Persistent review\]' -or $_ -match '^\s*Failed to generate\b' }).Count -gt 0
+    ($Body ?? '').Trim() -cmatch '\A(?:\*\*\[Persistent review\]\(https://\S+\)\*\* updated to latest commit https://\S+|Failed to generate [A-Za-z ]{1,80})\z'
 }
 
 <#
   pr-agent review output: author github-actions[bot] and, within the first 5 lines, a pr-agent:review / pr-agent:improve
   marker (HTML comment or link reference) or one of its two headings. A marker that only shows up further down (a quote of
-  somebody else's output) does not count; the two notices (persistent-review update, generation failure) stay plain bot comments.
+  somebody else's output) does not count.
 #>
 function Test-HarnessPrAgentComment {
     param([AllowEmptyString()][AllowNull()][string]$Body)
-    if (Test-HarnessPrAgentNotice $Body) { return $false }
     $lines = @((($Body ?? '') -split "`r?`n") | Select-Object -First 5)
     if (@($lines | Where-Object {
                 $_ -match '^\s*<!--\s*pr-agent:(?:review|improve)\b' -or
@@ -702,7 +705,8 @@ function Test-HarnessResponded {
 <#
   Latest result of each check on a head: name -> { status; conclusion; details_url }. Only runs of the pull_request event on
   this head count: a later manual dispatch of the same workflow on the same commit has a larger id and must not cover a failed
-  PR run. A check run of GitHub Actions names its run in details_url; a check run of another app takes part as it is.
+  PR run. Every check this repository requires comes from GitHub Actions, so only that app takes part: another app can name a
+  check the same and even point details_url at a real run. A check run of GitHub Actions names its run in details_url.
 #>
 function Get-HarnessCheckRuns {
     param([Parameter(Mandatory)][string]$Sha)
@@ -712,8 +716,9 @@ function Get-HarnessCheckRuns {
     $pages = Get-HarnessApi "repos/$($script:RepoSlug)/commits/$Sha/check-runs?per_page=100" -Paginate
     $latest = @{}
     foreach ($c in @($pages | ForEach-Object { $_.check_runs } | ForEach-Object { $_ })) {
+        if ([string](Get-HarnessProp (Get-HarnessProp $c 'app') 'slug') -cne 'github-actions') { continue }
         $actionsRun = [regex]::Match([string](Get-HarnessProp $c 'details_url'), '/actions/runs/(\d+)')
-        if ($actionsRun.Success -and -not $prRuns.Contains($actionsRun.Groups[1].Value)) { continue }
+        if (-not $actionsRun.Success -or -not $prRuns.Contains($actionsRun.Groups[1].Value)) { continue }
         if (-not $latest.ContainsKey($c.name) -or [long]$c.id -gt [long]$latest[$c.name].id) { $latest[$c.name] = $c }
     }
     return $latest

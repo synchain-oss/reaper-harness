@@ -193,7 +193,9 @@ export function mask(text, personal = []) {
 
 /**
  * Gate for public text and needle lists: rejects UTF-16 (every needle would become a NUL-interleaved
- * string that never matches), NUL and control characters; drops a UTF-8 BOM. buf is a Buffer or string.
+ * string that never matches), NUL, control characters, a CR without its LF and invisible format characters
+ * (a zero-width space in the middle of a path hides it from every rule, and nobody sees it in the rendered
+ * text); drops a UTF-8 BOM. buf is a Buffer or string.
  */
 export function plainText(buf, label) {
     const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf), "utf8");
@@ -202,13 +204,13 @@ export function plainText(buf, label) {
     }
     const bom = b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0;
     const text = b.subarray(bom).toString("utf8");
-    const bad = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.exec(text);
+    const bad = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|\p{Cf}/u.exec(text);
     if (bad) {
         // Only the position and the code are reported, never the content (pasted ANSI colour codes are the usual source)
         const before = text.slice(0, bad.index);
-        const code = bad[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, "0");
+        const code = bad[0].codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
         const where = `line ${before.split("\n").length}, byte offset ${bom + Buffer.byteLength(before)}`;
-        throw new Error(`${label} contains control character U+${code} (${where})`);
+        throw new Error(`${label} contains a control or invisible character U+${code} (${where})`);
     }
     return text;
 }

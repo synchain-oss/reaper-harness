@@ -70,6 +70,7 @@ function Test-ModuleRules {
     $modRoutes = [ordered]@{
         '^gh api boom$'                   = { @{ Code = 2; Out = ''; Err = "boom`nsecond line" } }
         '^gh api longboom$'               = { @{ Code = 2; Out = ''; Err = 'e' * 9000 } }
+        'pagedboom$|wordsboom more$'      = { @{ Code = 2; Out = ''; Err = 'boom' } }
         '^git -C \S+ status --boom$'      = { @{ Code = 128; Out = ''; Err = 'fatal: not a git repository' } }
         'collaborators/DLsnows/permission' = { 'admin' }
         'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
@@ -96,7 +97,9 @@ function Test-ModuleRules {
         # ---- external commands, API reads, GraphQL -------------------------------------------
         $modFailed = Get-ThrownMessage { Invoke-HarnessExternal gh @('api', 'boom') }
         Add-HarnessCase $modCases 'external: a non-zero exit code is an error naming the command, the code and the whole stderr' $true ($modFailed -ceq "gh api boom failed (exit code 2): boom`nsecond line")
-        Add-HarnessCase $modCases 'external: a git command is named by its subcommand, not by -C and the path' $true ((Get-ThrownMessage { Invoke-HarnessGit @('status', '--boom') }) -ceq 'git status --boom failed (exit code 128): fatal: not a git repository')
+        Add-HarnessCase $modCases 'external: an option does not push the endpoint out of the name of a command' $true ((Get-ThrownMessage { Invoke-HarnessExternal gh @('api', '--paginate', '--slurp', 'pagedboom') }) -cmatch '^gh api pagedboom failed \(exit code 2\)')
+        Add-HarnessCase $modCases 'external: a command is named by its first three words that are not options' $true ((Get-ThrownMessage { Invoke-HarnessExternal gh @('api', '-X', 'PUT', 'wordsboom', 'more') }) -cmatch '^gh api PUT wordsboom failed \(exit code 2\)')
+        Add-HarnessCase $modCases 'external: a git command is named by its subcommand, not by -C and the path' $true ((Get-ThrownMessage { Invoke-HarnessGit @('status', '--boom') }) -ceq 'git status failed (exit code 128): fatal: not a git repository')
         $modLong = Get-ThrownMessage { Invoke-HarnessExternal gh @('api', 'longboom') }
         Add-HarnessCase $modCases 'external: a long stderr is cut at about 4 KB and says so' $true ($modLong.Length -lt 4300 -and $modLong -match 'stderr cut at 4096 characters\)$')
         Add-HarnessCase $modCases 'external: -AllowFail hands the answer back instead' $false ((Invoke-HarnessExternal gh @('api', 'boom') -AllowFail).Code -ne 2)
@@ -352,7 +355,8 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'answered: a manual deepseek-review comment nobody named' $true (-not (& $modAnswered $modDeepseek @($modDeepseek)))
         Add-HarnessCase $modCases 'answered: a manual deepseek-review comment named by a later agent comment' $false (-not (& $modAnswered $modDeepseek @($modDeepseek, $modBotReply)))
         Add-HarnessCase $modCases 'answered: a plain comment of a bot nobody named' $true (-not (& $modAnswered (& $modBot @{ Body = 'Some text.' }) @((& $modBot @{ Body = 'Some text.' }))))
-        $modNoticeCases = [ordered]@{ '[Persistent review]' = '**[Persistent review]** updated to latest commit abc1234'; 'Failed to generate' = "Failed to generate PR review: timeout`n<!-- pr-agent:improve:summary -->" }
+        # the notices in their real shape
+        $modNoticeCases = [ordered]@{ '[Persistent review]' = '**[Persistent review](https://github.com/o/r/pull/7#issuecomment-1)** updated to latest commit https://github.com/o/r/commit/abc1234'; 'Failed to generate' = 'Failed to generate code suggestions for PR' }
         foreach ($modNoticeName in $modNoticeCases.get_Keys()) {
             $modNotice = & $modBot @{ Body = $modNoticeCases[$modNoticeName] }
             Add-HarnessCase $modCases "answered: the pr-agent notice $modNoticeName needs no answer" $false (-not (& $modAnswered $modNotice @($modNotice)))
@@ -361,7 +365,14 @@ function Test-ModuleRules {
             $modNoticeReview = & $modBot @{ Body = $modNoticeCases[$modNoticeName]; Source = 'review'; State = 'COMMENTED' }
             Add-HarnessCase $modCases "answered: the words $modNoticeName in a review body are no notice" $true (-not (& $modAnswered $modNoticeReview @($modNoticeReview)))
             $modNoticeLow = & $modBot @{ Body = "one`ntwo`nthree`nfour`nfive`n$($modNoticeCases[$modNoticeName])" }
-            Add-HarnessCase $modCases "answered: the words $modNoticeName below the first 5 lines are no notice" $true (-not (& $modAnswered $modNoticeLow @($modNoticeLow)))
+            Add-HarnessCase $modCases "answered: the words $modNoticeName below other lines are no notice" $true (-not (& $modAnswered $modNoticeLow @($modNoticeLow)))
+            $modNoticeAbove = & $modBot @{ Body = "$($modNoticeCases[$modNoticeName])`n- 【重要】a real finding" }
+            Add-HarnessCase $modCases "answered: the words $modNoticeName above a list of findings are no notice" $true (-not (& $modAnswered $modNoticeAbove @($modNoticeAbove)))
+        }
+        $modMere = [ordered]@{ 'a link of that name in a sentence' = 'The [Persistent review] link was updated.'; 'the persistent notice without its links' = '**[Persistent review]** updated to latest commit abc1234'; 'the persistent notice without its first link' = '**[Persistent review]** updated to latest commit https://github.com/o/r/commit/abc1234'; 'the persistent notice whose commit is no link' = '**[Persistent review](https://github.com/o/r/pull/7)** updated to latest commit abc1234'; 'the persistent notice with another ending' = '**[Persistent review](https://github.com/o/r/pull/7)** updated to latest commit https://github.com/o/r/commit/abc1234 and more'; 'failed words with a reason that names things' = 'Failed to generate: a.ps1:1 is wrong'; 'failed words with a bracket' = 'Failed to generate 【重要】'; 'failed words in the middle of a line' = 'It says Failed to generate code suggestions for PR' }
+        foreach ($modMereName in $modMere.get_Keys()) {
+            $modMereItem = & $modBot @{ Body = $modMere[$modMereName] }
+            Add-HarnessCase $modCases "answered: $modMereName is no notice" $true (-not (& $modAnswered $modMereItem @($modMereItem)))
         }
         $modBotEmpty = & $modBot @{ Source = 'review'; State = 'COMMENTED'; Body = '' }
         Add-HarnessCase $modCases 'answered: an empty review of a bot without inline comments needs no answer' $false (-not (& $modAnswered $modBotEmpty @($modBotEmpty)))
@@ -387,7 +398,8 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'framework: the cases that are red are named, the green ones are not' $false ($modErrWriter.ToString() -notmatch 'self-test failed: red one' -or $modErrWriter.ToString() -match 'green one')
 
         # ---- check runs ----------------------------------------------------------------------
-        $modRun = { param($id, $checkName, $conclusion) [pscustomobject]@{ id = $id; name = $checkName; status = 'completed'; conclusion = $conclusion; details_url = 'u' } }
+        $mod.Runs = [pscustomobject]@{ total_count = 1; workflow_runs = @([pscustomobject]@{ id = 5000000002 }) }
+        $modRun = { param($id, $checkName, $conclusion) [pscustomobject]@{ id = $id; name = $checkName; status = 'completed'; conclusion = $conclusion; app = [pscustomobject]@{ slug = 'github-actions' }; details_url = "https://github.com/$(Get-HarnessRepo)/actions/runs/5000000002/job/$id" } }
         foreach ($modOrder in @(@(5, 9), @(9, 5))) {
             $mod.CheckRuns = [pscustomobject]@{ check_runs = @(($modOrder | ForEach-Object { & $modRun $_ 'harness-gate' $(if ($_ -eq 9) { 'success' } else { 'failure' }) }) + @(& $modRun 7 'branch-gate' 'success')) }
             $modLatest = Get-HarnessCheckRuns $modHead
@@ -395,7 +407,7 @@ function Test-ModuleRules {
         }
         # a check run of GitHub Actions counts only when its run belongs to the pull_request event on this head: fixtures in the shape of the real responses
         $modPrRuns = Read-HarnessFixture 'pr-runs.json'
-        $modActionsRun = { param($id, $conclusion, $runId) [pscustomobject]@{ id = $id; name = 'harness-gate'; status = 'completed'; conclusion = $conclusion; head_sha = $modHead; details_url = "https://github.com/$(Get-HarnessRepo)/actions/runs/$runId/job/$($id + 1000)" } }
+        $modActionsRun = { param($id, $conclusion, $runId) [pscustomobject]@{ id = $id; name = 'harness-gate'; status = 'completed'; conclusion = $conclusion; head_sha = $modHead; app = [pscustomobject]@{ slug = 'github-actions' }; details_url = "https://github.com/$(Get-HarnessRepo)/actions/runs/$runId/job/$($id + 1000)" } }
         $modGate = { param($runs) $mod.CheckRuns = [pscustomobject]@{ total_count = @($runs).Count; check_runs = @($runs) }; (Get-HarnessCheckRuns $modHead)['harness-gate'] }
         $mod.Runs = $modPrRuns
         $modDispatched = & $modGate @((& $modActionsRun 101 'failure' 5000000002), (& $modActionsRun 909 'success' 5000000777))
@@ -404,8 +416,13 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'check runs: only a dispatch on this head: no result at all' $true ($null -eq $modDispatchOnly)
         $modRerun = & $modGate @((& $modActionsRun 101 'failure' 5000000002), (& $modActionsRun 102 'success' 5000000003))
         Add-HarnessCase $modCases 'check runs: two runs of the pull_request event: the newer counts' $false ($modRerun.conclusion -ne 'success')
-        $modOtherApp = [pscustomobject]@{ id = 909; name = 'harness-gate'; status = 'completed'; conclusion = 'success'; head_sha = $modHead; details_url = 'https://example.invalid/report/909' }
-        Add-HarnessCase $modCases 'check runs: a check of another app has no Actions run and takes part as it is' $false ((Get-HarnessProp (& $modGate @((& $modActionsRun 101 'failure' 5000000002), $modOtherApp)) 'conclusion') -ne 'success')
+        # only GitHub Actions takes part: another app can name a check the same and point its link at a real PR run
+        $modOtherApp = { param($link, $slug = 'some-other-app') [pscustomobject]@{ id = 909; name = 'harness-gate'; status = 'completed'; conclusion = 'success'; head_sha = $modHead; app = [pscustomobject]@{ slug = $slug }; details_url = $link } }
+        Add-HarnessCase $modCases 'check runs: a successful check of another app does not cover a failed one' $true ((& $modGate @((& $modActionsRun 101 'failure' 5000000002), (& $modOtherApp 'https://example.invalid/report/909'))).conclusion -eq 'failure')
+        Add-HarnessCase $modCases 'check runs: another app pointing its link at a real PR run does not cover a failed one' $true ((& $modGate @((& $modActionsRun 101 'failure' 5000000002), (& $modOtherApp "https://github.com/$(Get-HarnessRepo)/actions/runs/5000000002/job/5000000021"))).conclusion -eq 'failure')
+        Add-HarnessCase $modCases 'check runs: another app alone: no result at all' $true ($null -eq (& $modGate @(& $modOtherApp "https://github.com/$(Get-HarnessRepo)/actions/runs/5000000002/job/5000000021")))
+        Add-HarnessCase $modCases 'check runs: a check run without an app: no result at all' $true ($null -eq (& $modGate @([pscustomobject]@{ id = 909; name = 'harness-gate'; status = 'completed'; conclusion = 'success'; head_sha = $modHead; details_url = "https://github.com/$(Get-HarnessRepo)/actions/runs/5000000002/job/5000000021" })))
+        Add-HarnessCase $modCases 'check runs: a check run of GitHub Actions that names no run: no result at all' $true ($null -eq (& $modGate @(& $modOtherApp 'https://example.invalid/report/909' 'github-actions')))
         $modLog.Clear()
         & $modGate @(& $modActionsRun 101 'success' 5000000002) | Out-Null
         Add-HarnessCase $modCases 'check runs: the runs are asked for this head and the pull_request event, every page' $false (@($modLog | Where-Object { $_ -match "^gh api --paginate --slurp repos/\S+/actions/runs\?head_sha=$modHead&event=pull_request&per_page=100$" }).Count -ne 1)
