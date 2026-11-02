@@ -1,117 +1,49 @@
 // SPDX-License-Identifier: MIT
 //
-// Node side of the maintainer wrappers (scripts/maintainer/*.ps1). It holds only the parsing that is easier and
-// safer to keep in JavaScript: the machine-readable review footer, the head marker, the per-section counts of a
-// bot summary, the agent marker and the "previous round / disposition" lookup. Privacy rules live in
-// scripts/check-privacy.mjs and the infrastructure path list in scripts/lib/infra-paths.mjs; this file calls
-// them and never copies their tables.
+// Node side of the maintainer wrappers (scripts/maintainer/*.ps1). The criteria live in the repository's own scripts and
+// are imported, never copied: the review summary formats come from scripts/review-bot.mjs, the commit message and PR text
+// rules from scripts/check-commits.mjs, the personal needles from scripts/lib/privacy-needles.mjs and the infrastructure
+// path list from scripts/lib/infra-paths.mjs. What is left here is what only the wrappers need: the facts of a posted
+// summary (footer on the last line exactly once, run id, per-item findings), the agent marker and the disposition lookup
+// built on findPrevious, and thin command-line bridges so that the PowerShell side asks Node instead of re-implementing a rule.
 //   node scripts/maintainer/lib/maint.mjs review-state --file <issue comments JSON> --writers <login,...> [--bot claude]
 //        newest bot summary (head, run link, footer and count check) and the disposition after it (author must be in
 //        --writers); also every bot summary (footer, run id, per-item findings, created_at / updated_at, body sha256)
 //        and the run ids referenced by every disposition
 //   node scripts/maintainer/lib/maint.mjs infra --file <path JSON array> [--module <infra-paths.mjs>]
-//        the paths that touch the infrastructure list; --module is for the self-test only
+//        the paths that touch the infrastructure list; --module names another list module and is for the self-test only
+//   node scripts/maintainer/lib/maint.mjs message --file <message> [--merge] [--exactly-one] [--needles <mode>] [--needles-file <path>]
+//        checkMessage of check-commits.mjs, same-repository tier: { errors, warns }
+//   node scripts/maintainer/lib/maint.mjs pr-text --file <JSON { title, body }> [--needles <mode>] [--needles-file <path>]
+//        checkPrText of check-commits.mjs: { errors, warns }
+//   node scripts/maintainer/lib/maint.mjs text --file <text>
+//        { aiTrailerLines } : the lines hasAiTrailer of check-commits.mjs takes for an AI attribution trailer, any author
 //   node scripts/maintainer/lib/maint.mjs --self-test
+// Output is one JSON line; a failure prints { error } and exits 2 (the PowerShell side treats that as an error, never as a pass).
 
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { SIGNOFF, checkMessage, checkPrText, hasAiTrailer } from "../../check-commits.mjs";
+import { FOOTER, findPrevious, headMark, postedRecord, sectionCounts, validateSummary } from "../../review-bot.mjs";
+import { assertNodeVersion, isMain, j } from "../../lib/check-kit.mjs";
+import { FAKE_NEEDLE, loadPersonalNeedles, needlesArgs, plainText } from "../../lib/privacy-needles.mjs";
 
-/** The merge criteria parse exactly this line. */
-export const FOOTER = /^<!-- harness-review v1 red=(\d+) important=(\d+) suggest=(\d+) -->$/;
-const HEAD_MARK = /^<!-- harness-review-head sha=([0-9a-f]{40}) bot=([a-z]+) -->$/;
 /** Run page link on the second line of a bot summary. */
 const RUN_LINK = /\/actions\/runs\/(\d+)/;
 /** Agent marker, first line of every comment we write: see CONTRIBUTING.md (review process). */
 const AGENT_MARK =
     /^<!-- harness-agent v1 role=([a-z]+) kind=([a-z-]+) round=(\d+) head=([0-9a-f]{7,40})((?: [a-z-]+=[^\s>]+)*) -->$/;
-const DISPOSITION = /^<!-- harness-agent v1 role=[a-z-]+ kind=disposition /m;
-const SECTIONS = { red: "红旗", important: "重要", suggest: "建议" };
 
-/**
- * First-line head marker { sha, bot } of a bot summary, or null. Only the first line counts: other bots also post
- * as github-actions[bot] and a model can write the same line in the middle of a body. A BOM before the first line is
- * not body text (comments can round-trip with one); a trailing \r is half of a CRLF.
- */
-export function headMark(body) {
-    const first = (body || "").replace(/^﻿/, "").split(/\r?\n/, 1)[0];
-    const m = HEAD_MARK.exec(first);
-    return m ? { sha: m[1], bot: m[2] } : null;
-}
-
-/**
- * Per-section item counts of "## 【红旗】", "## 【重要】", "## 【建议】": only top-level list items inside a section,
- * fenced code skipped, "- 无" does not count. A section ends at the next level 1-2 heading (deeper headings do not
- * end it) except under 【建议】, where a deeper heading stops the count (later rounds append an "incremental check"
- * part there). 【红旗】 and 【重要】 get no such exception, otherwise an important item hidden under a subheading
- * would let the footer say 0.
- */
-export function sectionCounts(text) {
-    const counts = {};
-    const seen = {};
-    let current = null;
-    let fence = false;
-    let counting = true;
-    for (const l of text.replace(/\r\n/g, "\n").split("\n")) {
-        if (/^\s*(?:```|~~~)/.test(l)) {
-            fence = !fence;
-            continue;
-        }
-        if (fence) continue;
-        const level = /^(#{1,6})\s/.exec(l);
-        if (level && level[1].length > 2 && current === "建议") counting = false;
-        if (level && level[1].length <= 2) {
-            const m = /^##\s+【(红旗|重要|建议)】/.exec(l);
-            current = m ? m[1] : null;
-            counting = true;
-            if (current) {
-                seen[current] = (seen[current] || 0) + 1;
-                counts[current] ??= 0;
-            }
-            continue;
-        }
-        const item = /^(?:[-*+]|\d+[.)])\s+(\S.*)$/.exec(l);
-        if (current && counting && item && !/^无[。.]?\s*$/.test(item[1])) counts[current]++;
-    }
-    return { counts, seen };
-}
-
-/** Is the summary usable: exactly one kind of footer, and its three numbers equal the section counts. */
-export function validateSummary(text) {
-    const lines = text.replace(/\r\n/g, "\n").split("\n");
-    const footers = lines.map((l) => l.trim()).filter((l) => FOOTER.test(l));
-    if (!footers.length) return { ok: false, reason: "machine-readable footer missing" };
-    if (new Set(footers).size > 1) return { ok: false, reason: "more than one footer line and they differ" };
-    const main = lines
-        .filter((l) => !FOOTER.test(l.trim()))
-        .join("\n")
-        .trimEnd();
-    const [, ...nums] = FOOTER.exec(footers[0]);
-    const want = { red: +nums[0], important: +nums[1], suggest: +nums[2] };
-    const { counts, seen } = sectionCounts(main);
-    for (const name of Object.values(SECTIONS)) {
-        if (!seen[name]) return { ok: false, reason: `section "## 【${name}】" missing` };
-        if (seen[name] > 1) return { ok: false, reason: `section "## 【${name}】" appears more than once` };
-    }
-    const got = Object.fromEntries(Object.entries(SECTIONS).map(([k, name]) => [k, counts[name]]));
-    if (Object.keys(SECTIONS).some((k) => got[k] !== want[k])) {
-        const fmt = (o) => `red=${o.red} important=${o.important} suggest=${o.suggest}`;
-        return { ok: false, reason: `footer counts do not match the body (body ${fmt(got)}, footer ${fmt(want)})` };
-    }
-    return { ok: true, main, footer: footers[0] };
-}
-
-/** Body sha256 the way the bot records it: CRLF folded to LF, then UTF-8 bytes. */
+/** Body sha256 the way the bot records it (postedRecord of review-bot.mjs): CRLF folded to LF, then UTF-8 bytes. */
 export function bodySha256(body) {
-    return createHash("sha256")
-        .update(Buffer.from((body || "").replace(/\r\n/g, "\n"), "utf8"))
-        .digest("hex");
+    return postedRecord("0", (body || "").replace(/\r\n/g, "\n")).sha256;
 }
 
 /**
- * Facts of a posted bot summary: footer exactly one line and the last line, counts consistent (validateSummary),
- * plus the head marker and the run id from the link in the first three lines.
+ * Facts of a posted bot summary: footer exactly one line and the last line, counts consistent (validateSummary of the review
+ * bot), plus the head marker and the run id from the link in the first three lines. The reason of an unusable summary is
+ * validateSummary's own text.
  */
 export function summaryFacts(body) {
     const lines = body.replace(/\r\n/g, "\n").trimEnd().split("\n");
@@ -129,7 +61,10 @@ export function summaryFacts(body) {
     return { ...base, ok: true, reason: null, red: +red, important: +important, suggest: +suggest };
 }
 
-/** Findings listed in a bot summary (top-level list items under the three sections; same rules as sectionCounts). */
+/**
+ * Findings listed in a bot summary (top-level list items under the three sections). The same rules as sectionCounts of the
+ * review bot, which cannot list the items; the self-test compares the two on every sample so that they cannot drift apart.
+ */
 export function summaryItems(body) {
     const items = [];
     let level = null;
@@ -166,28 +101,6 @@ export function agentMarker(body) {
             .map((kv) => kv.split("=")),
     );
     return { role: m[1], kind: m[2], round: +m[3], head: m[4], extra };
-}
-
-/**
- * Previous round: the newest bot summary (github-actions[bot] with the same bot in the head marker) and the newest
- * disposition after it. A disposition must come after that summary, must not be written by a bot and its author must
- * pass `trusted` (anybody can type a marker).
- */
-export function findPrevious(comments, bot, trusted) {
-    const isReview = (c) => c.user?.login === "github-actions[bot]" && headMark(c.body)?.bot === bot;
-    const at = comments.findLastIndex(isReview);
-    const last = at >= 0 ? comments[at] : null;
-    const disposition = last
-        ? comments
-              .slice(at + 1)
-              .filter((c) => DISPOSITION.test(c.body || "") && !/\[bot\]$/.test(c.user?.login || "") && trusted(c))
-              .at(-1)
-        : null;
-    return {
-        rounds: comments.filter(isReview).length,
-        previousHead: last ? headMark(last.body).sha : null,
-        disposition: disposition ? disposition.body : null,
-    };
 }
 
 /** comments: issue comments array as the API returns it (ascending). writers: logins with write access to the repo. */
@@ -238,6 +151,23 @@ export async function infraHits(paths, modulePath = DEFAULT_INFRA) {
     return paths.filter((p) => m.isInfraPath(p));
 }
 
+/** A commit or squash message under the same-repository rules of check-commits.mjs. */
+export function messageErrors(text, { merge = false, exactlyOne = false, personal = [] } = {}) {
+    const r = checkMessage(text, { tier: "same", merge, exactlyOne, personal });
+    return { errors: r.errors, warns: r.warns };
+}
+
+/** A PR title and body under checkPrText of check-commits.mjs (the same text-only reading as its command line). */
+export function prTextErrors(title, body, personal = []) {
+    const r = checkPrText({ title: plainText(title, "the PR title"), body: plainText(body, "the PR body"), personal });
+    return { errors: r.errors, warns: r.warns };
+}
+
+/** Numbers of the lines that hasAiTrailer takes for an AI attribution trailer (also as a # line, which git keeps with -m). */
+export function aiTrailerLines(text) {
+    return text.split(/\r?\n/).flatMap((l, i) => (hasAiTrailer([l]) ? [i + 1] : []));
+}
+
 export function selfTest() {
     const cases = [];
     const t = (label, bad, flagged) => cases.push({ label, bad, passed: bad ? flagged : !flagged });
@@ -260,25 +190,21 @@ export function selfTest() {
             footer,
         ].join("\n");
     const clean = body([], [], ["- a"], foot(0, 0, 1));
-    const found = (text) => headMark(text)?.sha === sha;
-    t("head mark: recognised on the first line", false, !found(clean));
-    t("head mark: CRLF", false, !found(clean.replace(/\n/g, "\r\n")));
-    t("head mark: BOM before the first line", false, !found(`﻿${clean}`));
-    t("head mark: quoted in the body is not a summary", false, found(`## quote\n${mark}\n`));
-    t("head mark: only on the second line is not a summary", false, found(`\n${mark}\n`));
-    t("head mark: wrong sha length", false, headMark(`<!-- harness-review-head sha=abc bot=claude -->`) !== null);
     const facts = summaryFacts(clean);
     t(
         "summary: clean footer parsed with run id and head",
         false,
         !(facts.ok && facts.red === 0 && facts.important === 0 && facts.suggest === 1 && facts.runId === "123" && facts.head === sha),
     );
+    t("summary: a head mark typed in the middle of a body gives no head", true, summaryFacts(`## quote\n${mark}\n${foot(0, 0, 0)}`).head === null);
     t("summary: no footer is unusable", true, !summaryFacts(clean.replace(foot(0, 0, 1), "")).ok);
+    t("summary: no footer says so", true, summaryFacts(clean.replace(foot(0, 0, 1), "")).reason === "machine-readable footer missing");
     t("summary: two different footers are unusable", true, !summaryFacts(`${clean}\n${foot(0, 1, 1)}`).ok);
     t("summary: footer not on the last line is unusable", true, !summaryFacts(`${clean}\ntrailing text`).ok);
     t("summary: duplicated identical footer is unusable (exactly one line)", true, !summaryFacts(`${clean}\n${foot(0, 0, 1)}`).ok);
     t("summary: footer undercounts an important item", true, !summaryFacts(body([], ["- real"], ["- a"], foot(0, 0, 1))).ok);
     t("summary: footer overcounts", true, !summaryFacts(body([], [], ["- a"], foot(0, 0, 3))).ok);
+    t("summary: the reason of a count mismatch is the review bot's own", true, /^机读尾注的条数与正文不符/.test(summaryFacts(body([], [], ["- a"], foot(0, 0, 3))).reason));
     t("summary: important item hidden under a subheading is still counted", true, !summaryFacts(body([], ["### x", "- hidden"], ["- a"], foot(0, 0, 1))).ok);
     t(
         "summary: bullet under a subheading of the suggestion section is not a suggestion",
@@ -289,13 +215,6 @@ export function selfTest() {
     t("summary: a missing section is unusable", true, !summaryFacts(clean.replace("## 【重要】\n- 无\n", "")).ok);
     t("summary: a duplicated section is unusable", true, !summaryFacts(clean.replace("## 【建议】", "## 【重要】\n## 【建议】")).ok);
     t("summary: CRLF round trip is usable", false, !summaryFacts(clean.replace(/\n/g, "\r\n")).ok);
-    // validateSummary is exported and judges on its own: the reason, not just the verdict, is what a caller shows
-    const why = (text) => validateSummary(text).reason ?? "";
-    t("validate: two different footers are unusable, and say so", true, /differ/.test(why(`${clean}\n${foot(0, 1, 1)}`)));
-    t("validate: a missing section is reported as missing", true, /missing/.test(why(clean.replace("## 【重要】\n- 无\n", ""))));
-    t("validate: a duplicated section is reported as such", true, /more than once/.test(why(clean.replace("## 【建议】", "## 【重要】\n## 【建议】"))));
-    t("validate: no footer is reported as such", true, /footer missing/.test(why(clean.replace(foot(0, 0, 1), ""))));
-    t("validate: a clean summary has no reason", false, why(clean) !== "");
     const linkBelow = body([], [], ["- see https://github.com/o/r/actions/runs/999"], foot(0, 0, 1)).replace(/_审查对象[^\n]*\n/, "");
     t("summary: a run link below the first three lines is not the run of the summary", false, summaryFacts(linkBelow).runId !== null);
     const lv = (text) => summaryItems(text).map((i) => i.level).join(",");
@@ -303,6 +222,21 @@ export function selfTest() {
     t("items: nothing listed for a clean summary except the suggestion", false, lv(clean) !== "建议");
     t("items: items inside a fenced block are not listed", false, lv(body([], [], ["```", "- fake", "```", "- a"], foot(0, 0, 1))) !== "建议");
     t("items: an item under a subheading of the suggestion section is not listed", false, lv(body([], [], ["- a", "### incremental", "- c"], foot(0, 0, 1))) !== "建议");
+    // the listing and the review bot's counter must agree on every sample, otherwise a footer could pass on one and not the other
+    const samples = [
+        clean,
+        body(["- r"], ["- i1", "- i2"], ["- s"], foot(1, 2, 1)),
+        body([], ["### x", "- hidden"], ["- a"], foot(0, 1, 1)),
+        body([], [], ["- k1", "### incremental", "- c1"], foot(0, 0, 1)),
+        body([], [], ["```", "- fake", "```", "- a", "1. b", "* c"], foot(0, 0, 3)),
+        body(["- 无。"], [], ["- 无"], foot(0, 0, 0)),
+    ];
+    const agree = samples.every((s) => {
+        const listed = summaryItems(s);
+        const { counts } = sectionCounts(s.split("\n").filter((l) => !/^<!-- harness-review v1 /.test(l)).join("\n"));
+        return ["红旗", "重要", "建议"].every((n) => listed.filter((i) => i.level === n).length === (counts[n] ?? 0));
+    });
+    t("items: the listing agrees with sectionCounts of the review bot on every sample", false, !agree);
     const sums = (text, updated = "2026-01-01T00:00:00Z") =>
         reviewState([{ id: 1, user: { login: "github-actions[bot]" }, created_at: "2026-01-01T00:00:00Z", updated_at: updated, body: text }], []);
     t("state: summary recognised", false, sums(clean).summaries.length !== 1);
@@ -313,7 +247,7 @@ export function selfTest() {
     })());
     t("sha256: CRLF and LF agree", false, bodySha256(clean) !== bodySha256(clean.replace(/\n/g, "\r\n")));
     t("sha256: a changed body changes the hash", true, bodySha256(clean) !== bodySha256(`${clean}x`));
-    t("sha256: computed over UTF-8 bytes", false, bodySha256(clean) !== createHash("sha256").update(Buffer.from(clean, "utf8")).digest("hex"));
+    t("sha256: the hash is the review bot's posted record of the LF body", false, bodySha256(clean) !== postedRecord("1", clean).sha256);
     const am = (extra = "") => `<!-- harness-agent v1 role=impl kind=disposition round=2 head=aaaaaaa${extra} -->\nbody`;
     t("agent marker: parsed with bot-run and in-reply-to", false, (() => {
         const m = agentMarker(am(" bot-run=123 in-reply-to=1,2"));
@@ -335,23 +269,52 @@ export function selfTest() {
     const note = cm(4, "writer", "<!-- harness-agent v1 role=impl kind=note round=2 head=aaaaaaa bot-run=777 -->\nx", "2026-01-01T00:20:00Z");
     t("state: only dispositions give run ids (a note naming a run does not)", false, reviewState([...thread, note], ["writer"]).dispositionRuns.join() !== "123");
     t("state: a summary-shaped comment typed by a person is not a summary", true, reviewState([cm(1, "writer", clean, "2026-01-01T00:00:00Z")], ["writer"]).summaries.length === 0);
-    t("previous round: a head marker typed by a person is not a summary", true, findPrevious([cm(1, "writer", clean, "2026-01-01T00:00:00Z")], "claude", () => true).rounds === 0);
-    t("previous round: the bot's summary is counted and the writer's disposition follows it", false, (() => {
-        const p = findPrevious(thread, "claude", (c) => c.user.login === "writer");
-        return !(p.rounds === 1 && p.previousHead === sha && p.disposition?.includes("bot-run=123"));
-    })());
+    t("state: a summary-shaped comment typed by a person is not a round", true, reviewState([cm(1, "writer", clean, "2026-01-01T00:00:00Z")], ["writer"]).rounds === 0);
+    t("state: the bot's summary is a round", false, reviewState(thread, ["writer"]).rounds !== 1);
     t("state: another bot's summary is not ours", true, reviewState([cm(1, "github-actions[bot]", clean.replace("bot=claude", "bot=other"), "2026-01-01T00:00:00Z")], []).summaries.length === 0);
+
+    // the bridges to check-commits.mjs: a thin pass-through, so these only prove that the verdict arrives and the options are handed on
+    const msg = `ci(example): add the example\n\nBody text.\n\n${SIGNOFF}`;
+    const errs = (r) => r.errors.join(" | ");
+    t("message: a clean message has no error", false, messageErrors(msg).errors.length > 0);
+    t("message: a bad subject is an error", true, /type\(scope\)/.test(errs(messageErrors(`update stuff\n\n${SIGNOFF}`))));
+    t("message: a missing sign-off is an error", true, /missing Signed-off-by/.test(errs(messageErrors("ci(example): add the example\n\nBody."))));
+    t("message: two identical sign-offs pass by default", false, messageErrors(`${msg}\n${SIGNOFF}`).errors.length > 0);
+    t("message: two identical sign-offs are an error with exactlyOne", true, /exactly one Signed-off-by/.test(errs(messageErrors(`${msg}\n${SIGNOFF}`, { exactlyOne: true }))));
+    t("message: a merge commit needs no subject and no sign-off", false, messageErrors("Update things\n", { merge: true }).errors.length > 0);
+    t("message: the same text is an error when it is not a merge", true, messageErrors("Update things\n").errors.length > 0);
+    t("message: an AI attribution trailer is an error", true, /AI attribution/.test(errs(messageErrors(`${msg.replace(`\n\n${SIGNOFF}`, "")}\n\n${j("Co-Authored", "-By: A <a@b.c>")}\n${SIGNOFF}`))));
+    const needleMsg = `ci(example): note ${FAKE_NEEDLE}\n\n${SIGNOFF}`;
+    t("message: a personal needle handed on is an error", true, messageErrors(needleMsg, { personal: [FAKE_NEEDLE] }).errors.length > 0);
+    t("message: no needles handed on, no needle found", false, messageErrors(needleMsg).errors.length > 0);
+    const title = "ci(example): add the example";
+    const prBody = `## 做了什么\n加入。\n\n${SIGNOFF}`;
+    t("pr-text: a clean title and body have no error", false, prTextErrors(title, prBody).errors.length > 0);
+    t("pr-text: a bad title is an error", true, /title must be/.test(errs(prTextErrors("add the example", prBody))));
+    t("pr-text: a body without the sign-off on the last line is an error", true, /last line must be/.test(errs(prTextErrors(title, `${prBody}\nthanks`))));
+    t("pr-text: a personal needle in the body is an error", true, prTextErrors(title, `## x\n${FAKE_NEEDLE}\n\n${SIGNOFF}`, [FAKE_NEEDLE]).errors.length > 0);
+    t("pr-text: a control character in the title is refused", true, (() => { try { prTextErrors("ci(example): a\u001b[31mb", prBody); return false; } catch { return true; } })());
+    t("pr-text: a control character in the body is refused", true, (() => { try { prTextErrors(title, `x\u001b[31my\n\n${SIGNOFF}`); return false; } catch { return true; } })());
+    const co = j("Co-Authored", "-By: A <a@b.c>");
+    t("text: a generic co-author trailer is found with its line number", false, aiTrailerLines(`a\nb\n${co}\n`).join() !== "3");
+    t("text: a trailer written as a # line is found", false, aiTrailerLines(`# ${co}`).join() !== "1");
+    t("text: an indented trailer is found", false, aiTrailerLines(` ${co}`).join() !== "1");
+    t("text: a clean text has none", false, aiTrailerLines("fine\nCo-authors are welcome\n").length !== 0);
     return { cases, ok: cases.every((c) => c.passed), bad: cases.filter((c) => c.bad).length, good: cases.filter((c) => !c.bad).length };
 }
 
 async function selfTestInfra(cases) {
     const t = (label, bad, flagged) => cases.push({ label, bad, passed: bad ? flagged : !flagged });
+    // the real list of this checkout
+    t("infra: a workflow is on the real list", false, (await infraHits([".github/workflows/ci.yml"])).length !== 1);
+    t("infra: the maintainer scripts are on the real list", false, (await infraHits(["scripts/maintainer/pr-merge.ps1"])).length !== 1);
+    t("infra: a source file is not on the real list", false, (await infraHits(["src/tool/a.ps1", "docs/a.md"])).length !== 0);
     const tmp = fs.mkdtempSync(path.join(fs.realpathSync(process.env.TEMP || process.env.TMPDIR || "/tmp"), "maint-"));
     try {
         const good = path.join(tmp, "infra.mjs");
         fs.writeFileSync(good, 'export const isInfraPath = (p) => p.startsWith(".github/");\n');
-        t("infra: a path on the list is returned", false, (await infraHits([".github/x.yml", "src/a.ps1"], good)).join() !== ".github/x.yml");
-        t("infra: a path off the list is not returned", false, (await infraHits(["src/a.ps1"], good)).length !== 0);
+        t("infra: a path on another list is returned", false, (await infraHits([".github/x.yml", "src/a.ps1"], good)).join() !== ".github/x.yml");
+        t("infra: a path off another list is not returned", false, (await infraHits(["src/a.ps1"], good)).length !== 0);
         let missing = false;
         await infraHits(["a"], path.join(tmp, "nope.mjs")).catch(() => (missing = true));
         t("infra: a missing list module is an error, never an empty answer", true, missing);
@@ -365,9 +328,15 @@ async function selfTestInfra(cases) {
     }
 }
 
+/** Personal needles for a bridge command: --needles <mode> and --needles-file <path>, the way check-commits.mjs reads them. */
+function personalNeedles(rest) {
+    return loadPersonalNeedles({ cwd: process.cwd(), ...needlesArgs(rest) }).needles;
+}
+
 async function main(argv) {
     const [cmd, ...rest] = argv;
     const opt = (k) => (rest.includes(k) ? rest[rest.indexOf(k) + 1] : undefined);
+    const has = (k) => rest.includes(k);
     const print = (v) => process.stdout.write(`${JSON.stringify(v)}\n`);
     if (cmd === "--self-test") {
         const r = selfTest();
@@ -378,6 +347,7 @@ async function main(argv) {
         console.log(`maint --self-test: ${failed.length ? "FAIL" : "PASS"} (bad ${bad}, good ${r.cases.length - bad})`);
         return failed.length ? 1 : 0;
     }
+    assertNodeVersion();
     const file = opt("--file");
     if (!file) throw new Error("--file is required");
     if (cmd === "review-state") {
@@ -387,20 +357,21 @@ async function main(argv) {
     } else if (cmd === "infra") {
         const paths = JSON.parse(fs.readFileSync(file, "utf8"));
         print({ hits: await infraHits(paths, opt("--module") ? path.resolve(opt("--module")) : DEFAULT_INFRA) });
+    } else if (cmd === "message") {
+        print(messageErrors(fs.readFileSync(file, "utf8"), { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }));
+    } else if (cmd === "pr-text") {
+        const { title, body } = JSON.parse(fs.readFileSync(file, "utf8"));
+        if (typeof title !== "string" || typeof body !== "string") throw new Error("pr-text needs a JSON object with string title and body");
+        print(prTextErrors(title, body, personalNeedles(rest)));
+    } else if (cmd === "text") {
+        print({ aiTrailerLines: aiTrailerLines(fs.readFileSync(file, "utf8")) });
     } else {
-        throw new Error("usage: review-state | infra | --self-test (see the header comment)");
+        throw new Error("usage: review-state | infra | message | pr-text | text | --self-test (see the header comment)");
     }
     return 0;
 }
 
-const isMain = (() => {
-    try {
-        return !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
-    } catch {
-        return false;
-    }
-})();
-if (isMain) {
+if (isMain(import.meta.url)) {
     main(process.argv.slice(2)).then(
         (code) => {
             process.exitCode = code;

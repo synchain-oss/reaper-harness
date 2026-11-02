@@ -66,7 +66,6 @@ function Invoke-SelfTest {
     $locked = [System.Collections.Generic.List[string]]::new()
     $state = @{ LocalBranch = 1; Current = 'feat/example-unit'; Name = 'DLsnows'; Email = 'noreply@synchain.ca'; Sticky = $false }
     $routes = [ordered]@{
-        'check-privacy\.mjs --text' = Get-HarnessPrivacyStandIn
         ' fetch '                   = { '' }
         'rev-parse --verify'        = { @{ Code = $state.LocalBranch; Out = ''; Err = '' } }
         'worktree add'              = { param($argv) New-Item -ItemType Directory -Force -Path $argv[-2] | Out-Null; '' }
@@ -78,6 +77,8 @@ function Invoke-SelfTest {
     }
     try {
         $env:HARNESS_ROOT = $tmp
+        # the repository's own privacy tool runs for real, with a needle file of the self-test
+        New-HarnessSelfTestNeedles -Directory $tmp | Out-Null
         Set-HarnessFake (New-HarnessFake -Routes $routes -Log $log)
         Set-HarnessLockImpl { param($name, $block) $locked.Add('lock'); & $block }
         $state.Name = ''; $state.Email = ''
@@ -113,13 +114,14 @@ function Invoke-SelfTest {
         }
         Add-HarnessCase $cases 'a card name of 32 characters is accepted' $false ((Get-ThrownMessage { New-WorkWorktree -Card ('x' * 32) -Slug 'example' }) -match 'Not a usable card name')
         $env:HARNESS_ROOT = ''
-        Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{ 'check-privacy\.mjs --text' = Get-HarnessPrivacyStandIn; ' config --get harness\.root$' = { @{ Code = 1; Out = ''; Err = '' } } }) -Log $log)
+        Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{ ' config --get harness\.root$' ={ @{ Code = 1; Out = ''; Err = '' } } }) -Log $log)
         Add-HarnessCase $cases 'no workspace root configured' $true (Test-Throws { New-WorkWorktree -Card 'unit-d' -Slug 'example' })
         $selfText = Get-Content -Raw -LiteralPath $PSCommandPath
         Add-HarnessCase $cases 'source hygiene: new-worktree.ps1' $false (@(Get-HarnessSourceProblems -Text $selfText -Name 'new-worktree.ps1').Count -gt 0)
     } finally {
         Set-HarnessFake $null
         Set-HarnessLockImpl $null
+        Set-HarnessNeedles
         $env:HARNESS_ROOT = $oldRoot
         $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
         $full = [IO.Path]::GetFullPath($tmp).TrimEnd('\', '/')

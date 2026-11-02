@@ -3,9 +3,10 @@
 #
 # Open a PR (into feature/v1 only). Refused: a base other than feature/v1 (dev and prod always), a head that is not
 # feat/<slug>, a draft (a draft does not trigger the review bot). The title must be type(scope): description; the body
-# must carry every section of the PR template (when the template exists), end with the maintainer's sign-off line, and the
-# title, body and branch name pass the public-text gate (scripts/check-privacy.mjs plus AI attribution trailers). The first
-# line of the body is the hidden agent marker. If the same head already has an open PR only its number is reported.
+# must carry every section of the PR template (a checkout without the template is an error) and end with the maintainer's
+# sign-off line. Title and body pass the PR-text rules of scripts/check-commits.mjs (format, sign-off, privacy); the body and
+# the branch name also pass the public-text gate (scripts/check-privacy.mjs plus AI attribution trailers). The first line of
+# the body is the hidden agent marker. If the same head already has an open PR only its number is reported.
 #   pwsh scripts/maintainer/pr-open.ps1 -Head feat/<slug> -Title "<type(scope): description>" -BodyFile <f> [-Role impl] [-Round 0]
 #   pwsh scripts/maintainer/pr-open.ps1 -Update -Pr <n> -BodyFile <f> [-Title "<new title>"] [-Role impl] [-Round <r>]
 #   pwsh scripts/maintainer/pr-open.ps1 -SelfTest
@@ -25,15 +26,16 @@ Import-Module (Join-Path $PSScriptRoot 'lib/HarnessGh.psm1') -Force
 
 $BaseBranch = 'feature/v1'
 
-<# Level-2 headings of the PR template: the body must have each of them. No template in this checkout = no heading check (branch-gate checks the body in CI too). #>
+# the PR template of this checkout; only the self-test names another file
+$TemplateOverride = $null
+
+<# Level-2 headings of the PR template: the body must have each of them. A checkout without the template is an error. #>
 function Get-TemplateHeadings {
-    $file = Join-Path (Get-HarnessRepoRoot) '.github/pull_request_template.md'
-    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-        [Console]::Error.WriteLine('warning: .github/pull_request_template.md not found, section headings are not checked')
-        return @()
-    }
-    $t = Get-Content -Raw -LiteralPath $file
-    [regex]::Matches($t, '(?m)^## .+$') | ForEach-Object { $_.Value.TrimEnd() }
+    $file = if ($TemplateOverride) { $TemplateOverride } else { Join-Path (Get-HarnessRepoRoot) '.github/pull_request_template.md' }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw '.github/pull_request_template.md is missing in this checkout: the required sections are unknown, nothing is sent' }
+    $headings = @([regex]::Matches((Get-Content -Raw -LiteralPath $file), '(?m)^## .+$') | ForEach-Object { $_.Value.TrimEnd() })
+    if (-not $headings.Count) { throw 'The PR template has no level-2 headings: the required sections are unknown, nothing is sent' }
+    $headings
 }
 
 <# Every check before a PR is opened or edited; returns the body to send (marker added) or throws. #>
@@ -49,7 +51,6 @@ function Test-OpenRequest {
     $problems = @(Get-PrTextErrors -Title $PrTitle -Body $Body)
     if ($problems.Count) { throw "PR title or body failed the format check: $($problems -join '; ')" }
     $full = Format-AgentText -Text $Body -Role $AgentRole -Kind 'pr-body' -Round $AgentRound -Head $HeadSha -Label 'PR body'
-    Assert-PublicText $PrTitle 'PR title'
     $full
 }
 
@@ -89,13 +90,15 @@ function Invoke-Update {
 
 function Invoke-SelfTest {
     $cases = New-HarnessCases
-    $savedRoot = Get-HarnessRepoRoot
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "harness-pr-open-selftest-$PID"
-    New-Item -ItemType Directory -Force -Path (Join-Path $tmp '.github') | Out-Null
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     try {
+        # the repository's own privacy tool and message rules run for real, with a needle file of the self-test
+        New-HarnessSelfTestNeedles -Directory $tmp | Out-Null
         $template = "<!-- template -->`n## 做了什么`n`n## 为什么`n`n## 怎么测的`n`n## 安全自查`n`n## DCO`n`nSigned-off-by:`n"
-        [IO.File]::WriteAllText((Join-Path $tmp '.github/pull_request_template.md'), $template, [Text.UTF8Encoding]::new($false))
-        Set-HarnessRepoRoot $tmp
+        $templateFile = Join-Path $tmp 'pull_request_template.md'
+        [IO.File]::WriteAllText($templateFile, $template, [Text.UTF8Encoding]::new($false))
+        $script:TemplateOverride = $templateFile
         $sign = Get-HarnessSignoff
         $good = "## 做了什么`n加入示例。`n`n## 为什么`n演示。`n`n## 怎么测的`n自测。`n`n## 安全自查`n不涉及。`n`n## DCO`n- [x] 已签名`n`n$sign"
         $sha = 'a' * 40
@@ -107,8 +110,7 @@ function Invoke-SelfTest {
             base = [pscustomobject]@{ ref = 'feature/v1' }
         }
         $routes = [ordered]@{
-            'check-privacy\.mjs --text'     = Get-HarnessPrivacyStandIn
-            'branches/feat%2Fexample'       = { @{ commit = @{ sha = $sha } } }
+            'branches/feat%2Fexample'       ={ @{ commit = @{ sha = $sha } } }
             'branches/'                     = { @{ Code = 1; Out = ''; Err = 'Branch not found' } }
             'pulls\?state=open'             = { , $open }
             'api -X POST \S+/pulls --input' = { param($argv) $posted.Add((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json)); @{ number = 9; html_url = 'https://github.com/x/y/pull/9' } }
@@ -133,7 +135,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'body has an AI attribution trailer' $true (-not (& $accepted 'feat/example' 'feature/v1' $goodTitle ($good -replace '(?m)^## DCO', "## DCO`nCo-Authored-By: a <a@b.c>") $false))
         Add-HarnessCase $cases 'body has a generated-with line' $true (-not (& $accepted 'feat/example' 'feature/v1' $goodTitle ($good -replace '(?m)^## DCO', ("## DCO`nGenerated with [Cla" + 'ude Code](x)')) $false))
         Add-HarnessCase $cases 'body has a local path' $true (-not (& $accepted 'feat/example' 'feature/v1' $goodTitle ($good -replace '(?m)^## DCO', ('## DCO' + "`n" + 'C:' + '\Users\someone')) $false))
-        Add-HarnessCase $cases 'body has a personal needle' $true (-not (& $accepted 'feat/example' 'feature/v1' $goodTitle ($good -replace '(?m)^## DCO', "## DCO`nharness-selftest-fake-needle-7c1e") $false))
+        Add-HarnessCase $cases 'body has a personal needle' $true (-not (& $accepted 'feat/example' 'feature/v1' $goodTitle ($good -replace '(?m)^## DCO', "## DCO`n$(Get-HarnessFakeNeedle)") $false))
         Add-HarnessCase $cases 'body has a card number' $true (-not (& $accepted 'feat/example' 'feature/v1' $goodTitle ($good -replace '(?m)^## DCO', ('## DCO' + "`nsee R" + 'H-04')) $false))
         Add-HarnessCase $cases 'title format' $true (-not (& $accepted 'feat/example' 'feature/v1' 'add the example' $good $false))
         Add-HarnessCase $cases 'title unknown type' $true (-not (& $accepted 'feat/example' 'feature/v1' 'wip(example): add it' $good $false))
@@ -188,15 +190,27 @@ function Invoke-SelfTest {
         $gone = $(try { Invoke-Update -Number 12 -NewTitle '' -Body $good -AgentRole impl -AgentRound 2 } catch { $_.Exception.Message })
         Add-HarnessCase $cases '-Update: deleted source repository (head.repo is null) says why and sends nothing' $true ($gone -match 'was deleted' -and $gone -notmatch 'cannot be found' -and $patched.Count -eq $n)
         $existing.head.repo = [pscustomobject]@{ full_name = (Get-HarnessRepo) }
-        # without a template in the checkout the section check is skipped (CI checks the body too)
-        Remove-Item -LiteralPath (Join-Path $tmp '.github/pull_request_template.md')
-        Add-HarnessCase $cases 'no template in the checkout: sections are not checked, everything else still is' $false (-not (& $accepted 'feat/example' 'feature/v1' $goodTitle ($good -replace '(?m)^## DCO\s*$', '') $false))
-        Add-HarnessCase $cases 'no template in the checkout: a bad sign-off is still refused' $true (-not (& $accepted 'feat/example' 'feature/v1' $goodTitle "$good`nmore" $false))
+        # a checkout without the template (or with one that has no sections) cannot say what the body needs: refused, nothing sent
+        $n = $posted.Count; $m = $patched.Count
+        Remove-Item -LiteralPath $templateFile
+        $noTemplate = Get-ThrownMessage { Test-OpenRequest -Branch 'feat/example' -Base 'feature/v1' -PrTitle $goodTitle -Body $good -IsDraft $false -AgentRole impl -AgentRound 0 -HeadSha $sha }
+        Add-HarnessCase $cases 'no template in the checkout: refused for that reason' $true ([bool]$noTemplate -and $noTemplate -match 'pull_request_template\.md is missing')
+        $noTemplateOpen = Get-ThrownMessage { Invoke-Open -Branch 'feat/example' -Base 'feature/v1' -PrTitle $goodTitle -Body $good -IsDraft $false -AgentRole impl -AgentRound 0 }
+        Add-HarnessCase $cases 'no template in the checkout: nothing is opened' $true ([bool]$noTemplateOpen -and $posted.Count -eq $n)
+        $noTemplateUpdate = Get-ThrownMessage { Invoke-Update -Number 12 -NewTitle '' -Body $good -AgentRole impl -AgentRound 2 }
+        Add-HarnessCase $cases 'no template in the checkout: -Update is refused for that reason, nothing sent' $true ([bool]$noTemplateUpdate -and $noTemplateUpdate -match 'pull_request_template\.md is missing' -and $patched.Count -eq $m)
+        [IO.File]::WriteAllText($templateFile, "<!-- no headings -->`nsome text`n", [Text.UTF8Encoding]::new($false))
+        $noHeadings = Get-ThrownMessage { Test-OpenRequest -Branch 'feat/example' -Base 'feature/v1' -PrTitle $goodTitle -Body $good -IsDraft $false -AgentRole impl -AgentRound 0 -HeadSha $sha }
+        Add-HarnessCase $cases 'a template without sections: refused for that reason' $true ([bool]$noHeadings -and $noHeadings -match 'no level-2 headings')
+        # the template of this very checkout: the sections the body must have are read from it
+        $script:TemplateOverride = $null
+        Add-HarnessCase $cases 'the template of this checkout has sections' $false (@(Get-TemplateHeadings).Count -eq 0)
         $selfText = Get-Content -Raw -LiteralPath $PSCommandPath
         Add-HarnessCase $cases 'source hygiene: pr-open.ps1' $false (@(Get-HarnessSourceProblems -Text $selfText -Name 'pr-open.ps1').Count -gt 0)
     } finally {
         Set-HarnessFake $null
-        Set-HarnessRepoRoot $savedRoot
+        $script:TemplateOverride = $null
+        Set-HarnessNeedles
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
     Complete-HarnessSelfTest $cases 'pr-open'

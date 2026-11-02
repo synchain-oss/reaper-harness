@@ -55,6 +55,17 @@ $worker = {
     $copy = Join-Path $dir 'scripts/maintainer'
     New-Item -ItemType Directory -Force -Path $copy | Out-Null
     Copy-Item -Path (Join-Path $SourceDir '*') -Destination $copy -Recurse -Force
+    # the files of the repository that the wrappers and the real tools read: the check scripts and their libraries (scripts/ without
+    # this directory), the Node pin and the PR template
+    $repoRoot = Split-Path -Parent (Split-Path -Parent $SourceDir)
+    foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts') -Force | Where-Object { $_.Name -ne 'maintainer' })) {
+        Copy-Item -LiteralPath $entry.FullName -Destination (Join-Path $dir 'scripts') -Recurse -Force
+    }
+    foreach ($relative in @('.node-version', '.github/pull_request_template.md')) {
+        $to = Join-Path $dir $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $repoRoot $relative) -Destination $to -Force
+    }
     $result = [ordered]@{ Id = $Mutation.Id; File = $Mutation.File; Label = $Mutation.Label; Status = ''; Detail = '' }
     if ($Mutation.Find.Count) {
         $target = Join-Path $copy $Mutation.File

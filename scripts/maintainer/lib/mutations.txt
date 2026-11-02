@@ -314,7 +314,7 @@
 < if ($priv.Code -ne 0) {
 > if ($false) {
 @@ push.ps1 | privacy scan without the personal needles
-< (@('--commits') + $range + @('--needles', 'local'))
+< (@('--commits') + $range + @(Get-HarnessNeedleArgs))
 > (@('--commits') + $range)
 @@ push.ps1 | gitleaks not required to be configured
 < if (-not $leaks) { throw
@@ -363,9 +363,6 @@
 @@ pr-open.ps1 | title and body format not enforced
 < if ($problems.Count) { throw
 > if ($false) { throw
-@@ pr-open.ps1 | PR title not scanned
-< Assert-PublicText $PrTitle 'PR title'
-> $null = 0
 @@ pr-open.ps1 | existing remote branch not required
 < if (-not $remote) { throw
 > if ($false) { throw
@@ -399,6 +396,16 @@
 @@ pr-open.ps1 | update does not send the new title
 < if ($NewTitle) { $payload.title = $NewTitle }
 > $null = 0
+
+@@ pr-open.ps1 | missing PR template is not an error
+< if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw
+> if ($false) { throw
+@@ pr-open.ps1 | PR template without sections is not an error
+< if (-not $headings.Count) { throw
+> if ($false) { throw
+@@ pr-open.ps1 | PR template of the checkout ignored
+< $file = if ($TemplateOverride) { $TemplateOverride } else {
+> $file = if ($false) { $TemplateOverride } else {
 
 # ===================================================== pr-comment.ps1
 @@ pr-comment.ps1 | footer of another head accepted
@@ -534,41 +541,10 @@
 >         return "Worktree already exists
 
 # ===================================================== lib/maint.mjs
-@@ lib/maint.mjs | head mark searched anywhere in the body
-< const m = HEAD_MARK.exec(first);
-> const m = /<!-- harness-review-head sha=([0-9a-f]{40}) bot=([a-z]+) -->/.exec(body || "");
-@@ lib/maint.mjs | fenced code counted as findings
-<         if (fence) continue;
-<         const level = /^(#{1,6})\s/.exec(l);
->         const level = /^(#{1,6})\s/.exec(l);
 @@ lib/maint.mjs | fenced code listed as findings
 <         if (fence) continue;
 <         const h = /^(#{1,6})\s/.exec(l);
 >         const h = /^(#{1,6})\s/.exec(l);
-@@ lib/maint.mjs | deeper heading under the suggestions does not stop the count
-< if (level && level[1].length > 2 && current === "建议") counting = false;
-> 
-@@ lib/maint.mjs | a deeper heading ends an important section
-< if (level && level[1].length <= 2) {
-> if (level) {
-@@ lib/maint.mjs | the "none" line counted as a finding
-< if (current && counting && item && !/^无[。.]?\s*$/.test(item[1])) counts[current]++;
-> if (current && counting && item) counts[current]++;
-@@ lib/maint.mjs | two different footers accepted
-< if (new Set(footers).size > 1) return
-> if (false) return
-@@ lib/maint.mjs | missing section accepted
-< if (!seen[name]) return
-> if (false) return
-@@ lib/maint.mjs | duplicated section accepted
-< if (seen[name] > 1) return
-> if (false) return
-@@ lib/maint.mjs | footer counts not compared with the body
-< if (Object.keys(SECTIONS).some((k) => got[k] !== want[k])) {
-> if (false) {
-@@ lib/maint.mjs | body hash over CRLF text
-< .update(Buffer.from((body || "").replace(/\r\n/g, "\n"), "utf8"))
-> .update(Buffer.from(body || "", "utf8"))
 @@ lib/maint.mjs | several identical footers accepted
 < if (footers.length !== 1)
 > if (footers.length < 1)
@@ -578,15 +554,6 @@
 @@ lib/maint.mjs | run link searched in the whole body
 < lines.slice(0, 3).join("\n")
 > lines.join("\n")
-@@ lib/maint.mjs | disposition from a non-writer accepted
-< && !/\[bot\]$/.test(c.user?.login || "") && trusted(c))
-> && !/\[bot\]$/.test(c.user?.login || ""))
-@@ lib/maint.mjs | disposition from before the summary accepted
-< .slice(at + 1)
-> .slice(0)
-@@ lib/maint.mjs | summary by any author accepted (previous round)
-< const isReview = (c) => c.user?.login === "github-actions[bot]" && headMark(c.body)?.bot === bot;
-> const isReview = (c) => headMark(c.body)?.bot === bot;
 @@ lib/maint.mjs | summary by any author accepted
 < const isSummary = (c) => c.user?.login === "github-actions[bot]" && headMark(c.body)?.bot === bot;
 > const isSummary = (c) => headMark(c.body)?.bot === bot;
@@ -608,6 +575,86 @@
 @@ lib/maint.mjs | infra paths never returned
 < return paths.filter((p) => m.isInfraPath(p));
 > return [];
+
+@@ lib/maint.mjs | body hash over CRLF text
+< postedRecord("0", (body || "").replace(/\r\n/g, "\n")).sha256
+> postedRecord("0", body || "").sha256
+@@ lib/maint.mjs | unusable summary (validateSummary) accepted
+< if (!v.ok) return { ...base, ok: false, reason: v.reason };
+> if (false) return { ...base, ok: false, reason: v.reason };
+@@ lib/maint.mjs | reason of an unusable summary replaced
+< ok: false, reason: v.reason }
+> ok: false, reason: "unusable" }
+@@ lib/maint.mjs | footer counts swapped
+< red: +red, important: +important, suggest: +suggest }
+> red: +red, important: +suggest, suggest: +important }
+@@ lib/maint.mjs | disposition lookup trusts everybody
+< const prev = findPrevious(comments, bot, trusted);
+> const prev = findPrevious(comments, bot, () => true);
+@@ lib/maint.mjs | rounds not counted
+< rounds: prev.rounds,
+> rounds: 0,
+@@ lib/maint.mjs | message bridge ignores the merge flag
+< { tier: "same", merge, exactlyOne, personal }
+> { tier: "same", merge: false, exactlyOne, personal }
+@@ lib/maint.mjs | message bridge ignores exactly-one
+< { tier: "same", merge, exactlyOne, personal }
+> { tier: "same", merge, exactlyOne: false, personal }
+@@ lib/maint.mjs | message bridge ignores the personal needles
+< { tier: "same", merge, exactlyOne, personal }
+> { tier: "same", merge, exactlyOne, personal: [] }
+@@ lib/maint.mjs | message bridge judges by the fork tier
+< { tier: "same", merge, exactlyOne, personal }
+> { tier: "fork", merge, exactlyOne, personal }
+@@ lib/maint.mjs | message bridge drops the errors
+< const r = checkMessage(text, { tier: "same", merge, exactlyOne, personal });
+<     return { errors: r.errors, warns: r.warns };
+> const r = checkMessage(text, { tier: "same", merge, exactlyOne, personal });
+>     return { errors: [], warns: r.warns };
+@@ lib/maint.mjs | PR text bridge drops the errors
+< const r = checkPrText({ title: plainText(title, "the PR title"), body: plainText(body, "the PR body"), personal });
+<     return { errors: r.errors, warns: r.warns };
+> const r = checkPrText({ title: plainText(title, "the PR title"), body: plainText(body, "the PR body"), personal });
+>     return { errors: [], warns: r.warns };
+@@ lib/maint.mjs | PR text bridge ignores the personal needles
+< body: plainText(body, "the PR body"), personal })
+> body: plainText(body, "the PR body"), personal: [] })
+@@ lib/maint.mjs | PR title taken without the text-only reading
+< title: plainText(title, "the PR title")
+> title
+@@ lib/maint.mjs | PR body taken without the text-only reading
+< body: plainText(body, "the PR body")
+> body
+@@ lib/maint.mjs | AI trailer lookup finds nothing
+< flatMap((l, i) => (hasAiTrailer([l]) ? [i + 1] : []))
+> flatMap((l, i) => (false ? [i + 1] : []))
+@@ lib/maint.mjs | AI trailer line numbers start at 0
+< hasAiTrailer([l]) ? [i + 1] : []
+> hasAiTrailer([l]) ? [i] : []
+@@ lib/maint.mjs | message command ignores --merge
+% run=shared,push
+< { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }
+> { merge: false, exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }
+@@ lib/maint.mjs | message command ignores --exactly-one
+% run=shared,pr-merge
+< { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }
+> { merge: has("--merge"), exactlyOne: false, personal: personalNeedles(rest) }
+@@ lib/maint.mjs | message command ignores the needles
+% run=shared
+< { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }
+> { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: [] }
+@@ lib/maint.mjs | PR text command ignores the needles
+% run=shared
+< print(prTextErrors(title, body, personalNeedles(rest)));
+> print(prTextErrors(title, body));
+@@ lib/maint.mjs | needle options of the command line dropped
+% run=shared
+< loadPersonalNeedles({ cwd: process.cwd(), ...needlesArgs(rest) }).needles
+> loadPersonalNeedles({ cwd: process.cwd() }).needles
+@@ lib/maint.mjs | text command finds no trailer
+% run=shared
+< print({ aiTrailerLines: aiTrailerLines(fs.readFileSync(file, "utf8")) });
+> print({ aiTrailerLines: [] });
 
 # ===================================================== lib/HarnessGh.psm1: identity and external commands
 @@ lib/HarnessGh.psm1 | no credential for the maintainer accepted
@@ -654,22 +701,22 @@
 % run=shared
 < if ($n) { return $n }
 > if ($n) { return 'node' }
-@@ lib/HarnessGh.psm1 | pinned node major version changed
-% run=shared
-< $script:PinnedNodeMajor = 22
-> $script:PinnedNodeMajor = 24
-@@ lib/HarnessGh.psm1 | .node-version ignored
-% run=shared
-< if (-not (Test-Path -LiteralPath $pinFile -PathType Leaf)) { return $script:PinnedNodeMajor }
-> return $script:PinnedNodeMajor
 @@ lib/HarnessGh.psm1 | .node-version with a leading v refused
 % run=shared
 < if ($pinText -match '^v?(\d+)(?:\.\d+){0,2}$') {
 > if ($pinText -match '^(\d+)(?:\.\d+){0,2}$') {
-@@ lib/HarnessGh.psm1 | .node-version that holds no version replaced by the built-in pin
+@@ lib/HarnessGh.psm1 | .node-version that holds no version replaced by a guess
 % run=shared
 < throw ".node-version does not hold a Node version: $pinText"
-> return $script:PinnedNodeMajor
+> return 22
+@@ lib/HarnessGh.psm1 | missing .node-version replaced by a guess
+% run=shared
+< throw ".node-version is missing in this checkout: the pinned Node version is unknown"
+> return 22
+@@ lib/HarnessGh.psm1 | missing .node-version not noticed
+% run=shared
+< if (-not (Test-Path -LiteralPath $pinFile -PathType Leaf)) { throw
+> if ($false) { throw
 @@ lib/HarnessGh.psm1 | error answer of maint.mjs ignored
 % run=shared,pr-merge
 < if ($v.PSObject.Properties.Name -contains 'error') { throw
@@ -679,61 +726,90 @@
 < function Test-HarnessPwshVersion { param([int]$Major, [int]$Minor) $Major -gt 7 -or ($Major -eq 7 -and $Minor -ge 5) }
 > function Test-HarnessPwshVersion { param([int]$Major, [int]$Minor) $true }
 
-# ===================================================== lib/HarnessGh.psm1: commit and PR text rules
-@@ lib/HarnessGh.psm1 | commit subject format not checked
-% run=shared,push,pr-merge
-< if (-not $Merge -and $lines[0] -cnotmatch $script:SubjectPattern -and $lines[0] -cnotmatch $script:GitSubjectPattern) {
-> if ($false) {
-@@ lib/HarnessGh.psm1 | AI attribution trailer allowed in messages
-% run=shared,push,pr-merge
-< $errors.Add('AI attribution trailer is not allowed')
+# ===================================================== lib/HarnessGh.psm1: bridges to the repository's own rules (message, PR text, privacy, needles, memo)
+@@ lib/HarnessGh.psm1 | needle mode not handed on
+% run=shared
+< $needleArgs = @('--needles', $script:NeedlesMode)
+> $needleArgs = @('--needles', 'local')
+@@ lib/HarnessGh.psm1 | needle file not handed on
+% run=shared,push
+< if ($script:NeedlesFile) { $needleArgs += @('--needles-file', $script:NeedlesFile) }
 > $null = 0
-@@ lib/HarnessGh.psm1 | session trailer not recognised as AI attribution
+@@ lib/HarnessGh.psm1 | needle settings not stored
+% run=shared
+< $script:NeedlesFile = $NeedleFile
+> $null = 0
+@@ lib/HarnessGh.psm1 | message rules without the needles
+% run=shared
+< $flags = @(Get-HarnessNeedleArgs)
+> $flags = @()
+@@ lib/HarnessGh.psm1 | merge flag not handed on
+% run=shared,push
+< if ($Merge) { $flags += '--merge' }
+> $null = 0
+@@ lib/HarnessGh.psm1 | exactly-one flag not handed on
+% run=shared,pr-merge
+< if ($ExactlyOne) { $flags += '--exactly-one' }
+> $null = 0
+@@ lib/HarnessGh.psm1 | message errors dropped
 % run=shared,push,pr-merge
-< '-by|cla' + 'ude-session)\s*:'
-> '-by)\s*:'
-@@ lib/HarnessGh.psm1 | other trailers allowed
-% run=shared,push,pr-merge
-< if (@(Get-MessageTrailers $normalized | Where-Object { $_ -notmatch $script:SignoffPattern }).Count) {
-> if ($false) {
-@@ lib/HarnessGh.psm1 | merge commits need a sign-off
-% run=shared,push,pr-merge
-< if ($Merge) { return $errors.ToArray() }
-> 
-@@ lib/HarnessGh.psm1 | missing sign-off accepted
-% run=shared,push,pr-merge
-< if (-not $signoffs.Count) { $errors.Add('Signed-off-by is missing (use git commit -s)') }
-> if ($false) { }
-@@ lib/HarnessGh.psm1 | sign-off of somebody else accepted
-% run=shared,push,pr-merge
-< elseif (@($signoffs | Where-Object { $_ -cne $script:Signoff }).Count) {
-> elseif ($false) {
-@@ lib/HarnessGh.psm1 | sign-off compared without case
-% run=shared,push,pr-merge
-< elseif (@($signoffs | Where-Object { $_ -cne $script:Signoff }).Count) {
-> elseif (@($signoffs | Where-Object { $_ -ne $script:Signoff }).Count) {
-@@ lib/HarnessGh.psm1 | second sign-off allowed where exactly one is required
-% run=shared,push,pr-merge
-< elseif ($ExactlyOne -and $signoffs.Count -ne 1) {
-> elseif ($false) {
-@@ lib/HarnessGh.psm1 | trailer block of mixed lines not recognised
-% run=shared,push,pr-merge
-< -or ($found.Count * 4 -ge $lines.Count -and @($found | Where-Object { $_ -match $script:SignoffPattern }).Count -gt 0)
-> -or $false
-@@ lib/HarnessGh.psm1 | PR title format not checked
+< @((Invoke-HarnessMaint -Command 'message' -Content $Message -Extra $flags).errors)
+> @()
+@@ lib/HarnessGh.psm1 | PR text errors dropped
 % run=shared,pr-open,pr-merge
-< if ($Title -cnotmatch $script:SubjectPattern) {
-> if ($false) {
-@@ lib/HarnessGh.psm1 | PR body sign-off not required
-% run=shared,pr-open,pr-merge
-< if ($last -cne $script:Signoff) {
-> if ($false) {
+< @((Invoke-HarnessMaint -Command 'pr-text' -Content $json -Extra @(Get-HarnessNeedleArgs)).errors)
+> @()
+@@ lib/HarnessGh.psm1 | PR text rules without the needles
+% run=shared
+< -Command 'pr-text' -Content $json -Extra @(Get-HarnessNeedleArgs)
+> -Command 'pr-text' -Content $json -Extra @()
+@@ lib/HarnessGh.psm1 | AI attribution lookup of public text skipped
+% run=shared,pr-open,pr-comment
+< foreach ($n in @((Invoke-HarnessMaint -Command 'text' -Content $Text).aiTrailerLines)) { $findings.Add("line $n [ai-trailer]") }
+> $null = 0
+@@ lib/HarnessGh.psm1 | privacy tool of public text without the needles
+% run=shared,pr-open,pr-comment
+< (@('--text', $file) + $needleArgs)
+> (@('--text', $file))
+@@ lib/HarnessGh.psm1 | memo key of a maint call without the content
+% run=shared,push
+< -MemoKey "$Command|$($Extra -join ' ')|$Content"
+> -MemoKey "$Command"
+@@ lib/HarnessGh.psm1 | memo key of a privacy call without the text
+% run=shared,pr-open
+< -MemoKey "$($needleArgs -join ' ')|$Text"
+> -MemoKey "$($needleArgs -join ' ')"
+@@ lib/HarnessGh.psm1 | memo key without the checkout and the script
+% run=shared
+< $memo = if ($MemoKey) { "$script:RepoRoot|$Script|$MemoKey" } else { '' }
+> $memo = $MemoKey
+@@ lib/HarnessGh.psm1 | memo compares keys without case
+% run=shared
+< [StringComparer]::Ordinal
+> [StringComparer]::OrdinalIgnoreCase
+@@ lib/HarnessGh.psm1 | memo used outside a self-test
+% run=shared
+< $memo = [bool]($script:Fake -and $MemoKey)
+> $memo = [bool]$MemoKey
+@@ lib/HarnessGh.psm1 | memo never stores an answer
+% run=shared
+< if ($memo) { $script:RealAnswers[$MemoKey] = $r }
+> $null = 0
+@@ lib/HarnessGh.psm1 | memo never answers
+% run=shared
+< if ($null -eq $r -and $memo -and $script:RealAnswers.ContainsKey($MemoKey)) { $r = $script:RealAnswers[$MemoKey] }
+> $null = 0
+@@ lib/HarnessGh.psm1 | memo kept when the needles change
+% run=shared
+< $script:RealAnswers.Clear()
+> $null = 0
+@@ lib/HarnessGh.psm1 | the fake does not let node run for real
+% run=shared
+< if ($cmd -match '(^|[\\/])node(\.exe)?$') { return $null }
+> if ($false) { return $null }
+
 
 # ===================================================== lib/HarnessGh.psm1: public text and markers
-@@ lib/HarnessGh.psm1 | AI trailers in public text not looked for
-% run=shared,pr-open,pr-comment
-< foreach ($f in @(Get-TrailerFindings $Text)) {
-> foreach ($f in @()) {
 @@ lib/HarnessGh.psm1 | privacy tool failure is not a finding
 % run=shared,pr-open,pr-comment
 < $findings.Add("privacy check failed (exit $($r.Code)): $($detail -join ' | ')")
@@ -1030,15 +1106,9 @@
 @@ pr-merge.ps1 | empty summary accepted
 < if (-not $text) { throw 'The summary paragraph is empty' }
 > 
-@@ pr-merge.ps1 | summary with trailers accepted
-< if ($text -match "(?im)^\s*($trailerWords)\s*:") { throw
-> if ($false) { throw
 @@ pr-merge.ps1 | squash subject without the PR number
 < $title = "$($PrData.title) (#$($PrData.number))"
 > $title = "$($PrData.title)"
-@@ pr-merge.ps1 | squash message not scanned before sending
-< Assert-PublicText $full 'squash message'
-> $null = 0
 @@ pr-merge.ps1 | squash message rules not applied before sending
 < $problems = @(Get-MessageErrors $full -ExactlyOne)
 > $problems = @()

@@ -210,7 +210,11 @@ function Invoke-Resolve {
 function Invoke-SelfTest {
     $cases = New-HarnessCases
     $savedToken = $env:GH_TOKEN
+    $needleDir = Join-Path ([IO.Path]::GetTempPath()) "harness-pr-comment-needles-$PID"
+    New-Item -ItemType Directory -Force -Path $needleDir | Out-Null
     try {
+        # the repository's own privacy tool runs for real, with a needle file of the self-test
+        New-HarnessSelfTestNeedles -Directory $needleDir | Out-Null
         # identity: GH_TOKEN of the maintainer account in this process, login verified, never gh auth switch / login
         $id = @{ Token = 'tok-selftest'; Login = 'DLsnows' }
         $idLog = [System.Collections.Generic.List[string]]::new()
@@ -240,7 +244,6 @@ function Invoke-SelfTest {
         $checks = Read-HarnessFixture 'check-runs.json'
         $threadMode = @{ Unresolved = $false }
         $routes = [ordered]@{
-            'check-privacy\.mjs --text'          = Get-HarnessPrivacyStandIn
             'collaborators/DLsnows/permission'   = { 'admin' }
             'collaborators/ghost/permission'     = { @{ Code = 1; Out = ''; Err = 'gh: Not Found (HTTP 404)' } }
             'collaborators/flaky/permission'     = { @{ Code = 1; Out = ''; Err = 'gh: Bad Gateway (HTTP 502)' } }
@@ -368,7 +371,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases '-Post: a local path in the text' $true (Test-Throws { Invoke-Post -Number 7 -Text ('log in C:' + '\Users\someone\a.log') -AgentRole review -CommentKind note -AgentRound 1 -HeadSha $sha })
         Add-HarnessCase $cases '-Post: an AI attribution trailer in the text' $true (Test-Throws { Invoke-Post -Number 7 -Text "ok`nCo-Authored-By: a <a@b.c>" -AgentRole review -CommentKind note -AgentRound 1 -HeadSha $sha })
         Add-HarnessCase $cases '-Post: a card number in the text' $true (Test-Throws { Invoke-Post -Number 7 -Text ('see R' + 'H-02') -AgentRole review -CommentKind note -AgentRound 1 -HeadSha $sha })
-        Add-HarnessCase $cases '-Post: a personal needle in the text' $true (Test-Throws { Invoke-Post -Number 7 -Text 'harness-selftest-fake-needle-7c1e' -AgentRole review -CommentKind note -AgentRound 1 -HeadSha $sha })
+        Add-HarnessCase $cases '-Post: a personal needle in the text' $true (Test-Throws { Invoke-Post -Number 7 -Text (Get-HarnessFakeNeedle) -AgentRole review -CommentKind note -AgentRound 1 -HeadSha $sha })
         Add-HarnessCase $cases '-Post: a body carrying its own marker' $true (Test-Throws { Invoke-Post -Number 7 -Text '<!-- harness-review v1 red=0 important=0 suggest=0 -->' -AgentRole review -CommentKind note -AgentRound 1 -HeadSha $sha })
         Add-HarnessCase $cases '-Post: an unknown role' $true (Test-Throws { Invoke-Post -Number 7 -Text 'x' -AgentRole user -CommentKind note -AgentRound 1 -HeadSha $sha })
         $n = $posted.Count
@@ -437,6 +440,8 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'source hygiene: a header-less file without StrictMode is caught' $true (@(Get-HarnessSourceProblems -Text "Write-Output 1" -Name 'x') -match 'SPDX' -and @(Get-HarnessSourceProblems -Text "Write-Output 1" -Name 'x') -match 'StrictMode')
     } finally {
         Set-HarnessFake $null
+        Set-HarnessNeedles
+        Remove-Item -LiteralPath $needleDir -Recurse -Force -ErrorAction SilentlyContinue
         $env:GH_TOKEN = $savedToken
     }
     Complete-HarnessSelfTest $cases 'pr-comment'

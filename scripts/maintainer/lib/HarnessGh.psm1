@@ -8,10 +8,11 @@
 #   is never switched.
 # - Local settings come from environment variables or git config only; there is no local path in any script:
 #   HARNESS_ROOT / harness.root (workspace root that holds wt/, used by new-worktree only), HARNESS_NODE / harness.node
-#   (without either, the node on PATH is used only when its major version is the pinned one), HARNESS_GITLEAKS /
+#   (without either, the node on PATH is used only when its major version is the one in .node-version), HARNESS_GITLEAKS /
 #   harness.gitleaks. The personal privacy needles are read by scripts/check-privacy.mjs itself.
-# - Privacy and infrastructure rules are not rewritten here: public text goes through scripts/check-privacy.mjs, the
-#   infrastructure list is scripts/lib/infra-paths.mjs, bot-summary parsing is lib/maint.mjs.
+# - The repository's rules are not rewritten here: public text goes through scripts/check-privacy.mjs, commit messages and
+#   PR texts through scripts/check-commits.mjs, bot summaries through scripts/review-bot.mjs, the infrastructure list is
+#   scripts/lib/infra-paths.mjs; lib/maint.mjs is the bridge to the last three.
 # - gh, git and node all go through Invoke-HarnessExternal; -SelfTest swaps in a fake that reads fixtures
 #   (Set-HarnessFake), so self-tests never touch the network or GitHub.
 
@@ -29,7 +30,8 @@ $script:LockScope = 'ReaperHarness'
 $script:PermCache = @{}
 $script:InfraModule = $null
 $script:InfraAnswers = @{}
-$script:NeedlesMode = 'local'
+# the memo of real answers is case-sensitive: two texts that differ only by letter case are two questions
+$script:RealAnswers = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
 # checks that must be success on the head of a PR into feature/v1
 $script:RequiredChecks = @('harness-gate', 'branch-gate')
 $script:BotCheck = 'claude-pr-review'
@@ -75,12 +77,16 @@ function Get-HarnessRoot {
 <#
   Run gh / git / node and return @{ Code; Out; Err }. In a self-test $script:Fake gets the first look (it receives the
   executable, the argument array and an options object); returning $null lets the real command run (node and local git
-  config reads do). A non-zero exit code throws unless -AllowFail.
+  config reads do). A non-zero exit code throws unless -AllowFail. A self-test asks the same question of the repository's own
+  scripts again and again (the same PR text is scanned in every counter-example): with a -MemoKey the answer of the real
+  command is remembered for the rest of the self-test; the fake still looks first, and a run outside a self-test never remembers.
 #>
 function Invoke-HarnessExternal {
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [switch]$AllowFail)
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [string]$MemoKey, [switch]$AllowFail)
     $r = $null
     if ($script:Fake) { $r = & $script:Fake $Exe $Arguments ([pscustomobject]@{ Cwd = $Cwd }) }
+    $memo = [bool]($script:Fake -and $MemoKey)
+    if ($null -eq $r -and $memo -and $script:RealAnswers.ContainsKey($MemoKey)) { $r = $script:RealAnswers[$MemoKey] }
     if ($null -eq $r) {
         $errFile = [IO.Path]::GetTempFileName()
         $pushed = $false
@@ -93,6 +99,7 @@ function Invoke-HarnessExternal {
         }
         $r = @{ Code = $code; Out = (@($out) -join "`n"); Err = [IO.File]::ReadAllText($errFile) }
         Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
+        if ($memo) { $script:RealAnswers[$MemoKey] = $r }
     }
     if ($r.Code -ne 0 -and -not $AllowFail) {
         $first = (($r.Err -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
@@ -159,12 +166,10 @@ function Invoke-HarnessGraphQL {
     return $data
 }
 
-# TODO: the pinned major comes from .node-version of the checkout once the repository carries that file; until then it is this value.
-$script:PinnedNodeMajor = 22
-
+#  The pinned major version of Node is the first number of .node-version in the checkout; the file is required.
 function Get-HarnessNodeMajorPin {
     $pinFile = Join-Path $script:RepoRoot '.node-version'
-    if (-not (Test-Path -LiteralPath $pinFile -PathType Leaf)) { return $script:PinnedNodeMajor }
+    if (-not (Test-Path -LiteralPath $pinFile -PathType Leaf)) { throw ".node-version is missing in this checkout: the pinned Node version is unknown" }
     $pinText = (Get-Content -Raw -LiteralPath $pinFile).Trim()
     if ($pinText -match '^v?(\d+)(?:\.\d+){0,2}$') { return [int]$Matches[1] }
     throw ".node-version does not hold a Node version: $pinText"
@@ -172,7 +177,7 @@ function Get-HarnessNodeMajorPin {
 
 <#
   The Node of the repository scripts: HARNESS_NODE / harness.node when set. Without either, the node on PATH is used only when
-  its major version is the pinned one; another version (a newer global install) is an error, never a silent fallback.
+  its major version is the one of .node-version; another version (a newer global install) is an error, never a silent fallback.
 #>
 function Get-HarnessNode {
     $n = Get-HarnessSetting -Env 'HARNESS_NODE' -GitKey 'harness.node'
@@ -191,10 +196,11 @@ function Get-HarnessNode {
 
 <# A Node script of the repository (repo-relative path), run in the repo root so git config settings resolve per repository. #>
 function Invoke-HarnessNodeScript {
-    param([Parameter(Mandatory)][string]$Script, [string[]]$Arguments = @(), [switch]$AllowFail)
+    param([Parameter(Mandatory)][string]$Script, [string[]]$Arguments = @(), [string]$MemoKey, [switch]$AllowFail)
     $scriptPath = Join-Path $script:RepoRoot $Script
     if (-not $script:Fake -and -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { throw "$Script is missing in this checkout: the check it provides is unavailable, nothing is sent" }
-    Invoke-HarnessExternal (Get-HarnessNode) (@($scriptPath) + $Arguments) -Cwd $script:RepoRoot -AllowFail:$AllowFail
+    $memo = if ($MemoKey) { "$script:RepoRoot|$Script|$MemoKey" } else { '' }
+    Invoke-HarnessExternal (Get-HarnessNode) (@($scriptPath) + $Arguments) -Cwd $script:RepoRoot -MemoKey $memo -AllowFail:$AllowFail
 }
 
 <# One subcommand of lib/maint.mjs; the input goes through a temporary file; returns the parsed JSON line. #>
@@ -203,7 +209,7 @@ function Invoke-HarnessMaint {
     $file = [IO.Path]::GetTempFileName()
     try {
         [IO.File]::WriteAllText($file, $Content, [Text.UTF8Encoding]::new($false))
-        $r = Invoke-HarnessNodeScript 'scripts/maintainer/lib/maint.mjs' (@($Command, '--file', $file) + $Extra) -AllowFail
+        $r = Invoke-HarnessNodeScript 'scripts/maintainer/lib/maint.mjs' (@($Command, '--file', $file) + $Extra) -MemoKey "$Command|$($Extra -join ' ')|$Content" -AllowFail
         $last = (($r.Out -split "`n") | Where-Object { $_.Trim() } | Select-Object -Last 1)
         if (-not $last) { throw "maint.mjs $Command produced no output: $($r.Err.Trim())" }
         $v = ConvertFrom-Json -InputObject $last -Depth 100 -DateKind String
@@ -233,84 +239,53 @@ function Initialize-HarnessIdentity {
 
 # ---- text rules -----------------------------------------------------------------------------
 
-# PowerShell's -match and [ValidatePattern] ignore case unless told otherwise: the subject, branch and marker patterns are lowercase
-# rules, so they are used with -cmatch / -cnotmatch (and Options = None); the trailer patterns are case-insensitive on purpose.
-# Literals are split so that no complete attribution form appears in this source file.
-$script:AiTrailerPattern = '^\s*(?:co-authored' + '-by|cla' + 'ude-session)\s*:'
-$script:SignoffPattern = '^\s*signed-off-by\s*:'
-$script:TrailerPattern = '^\s*[A-Za-z0-9][A-Za-z0-9-]*\s*:(?!//)\s*\S'
-$script:SubjectPattern = '^(?:feat|fix|docs|test|refactor|perf|ci|build|chore|style|revert|harden|release|merge)\([a-z0-9][a-z0-9/-]*\): \S'
-$script:GitSubjectPattern = '^(?:Merge (?:remote-tracking )?branch ''[^'']+''(?: of \S+)?(?: into \S+)?|Revert ".+")$'
+# None of the rules below is written out here: commit messages, PR texts and AI attribution trailers are judged by
+# scripts/check-commits.mjs (through lib/maint.mjs) and privacy by scripts/check-privacy.mjs. A missing tool, a crash and an
+# answer that cannot be read are errors, never a pass.
 
-function Set-HarnessNeedlesMode { param([ValidateSet('local', 'ci', 'ci-optional')][string]$Mode) $script:NeedlesMode = $Mode }
+$script:NeedlesMode = 'local'
+$script:NeedlesFile = $null
 
-<#
-  The last paragraph's trailer lines, git's way: the whole paragraph is trailers, or at least a quarter of it is and one
-  is a Signed-off-by.
-#>
-function Get-MessageTrailers {
-    param([Parameter(Mandatory)][string]$Text)
-    $paras = @($Text -split "\n\s*\n")
-    if ($paras.Count -lt 2) { return @() }
-    $lines = @($paras[-1] -split "`n")
-    $found = @($lines | Where-Object { $_ -match $script:TrailerPattern })
-    $isBlock = $found.Count -eq $lines.Count -or ($found.Count * 4 -ge $lines.Count -and @($found | Where-Object { $_ -match $script:SignoffPattern }).Count -gt 0)
-    if ($isBlock) { return $found }
-    return @()
+<# Where the privacy tool and the message rules take the personal needles from: the mode, and for local a needle file (the self-tests use their own). #>
+function Set-HarnessNeedles {
+    param([ValidateSet('local', 'ci', 'ci-optional')][string]$Mode = 'local', [string]$NeedleFile)
+    $script:NeedlesMode = $Mode
+    $script:NeedlesFile = $NeedleFile
+    $script:RealAnswers.Clear()
 }
 
-<#
-  Commit / squash message rules (same-repo tier): subject type(scope): text, no AI attribution trailer, only
-  Signed-off-by trailers, every Signed-off-by line is the maintainer's, at least one (exactly one with -ExactlyOne).
-  A merge commit is exempt from subject and sign-off. Returns the list of problems (empty = fine).
-#>
+function Get-HarnessNeedleArgs {
+    $needleArgs = @('--needles', $script:NeedlesMode)
+    if ($script:NeedlesFile) { $needleArgs += @('--needles-file', $script:NeedlesFile) }
+    $needleArgs
+}
+
+<# A commit or squash message under the same-repository rules of check-commits.mjs. Returns the problems (empty = fine). #>
 function Get-MessageErrors {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [switch]$Merge, [switch]$ExactlyOne)
-    $errors = [System.Collections.Generic.List[string]]::new()
-    $normalized = ($Message -replace "`r`n", "`n").TrimEnd()
-    $lines = @($normalized -split "`n")
-    if (-not $Merge -and $lines[0] -cnotmatch $script:SubjectPattern -and $lines[0] -cnotmatch $script:GitSubjectPattern) {
-        $errors.Add('subject must be type(scope): description')
-    }
-    if (@($lines | Where-Object { $_ -match $script:AiTrailerPattern }).Count) { $errors.Add('AI attribution trailer is not allowed') }
-    if (@(Get-MessageTrailers $normalized | Where-Object { $_ -notmatch $script:SignoffPattern }).Count) { $errors.Add('only Signed-off-by is allowed as a trailer') }
-    if ($Merge) { return $errors.ToArray() }
-    $signoffs = @($lines | Where-Object { $_ -match $script:SignoffPattern } | ForEach-Object { $_.Trim() })
-    if (-not $signoffs.Count) { $errors.Add('Signed-off-by is missing (use git commit -s)') }
-    elseif (@($signoffs | Where-Object { $_ -cne $script:Signoff }).Count) { $errors.Add("every Signed-off-by line must be '$($script:Signoff)'") }
-    elseif ($ExactlyOne -and $signoffs.Count -ne 1) { $errors.Add('exactly one Signed-off-by line is allowed') }
-    return $errors.ToArray()
+    $flags = @(Get-HarnessNeedleArgs)
+    if ($Merge) { $flags += '--merge' }
+    if ($ExactlyOne) { $flags += '--exactly-one' }
+    @((Invoke-HarnessMaint -Command 'message' -Content $Message -Extra $flags).errors)
 }
 
-<# PR title format and body rules (privacy is Assert-PublicText's job): title type(scope): text, last body line is the sign-off. #>
+<# A PR title and body under checkPrText of check-commits.mjs (title format, sign-off on the last line, privacy rules). #>
 function Get-PrTextErrors {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Title, [Parameter(Mandatory)][AllowEmptyString()][string]$Body)
-    $errors = [System.Collections.Generic.List[string]]::new()
-    if ($Title -cnotmatch $script:SubjectPattern) { $errors.Add('PR title must be type(scope): description') }
-    $last = @(($Body.TrimEnd() -split "`r?`n"))[-1].Trim()
-    if ($last -cne $script:Signoff) { $errors.Add("the last line of the PR body must be '$($script:Signoff)'") }
-    return $errors.ToArray()
+    $json = ConvertTo-HarnessJsonText ([ordered]@{ title = $Title; body = $Body })
+    @((Invoke-HarnessMaint -Command 'pr-text' -Content $json -Extra @(Get-HarnessNeedleArgs)).errors)
 }
 
-<# AI attribution trailer lines (any author) in public text; the privacy table only knows AI names. #>
-function Get-TrailerFindings {
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    $i = 0
-    foreach ($line in ($Text -split "`r?`n")) {
-        $i++
-        if ($line -match $script:AiTrailerPattern) { [pscustomobject]@{ Line = $i; Rule = 'ai-trailer'; Text = "$($line.Trim().Substring(0, 2))..." } }
-    }
-}
-
-<# Public-text gate: AI attribution trailers plus scripts/check-privacy.mjs --text (exit 0 clean). A missing tool is an error, never a pass. #>
+<# Public-text gate: AI attribution trailers (any author) plus scripts/check-privacy.mjs --text (exit 0 clean). A missing tool is an error, never a pass. #>
 function Test-PublicText {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     $findings = [System.Collections.Generic.List[string]]::new()
-    foreach ($f in @(Get-TrailerFindings $Text)) { $findings.Add("line $($f.Line) [$($f.Rule)] $($f.Text)") }
+    foreach ($n in @((Invoke-HarnessMaint -Command 'text' -Content $Text).aiTrailerLines)) { $findings.Add("line $n [ai-trailer]") }
     $file = [IO.Path]::GetTempFileName()
     try {
         [IO.File]::WriteAllText($file, $Text, [Text.UTF8Encoding]::new($false))
-        $r = Invoke-HarnessNodeScript 'scripts/check-privacy.mjs' @('--text', $file, '--needles', $script:NeedlesMode) -AllowFail
+        $needleArgs = @(Get-HarnessNeedleArgs)
+        $r = Invoke-HarnessNodeScript 'scripts/check-privacy.mjs' (@('--text', $file) + $needleArgs) -MemoKey "$($needleArgs -join ' ')|$Text" -AllowFail
         if ($r.Code -ne 0) {
             $detail = @((($r.Out + "`n" + $r.Err) -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 5)
             $findings.Add("privacy check failed (exit $($r.Code)): $($detail -join ' | ')")
@@ -765,11 +740,11 @@ function Copy-HarnessObject {
 <#
   Fake external commands: routes is an ordered table, key = regex over the whole command line ("exe arg ..."), value = a
   scriptblock (argv, opts) returning an object (turned into JSON), a string or @{ Code; Out; Err }. Unmatched node commands
-  and local git config reads fall through to the real command (no network); everything else fails, so a self-test shows
-  which command it forgot. Log records every command line.
+  (the repository's own scripts: privacy tool, message rules, maint.mjs) and local git config reads fall through to the real
+  command (no network); everything else fails, so a self-test shows which command it forgot. Log records every command line.
 #>
 function New-HarnessFake {
-    param([Parameter(Mandatory)][System.Collections.Specialized.OrderedDictionary]$Routes, [System.Collections.Generic.List[string]]$Log)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Specialized.OrderedDictionary]$Routes, [System.Collections.Generic.List[string]]$Log)
     return {
         param($cmd, $argv, $opts)
         $line = "$cmd $($argv -join ' ')"
@@ -783,33 +758,27 @@ function New-HarnessFake {
                 return @{ Code = 0; Out = $out; Err = '' }
             }
         }
-        if ($cmd -match '(^|[\\/])node(\.exe)?$' -and $line -notmatch 'check-privacy\.mjs') { return $null }
+        if ($cmd -match '(^|[\\/])node(\.exe)?$') { return $null }
         if ($line -match '^git (-C \S+ config --get harness\.|config --file )') { return $null }
         return @{ Code = 1; Out = ''; Err = "no fixture for: $line" }
     }.GetNewClosure()
 }
 
+# A needle that cannot occur by accident (the same word as FAKE_NEEDLE in scripts/lib/privacy-needles.mjs; a self-test that
+# expects it to be refused fails if the two ever differ).
+$script:FakeNeedle = 'harness-selftest-fake-needle-5d2a'
+function Get-HarnessFakeNeedle { $script:FakeNeedle }
+
 <#
-  Route for the privacy tool in self-tests: a stand-in of `node scripts/check-privacy.mjs --text <file>` that rejects a few
-  forms (built from pieces so that this source holds none of them). The real rule table belongs to scripts/lib/privacy-needles.mjs;
-  the self-tests only prove that a rejection stops the script and that a clean text passes.
+  The self-tests run the repository's own privacy tool and message rules for real. This writes the needle file they use as the
+  personal needle source (never the maintainer's own file) into the given directory and makes the module use it.
 #>
-function Get-HarnessPrivacyStandIn {
-    $rules = [ordered]@{
-        'local-path'  = ('C:' + '\\Users\\')
-        'fake-needle' = 'harness-selftest-fake-needle-7c1e'
-        'card-id'     = ('(?i)\b(?:R' + 'H|R' + 'N)-\d{2}[a-z]?\b')
-        'ai-byline'   = ('Generated with \[Cla' + 'ude Code\]')
-    }
-    return {
-        param($argv)
-        $i = [Array]::IndexOf($argv, '--text')
-        $fileText = [IO.File]::ReadAllText($argv[$i + 1])
-        foreach ($k in $rules.Keys) {
-            if ($fileText -match $rules[$k]) { return @{ Code = 1; Out = "[$k] stand-in finding"; Err = '' } }
-        }
-        return @{ Code = 0; Out = ''; Err = '' }
-    }.GetNewClosure()
+function New-HarnessSelfTestNeedles {
+    param([Parameter(Mandatory)][string]$Directory)
+    $needlePath = Join-Path $Directory 'selftest-needles.txt'
+    [IO.File]::WriteAllText($needlePath, "$($script:FakeNeedle)`n", [Text.UTF8Encoding]::new($false))
+    Set-HarnessNeedles -Mode local -NeedleFile $needlePath
+    $needlePath
 }
 
 function New-HarnessCases { , [System.Collections.Generic.List[object]]::new() }
@@ -870,5 +839,5 @@ function Get-HarnessSourceProblems {
     return $problems.ToArray()
 }
 
-Export-ModuleMember -Function *-Harness*, *-AgentMarker, *-MessageTrailers, *-MessageErrors, *-PrTextErrors, *-TrailerFindings,
+Export-ModuleMember -Function *-Harness*, *-AgentMarker, *-MessageErrors, *-PrTextErrors,
     Format-AgentText, Test-PublicText, Assert-PublicText, Test-RepoWriter, Get-InfraTouches, Test-Throws, Get-ThrownMessage, Invoke-WithHarnessLock

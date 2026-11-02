@@ -499,18 +499,16 @@ function Get-CheckExitCode {
 
 # ---- the squash commit ----------------------------------------------------------------------
 
-<# Squash message: subject "<PR title> (#n)", the summary paragraph, a blank line, the one sign-off line; all through the message rules and the public-text gate. #>
+<# Squash message: subject "<PR title> (#n)", the summary paragraph, a blank line, the one sign-off line; all through the message rules of scripts/check-commits.mjs (which include the privacy rules). #>
 function New-MergeMessage {
     param([Parameter(Mandatory)]$PrData, [Parameter(Mandatory)][string]$Summary)
     $text = $Summary.Trim()
     if (-not $text) { throw 'The summary paragraph is empty' }
-    $trailerWords = 'signed-off-by|co-authored' + '-by|cla' + 'ude-session'
-    if ($text -match "(?im)^\s*($trailerWords)\s*:") { throw 'The summary paragraph must not carry trailers; the script adds the sign-off' }
     $title = "$($PrData.title) (#$($PrData.number))"
     $full = "$title`n`n$text`n`n$(Get-HarnessSignoff)"
+    # the script adds the only sign-off, so a trailer of the summary shows up as a second one (or as an AI attribution)
     $problems = @(Get-MessageErrors $full -ExactlyOne)
-    if ($problems.Count) { throw "The squash message failed the message rules: $($problems -join '; ')" }
-    Assert-PublicText $full 'squash message'
+    if ($problems.Count) { throw "The squash message failed the message rules (the summary paragraph carries no trailers, the script adds the sign-off): $($problems -join '; ')" }
     @{ Title = $title; Body = "$text`n`n$(Get-HarnessSignoff)" }
 }
 
@@ -646,6 +644,8 @@ function Invoke-SelfTest {
     $away = $null
     $messageOf = { param($block) try { & $block | Out-Null; $null } catch { if ($env:HARNESS_SELFTEST_VERBOSE) { [Console]::Error.WriteLine("  thrown: $($_.Exception.Message)") }; $_.Exception.Message } }
     try {
+        # the repository's own privacy tool, message rules and infrastructure list run for real, with a needle file of the self-test
+        New-HarnessSelfTestNeedles -Directory $tmp | Out-Null
         # ---- records file location --------------------------------------------------------------
         $fakeClone = Join-Path $tmp 'clone'
         $workDir = Join-Path $tmp 'wt'
@@ -695,7 +695,6 @@ function Invoke-SelfTest {
 
         # ---- the recorded PR -------------------------------------------------------------------
         Clear-HarnessPermCache
-        Set-HarnessInfraModule (Join-Path $PSScriptRoot 'fixtures/infra-paths.mjs')
         $pull = Read-HarnessFixture 'pull.json'
         $headSha = $pull.head.sha
         $tipSha = 'c' * 40
@@ -710,7 +709,6 @@ function Invoke-SelfTest {
         $worktreeText = { "worktree $($fakeClone -replace '\\', '/')`nHEAD $tipSha`nbranch refs/heads/feature/v1`n`nworktree $($workDir -replace '\\', '/')/example`nHEAD $headSha`nbranch refs/heads/feat/example" }
         $lockLog = [System.Collections.Generic.List[string]]::new()
         $routes = [ordered]@{
-            'check-privacy\.mjs --text'        = Get-HarnessPrivacyStandIn
             'collaborators/DLsnows/permission' = { 'admin' }
             'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
             'pulls/7/files'                    = { $prFiles }
@@ -768,7 +766,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'facts: core.hooksPath of the checkout is read, another directory is not-ready' $true ($hooksOff.Code -eq 'not-ready' -and @($hooksOff.Failures | Where-Object { $_ -match "core\.hooksPath is '\.git/hooks'" }).Count -eq 1)
         Add-HarnessCase $cases 'facts: core.hooksPath written as the absolute path of this checkout is ready' $false ($hooksAbsolute.Code -ne 'ready')
 
-        Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{ 'check-privacy\.mjs --text' = Get-HarnessPrivacyStandIn }))
+        Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{}))
         $nameless =Read-Records -Number 7 -Path $null -Usable $true
         Set-HarnessFake (New-HarnessFake -Routes $routes -Log $log)
         Add-HarnessCase $cases 'no -WaiverFile: no records at all' $false (@($nameless.Waivers).Count + @($nameless.Approvals).Count + @($nameless.ExternalHandled).Count -ne 0)
@@ -970,11 +968,11 @@ function Invoke-SelfTest {
         # CI, texts, infrastructure
         & $bad 'a required check is not success' { param($f) $f.Checks['branch-gate'].conclusion = 'failure' } 'not-ready' (& $failure 'branch-gate is not success')
         & $bad 'a required check is missing' { param($f) $f.Checks.Remove('harness-gate') } 'not-ready' (& $failure 'harness-gate is not success')
-        & $bad 'the PR body has no sign-off on the last line' { param($f) $f.Pull.body = ($f.Pull.body -replace 'Signed-off-by: .*\s*$', '') } 'not-ready' (& $failure 'last line of the PR body')
+        & $bad 'the PR body has no sign-off on the last line' { param($f) $f.Pull.body = ($f.Pull.body -replace 'Signed-off-by: .*\s*$', '') } 'not-ready' (& $failure "body's last line must be")
         & $bad 'the PR title is not type(scope): text' { param($f) $f.Pull.title = 'Add the example module' } 'not-ready' (& $failure 'PR title must be')
         & $bad 'the PR body carries an AI attribution trailer' { param($f) $f.Pull.body = "$($f.Pull.body.TrimEnd())`nCo-Authored" + "-By: a <a@b.c>`n$(Get-HarnessSignoff)" } 'not-ready' (& $failure 'public-text check')
         & $bad 'a local path in one of our comments' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`nlog in C:" + '\Users\someone\x.log' } 'not-ready' (& $failure 'Our comment .* public-text')
-        & $bad 'a personal needle in one of our comments' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`nharness-selftest-fake-needle-7c1e" } 'not-ready' (& $failure 'Our comment .* public-text')
+        & $bad 'a personal needle in one of our comments' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`n$(Get-HarnessFakeNeedle)" } 'not-ready' (& $failure 'Our comment .* public-text')
         & $bad 'a task-card number in the PR body' { param($f) $f.Pull.body = $f.Pull.body -replace '## 做了什么', ('## R' + 'H-02') } 'not-ready' (& $failure 'public-text check')
         $infraFile = { param($f, $name = 'scripts/review-bot.mjs', $previous = $null) $f.Files = @([pscustomobject]@{ filename = $name; status = $(if ($previous) { 'renamed' } else { 'modified' }); previous_filename = $previous }) }
         & $bad 'a change to an infrastructure path goes to the user' { param($f) & $infraFile $f } 'needs-user' { param($r) @($r.Needs | Where-Object Kind -eq 'infra').Count -eq 1 -and $r.Infra.Count -eq 1 }
@@ -1017,7 +1015,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'infrastructure list: sources and docs do not count' $false ((& $touch @('src/tool/x.ts', 'docs/a.md', 'scripts/check-x/y.mjs', 'tests/check-x.mjs')) -gt 0)
         Set-HarnessInfraModule (Join-Path $tmp 'no-such-infra-paths.mjs')
         Add-HarnessCase $cases 'infrastructure list unavailable: no verdict, never a pass' $true (Test-Throws { Get-MergeVerdict $base })
-        Set-HarnessInfraModule (Join-Path $PSScriptRoot 'fixtures/infra-paths.mjs')
+        Set-HarnessInfraModule $null
 
         # disposition table recognition
         Add-HarnessCase $cases 'disposition rows: the header is recognised by column name' $true ((@(Get-DispositionRows "| 级别 | 位置 | 摘要 | 处置 |`n|---|---|---|---|`n| 【重要】 | a:1 | x | 不改 |")).Count -eq 1)
@@ -1043,9 +1041,9 @@ function Invoke-SelfTest {
         # ---- the merge action --------------------------------------------------------------------
         $msg = New-MergeMessage -PrData $pull -Summary 'Adds the example module.'
         Add-HarnessCase $cases 'squash message: subject with (#7), the one sign-off last' $false (-not ($msg.Title -match '\(#7\)$' -and $msg.Body -match "`n`nSigned-off-by: [^\n]+$" -and ([regex]::Matches($msg.Body, 'Signed-off-by')).Count -eq 1))
-        Add-HarnessCase $cases 'squash message: the summary carries its own Signed-off-by' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary "x`n`n$(Get-HarnessSignoff)" }) -match 'must not carry trailers')
-        Add-HarnessCase $cases 'squash message: the summary carries an AI attribution trailer' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ("x`n`nCo-Authored" + '-By: a <a@b.c>') }) -match 'must not carry trailers')
-        Add-HarnessCase $cases 'squash message: the summary carries an AI session trailer' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ("x`n`nCla" + 'ude-Session: https://example.invalid/s') }) -match 'must not carry trailers')
+        Add-HarnessCase $cases 'squash message: the summary carries its own Signed-off-by' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary "x`n`n$(Get-HarnessSignoff)" }) -match 'exactly one Signed-off-by line')
+        Add-HarnessCase $cases 'squash message: the summary carries an AI attribution trailer' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ("x`n`nCo-Authored" + '-By: a <a@b.c>') }) -match 'AI attribution trailers are not allowed')
+        Add-HarnessCase $cases 'squash message: the summary carries an AI session trailer' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ("x`n`nCla" + 'ude-Session: https://example.invalid/s') }) -match 'AI attribution trailers are not allowed')
         Add-HarnessCase $cases 'squash message: the summary is empty' $true (Test-Throws { New-MergeMessage -PrData $pull -Summary '  ' })
         Add-HarnessCase $cases 'squash message: a local path in the summary' $true (Test-Throws { New-MergeMessage -PrData $pull -Summary ('see C:' + '\Users\someone\x') })
         $squashOk = "feat(example): add the example module (#7)`n`nAdds it.`n`n$(Get-HarnessSignoff)"
@@ -1158,7 +1156,6 @@ function Invoke-SelfTest {
         $locks = [System.Collections.Generic.List[string]]::new()
         Set-HarnessLockImpl { param($name, $block) $locks.Add($name); & $block }
         $afterRoutes = [ordered]@{
-            'check-privacy\.mjs --text'      = Get-HarnessPrivacyStandIn
             'pulls/7$'                       = { $mergedPull }
             'merge-base --is-ancestor'       = { if ($onFeatureLine.Yes) { '' } else { @{ Code = 1; Out = ''; Err = '' } } }
             ' log -1 --format='              = { if ($null -ne $squash.Raw) { $squash.Raw } else { "$($squash.Author)$sep$($squash.AuthorEmail)$sep$($squash.CommitterEmail)$sep$($squash.Message)" } }
@@ -1264,6 +1261,7 @@ function Invoke-SelfTest {
         Set-HarnessFake $null
         Set-HarnessLockImpl $null
         Set-HarnessInfraModule $null
+        Set-HarnessNeedles
         Clear-HarnessPermCache
         # the temp directories are this process's own: name prefix and parent checked before the recursive delete
         $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')

@@ -6,8 +6,8 @@
 #   - the gh credential resolves to the maintainer (GH_TOKEN of this process) and origin's push URL names that
 #     maintainer and this repository (git's credential helper picks the credential by the user name in the URL);
 #   - the working tree is clean (the commits are what is pushed);
-#   - every new commit (not on origin/feature/v1, not on the remote branch) has the maintainer as author and committer,
-#     a subject type(scope): text, only Signed-off-by trailers, only the maintainer's sign-off, no AI attribution;
+#   - every new commit (not on origin/feature/v1, not on the remote branch) has the maintainer as author and committer
+#     and passes the message rules of scripts/check-commits.mjs (subject, sign-off, no AI attribution, privacy);
 #   - scripts/check-privacy.mjs --commits finds nothing in those commits;
 #   - the pinned gitleaks finds nothing in them (HARNESS_GITLEAKS / git config harness.gitleaks).
 # The push itself goes through the pre-push hook as usual; there is no --no-verify.
@@ -48,7 +48,7 @@ function Get-NewCommits {
     }
 }
 
-<# Problems of one commit; empty = fine. The sign-off and subject rules are Get-MessageErrors. #>
+<# Problems of one commit; empty = fine. Author and committer are checked here; the message rules are those of check-commits.mjs. #>
 function Get-CommitProblems {
     param([Parameter(Mandatory)]$Commit)
     $want = "$Maintainer <$MaintainerEmail>"
@@ -88,7 +88,7 @@ function Invoke-Push {
         if ($p.Count) { "$($c.Sha.Substring(0, 7)): $($p -join '; ')" }
     }
     if (@($bad).Count) { throw "Commit check failed, nothing is pushed: $(@($bad) -join ' | ')" }
-    $priv = Invoke-HarnessNodeScript 'scripts/check-privacy.mjs' (@('--commits') + $range + @('--needles', 'local')) -AllowFail
+    $priv = Invoke-HarnessNodeScript 'scripts/check-privacy.mjs' (@('--commits') + $range + @(Get-HarnessNeedleArgs)) -AllowFail
     if ($priv.Code -ne 0) {
         $detail = @((($priv.Out + "`n" + $priv.Err) -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 5)
         throw "Privacy check found something in the new commits, nothing is pushed: $($detail -join ' | ')"
@@ -131,10 +131,13 @@ function Invoke-SelfTest {
     }
     $savedLeaks = $env:HARNESS_GITLEAKS
     $savedToken = $env:GH_TOKEN
-    $savedRoot = Get-HarnessRepoRoot
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "harness-push-selftest-$PID"
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     try {
         $env:HARNESS_GITLEAKS = 'gitleaks-fake'
-        # the privacy tool is faked, so the checkout needs no scripts/check-privacy.mjs for this test
+        # the message rules (check-commits.mjs through lib/maint.mjs) run for real with a needle file of the self-test; only the
+        # scan of the history by the privacy tool is faked, as there is no real history behind the fake commits
+        New-HarnessSelfTestNeedles -Directory $tmp | Out-Null
         Set-HarnessFake (New-HarnessFake -Routes $routes -Log $log)
         $lockNames = [System.Collections.Generic.List[string]]::new()
         Set-HarnessLockImpl { param($name, $sb) $lockNames.Add($name); & $sb }
@@ -230,7 +233,8 @@ function Invoke-SelfTest {
     } finally {
         Set-HarnessFake $null
         Set-HarnessLockImpl $null
-        Set-HarnessRepoRoot $savedRoot
+        Set-HarnessNeedles
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
         $env:HARNESS_GITLEAKS = $savedLeaks
         $env:GH_TOKEN = $savedToken
     }

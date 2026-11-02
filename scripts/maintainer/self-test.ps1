@@ -6,7 +6,9 @@
 # owns, and the source-hygiene rules over every file of this directory together with the rules' own good and bad
 # samples. Exit code 0 only when everything passed.
 #   pwsh scripts/maintainer/self-test.ps1 [-Only push,pr-merge]    (-Only none: just the shared rules)
-# Node comes from HARNESS_NODE / git config harness.node (the pinned Node 22), otherwise the one on PATH.
+# Node comes from HARNESS_NODE / git config harness.node (the pinned Node of .node-version); without either, the node on PATH is
+# used only when its major version is the pinned one. The repository's own check scripts run for real, with a needle file of the
+# self-test as the personal needles.
 
 [CmdletBinding()]
 param([string[]]$Only = @())
@@ -50,20 +52,21 @@ function Test-HygieneRules {
 <#
   Rules of the shared module that no single script owns: every case checks one criterion of lib/HarnessGh.psm1 with a
   counter-example, and a refusal is matched by its reason (a second reason behind the same refusal would hide a missing check).
-  External commands are faked; node (lib/maint.mjs) runs for real.
+  External commands (gh, git) are faked; the Node scripts of the repository (lib/maint.mjs, the privacy tool, the message rules) run for real.
 #>
 function Test-ModuleRules {
     $modCases = New-HarnessCases
     $modTmp = Join-Path ([IO.Path]::GetTempPath()) "harness-module-selftest-$PID"
     New-Item -ItemType Directory -Force -Path $modTmp | Out-Null
+    # the repository's own privacy tool and message rules run for real, with a needle file of the self-test
+    $modNeedleFile = New-HarnessSelfTestNeedles -Directory $modTmp
     $modLog = [System.Collections.Generic.List[string]]::new()
     $modRoot = Get-HarnessRepoRoot
     $modSign = Get-HarnessSignoff
     $modHead = 'a' * 40
     $mod = @{ Privacy = @{ Code = 0; Out = ''; Err = '' }; GraphQl = $null; CheckRuns = $null; Edit = { param($edits) } }
     $modRoutes = [ordered]@{
-        'check-privacy\.mjs --text'        = { $mod.Privacy }
-        '^gh api boom$'                    = { @{ Code = 2; Out = ''; Err = "boom`nsecond line" } }
+        '^gh api boom$'                   = { @{ Code = 2; Out = ''; Err = "boom`nsecond line" } }
         'collaborators/DLsnows/permission' = { 'admin' }
         'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
         'commits/\S+/check-runs'           = { $mod.CheckRuns }
@@ -97,21 +100,31 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'PowerShell 7.4 and older are refused (-DateKind)' $true ((-not (Test-HarnessPwshVersion 7 4)) -and (-not (Test-HarnessPwshVersion 6 9)))
         Add-HarnessCase $modCases 'PowerShell 7.5 and newer are accepted' $false (-not ((Test-HarnessPwshVersion 7 5) -and (Test-HarnessPwshVersion 7 6) -and (Test-HarnessPwshVersion 8 0)))
 
-        # ---- the privacy tool and lib/maint.mjs ----------------------------------------------
+        # ---- the tools of the repository: privacy tool, lib/maint.mjs, message rules ----------
+        # a checkout without the tools: every lookup is an error, never a pass (the node of the environment is not asked, nothing runs)
         $modEmpty = Join-Path $modTmp 'empty'
         New-Item -ItemType Directory -Force -Path $modEmpty | Out-Null
+        $modNodeSaved = $env:HARNESS_NODE
         Set-HarnessFake $null
         Set-HarnessRepoRoot $modEmpty
-        $modMissing = Get-ThrownMessage { Test-PublicText 'plain text' }
+        $env:HARNESS_NODE = 'node'
+        $modMissing = Get-ThrownMessage { Invoke-HarnessNodeScript 'scripts/check-privacy.mjs' @('--text', 'x') }
+        $modMissingText = Get-ThrownMessage { Test-PublicText 'plain text' }
+        $env:HARNESS_NODE = $modNodeSaved
         Set-HarnessRepoRoot $modRoot
         Set-HarnessFake (New-HarnessFake -Routes $modRoutes -Log $modLog)
-        Add-HarnessCase $modCases 'privacy tool: a checkout without scripts/check-privacy.mjs is an error, never a pass' $true ($modMissing -match 'check-privacy\.mjs is missing in this checkout')
+        Add-HarnessCase $modCases 'node script: a checkout without the script is an error, never a pass' $true ($modMissing -match '^scripts/check-privacy\.mjs is missing in this checkout')
+        Add-HarnessCase $modCases 'public text: a checkout without the tools is an error, never a pass' $true ($modMissingText -match 'is missing in this checkout')
         $modMaintBad = Get-ThrownMessage { Invoke-HarnessMaint -Command 'review-state' -Content 'not json' }
         Add-HarnessCase $modCases 'maint.mjs: an error answer is an error' $true ($modMaintBad -match '^maint\.mjs review-state: ')
         $modMaintOk = Invoke-HarnessMaint -Command 'review-state' -Content '[]'
         Add-HarnessCase $modCases 'maint.mjs: a real answer is parsed' $false ($modMaintOk.rounds -ne 0 -or $null -ne $modMaintOk.summary)
         $modAi = 'Co-Authored' + '-By: a <a@b.c>'
         $modSession = 'Cla' + 'ude-Session: https://example.invalid/s'
+        # a finding or a crash of the privacy tool is simulated by a route in front of the real tool; every other case runs the real one
+        $modPrivacyRoutes = [ordered]@{ 'check-privacy\.mjs --text' = { $mod.Privacy } }
+        foreach ($modRouteKey in $modRoutes.get_Keys()) { $modPrivacyRoutes[$modRouteKey] = $modRoutes[$modRouteKey] }
+        Set-HarnessFake (New-HarnessFake -Routes $modPrivacyRoutes -Log $modLog)
         $mod.Privacy = @{ Code = 1; Out = '[stand-in] finding'; Err = '' }
         $modPub = Test-PublicText 'plain text'
         Add-HarnessCase $modCases 'public text: a finding of the privacy tool is a finding' $true ((-not $modPub.Ok) -and ($modPub.Findings -join ';') -match 'privacy check failed \(exit 1\).*stand-in')
@@ -119,32 +132,50 @@ function Test-ModuleRules {
         $modCrash = Test-PublicText 'plain text'
         Add-HarnessCase $modCases 'public text: a crashed privacy tool is a finding, not a pass' $true ((-not $modCrash.Ok) -and ($modCrash.Findings -join ';') -match 'Cannot find module')
         $mod.Privacy = @{ Code = 0; Out = ''; Err = '' }
-        Add-HarnessCase $modCases 'public text: a clean text passes' $false (-not (Test-PublicText 'plain text').Ok)
+        Add-HarnessCase $modCases 'public text: a privacy tool that answers clean is clean' $false (-not (Test-PublicText 'plain text').Ok)
+        Set-HarnessFake (New-HarnessFake -Routes $modRoutes -Log $modLog)
+        Add-HarnessCase $modCases 'public text: a clean text passes the real tool' $false (-not (Test-PublicText 'plain text').Ok)
+        Add-HarnessCase $modCases 'public text: a personal needle of the needle file is a finding' $true (((Test-PublicText "text $(Get-HarnessFakeNeedle)").Findings -join ';') -match 'privacy check failed \(exit 1\)')
+        Add-HarnessCase $modCases 'public text: a local path is a finding' $true (((Test-PublicText ('see C:' + '\Users\someone\x')).Findings -join ';') -match 'privacy check failed \(exit 1\)')
         Add-HarnessCase $modCases 'public text: an AI attribution trailer is a finding even when the privacy tool is clean' $true (-not (Test-PublicText "text`n$modAi").Ok)
         Add-HarnessCase $modCases 'public text: Assert-PublicText stops with the label' $true ((Get-ThrownMessage { Assert-PublicText "text`n$modAi" 'my label' }) -match '^my label failed the public-text check, not sent')
 
-        # ---- commit messages and PR texts ----------------------------------------------------
+        # ---- commit messages and PR texts: the rules are those of scripts/check-commits.mjs, answers are matched by their reason
         $modOk = "feat(example): add it`n`nBody text.`n`n$modSign"
         $modErr = { param($text, $merge = $false, $exactly = $false) (@(Get-MessageErrors $text -Merge:$merge -ExactlyOne:$exactly)) -join ' | ' }
         Add-HarnessCase $modCases 'message: a clean message has no problem' $false ((& $modErr $modOk) -ne '')
-        Add-HarnessCase $modCases 'message: an AI attribution trailer' $true ((& $modErr "$modOk`n$modAi") -match 'AI attribution trailer')
-        Add-HarnessCase $modCases 'message: an AI session trailer' $true ((& $modErr "$modOk`n$modSession") -match 'AI attribution trailer')
-        Add-HarnessCase $modCases 'message: an AI trailer in other letter case' $true ((& $modErr "$modOk`n$($modAi.ToUpperInvariant())") -match 'AI attribution trailer')
-        Add-HarnessCase $modCases 'message: the sign-off of the maintainer in other letter case' $true ((& $modErr "feat(example): add it`n`nSigned-off-by: dlsnows <noreply@synchain.ca>") -match 'every Signed-off-by line')
-        Add-HarnessCase $modCases 'message: the sign-off key in lower case' $true ((& $modErr "feat(example): add it`n`nsigned-off-by: DLsnows <noreply@synchain.ca>") -match 'every Signed-off-by line')
-        Add-HarnessCase $modCases 'message: no sign-off' $true ((& $modErr "feat(example): add it`n`nBody.") -match 'Signed-off-by is missing')
-        Add-HarnessCase $modCases 'message: a foreign trailer in a paragraph that is a quarter trailers and holds the sign-off' $true ((& $modErr "feat(example): add it`n`nBody.`n`nReviewed-by: Someone`nprose`nmore prose`nand more`n$modSign") -match 'only Signed-off-by is allowed')
-        Add-HarnessCase $modCases 'message: a colon line in a prose paragraph is no trailer block' $false ((& $modErr "feat(example): add it`n`n$modSign`n`nNote: x`nprose`nprose`nprose`nprose") -match 'only Signed-off-by')
+        Add-HarnessCase $modCases 'message: an AI attribution trailer' $true ((& $modErr "$modOk`n$modAi") -match 'AI attribution trailers are not allowed')
+        Add-HarnessCase $modCases 'message: an AI session trailer' $true ((& $modErr "$modOk`n$modSession") -match 'AI attribution trailers are not allowed')
+        Add-HarnessCase $modCases 'message: an AI trailer in other letter case' $true ((& $modErr "$modOk`n$($modAi.ToUpperInvariant())") -match 'AI attribution trailers are not allowed')
+        Add-HarnessCase $modCases 'message: the sign-off of the maintainer in other letter case' $true ((& $modErr "feat(example): add it`n`nSigned-off-by: dlsnows <noreply@synchain.ca>") -match 'every Signed-off-by line must be')
+        Add-HarnessCase $modCases 'message: the sign-off key in lower case' $true ((& $modErr "feat(example): add it`n`nsigned-off-by: DLsnows <noreply@synchain.ca>") -match 'every Signed-off-by line must be')
+        Add-HarnessCase $modCases 'message: no sign-off' $true ((& $modErr "feat(example): add it`n`nBody.") -match 'missing Signed-off-by')
+        Add-HarnessCase $modCases 'message: a foreign trailer in a paragraph that is a quarter trailers and holds the sign-off' $true ((& $modErr "feat(example): add it`n`nBody.`n`nReviewed-by: Someone`nprose`nmore prose`nand more`n$modSign") -match 'only allowed trailer')
+        Add-HarnessCase $modCases 'message: a colon line in a prose paragraph is no trailer block' $false ((& $modErr "feat(example): add it`n`n$modSign`n`nNote: x`nprose`nprose`nprose`nprose") -match 'only allowed trailer')
         Add-HarnessCase $modCases 'message: the type in upper case' $true ((& $modErr "Feat(example): add it`n`n$modSign") -match 'subject must be')
         Add-HarnessCase $modCases 'message: a subject without a scope' $true ((& $modErr "feat: add it`n`n$modSign") -match 'subject must be')
         Add-HarnessCase $modCases 'message: the default subject of git revert' $false ((& $modErr "Revert `"feat(example): add it`"`n`n$modSign") -ne '')
         Add-HarnessCase $modCases 'message: a merge commit needs neither subject nor sign-off' $false ((& $modErr "Merge branch 'feature/v1' into feat/example" $true) -ne '')
-        Add-HarnessCase $modCases 'message: two sign-offs where exactly one is required' $true ((& $modErr "$modOk`n$modSign" $false $true) -match 'exactly one Signed-off-by')
+        Add-HarnessCase $modCases 'message: the same merge message is judged as a normal commit without the merge flag' $true ((& $modErr "Merge branch 'feature/v1' into feat/example") -match 'missing Signed-off-by')
+        Add-HarnessCase $modCases 'message: two sign-offs where exactly one is required' $true ((& $modErr "$modOk`n$modSign" $false $true) -match 'exactly one Signed-off-by line is allowed')
         Add-HarnessCase $modCases 'message: two sign-offs where several are allowed' $false ((& $modErr "$modOk`n$modSign") -ne '')
+        Add-HarnessCase $modCases 'message: a personal needle of the needle file' $true ((& $modErr "feat(example): add it`n`n$(Get-HarnessFakeNeedle)`n`n$modSign") -match '\[personal\]')
+        Add-HarnessCase $modCases 'message: a local path' $true ((& $modErr ("feat(example): add it`n`nsee C:" + "\Users\someone\x`n`n$modSign")) -match '\[win-user-path\]')
+        Add-HarnessCase $modCases 'message: a card number' $true ((& $modErr ("feat(example): add it`n`nsee R" + "H-04`n`n$modSign")) -match '\[card-id\]')
         $modPrErr = { param($title, $body) (@(Get-PrTextErrors -Title $title -Body $body)) -join ' | ' }
         Add-HarnessCase $modCases 'PR text: a clean title and body' $false ((& $modPrErr 'feat(example): add it' "Body.`n`n$modSign") -ne '')
         Add-HarnessCase $modCases 'PR text: the type of the title in upper case' $true ((& $modPrErr 'Feat(example): add it' "Body.`n`n$modSign") -match 'PR title must be')
-        Add-HarnessCase $modCases 'PR text: the sign-off on the last line in lower case' $true ((& $modPrErr 'feat(example): add it' "Body.`n`nsigned-off-by: DLsnows <noreply@synchain.ca>") -match 'last line of the PR body')
+        Add-HarnessCase $modCases 'PR text: the sign-off on the last line in lower case' $true ((& $modPrErr 'feat(example): add it' "Body.`n`nsigned-off-by: DLsnows <noreply@synchain.ca>") -match 'last line must be')
+        Add-HarnessCase $modCases 'PR text: an empty body has no sign-off' $true ((& $modPrErr 'feat(example): add it' '') -match 'last line must be')
+        Add-HarnessCase $modCases 'PR text: a personal needle of the needle file in the body' $true ((& $modPrErr 'feat(example): add it' "Body $(Get-HarnessFakeNeedle).`n`n$modSign") -match '\[personal\]')
+        # a tool that does not answer is an error: no answer is never "no problem"
+        Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{ 'maint\.mjs (message|pr-text|text) ' = { @{ Code = 1; Out = ''; Err = 'boom' } } }) -Log $modLog)
+        Add-HarnessCase $modCases 'message: a crashed tool is an error, never "no problem"' $true ((Get-ThrownMessage { Get-MessageErrors $modOk }) -match 'maint\.mjs message produced no output')
+        Add-HarnessCase $modCases 'PR text: a crashed tool is an error, never "no problem"' $true ((Get-ThrownMessage { Get-PrTextErrors -Title 'feat(example): add it' -Body "Body.`n`n$modSign" }) -match 'maint\.mjs pr-text produced no output')
+        Add-HarnessCase $modCases 'public text: a crashed attribution lookup is an error, never a pass' $true ((Get-ThrownMessage { Test-PublicText 'plain text' }) -match 'maint\.mjs text produced no output')
+        Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{ 'maint\.mjs message ' = { 'this is not json' } }) -Log $modLog)
+        Add-HarnessCase $modCases 'message: an answer that cannot be read is an error, never "no problem"' $true ($null -ne (Get-ThrownMessage { Get-MessageErrors $modOk }))
+        Set-HarnessFake (New-HarnessFake -Routes $modRoutes -Log $modLog)
 
         # ---- agent markers and the permission lookup -----------------------------------------
         $modMarker = { param($extra) Get-ThrownMessage { New-AgentMarker -Role impl -Kind note -Round 1 -Head $modHead -Extra $extra } }
@@ -271,8 +302,49 @@ function Test-ModuleRules {
         $null = Get-ThrownMessage { Invoke-WithHarnessLock -Name merge -ScriptBlock { throw 'inside the lock' } }
         Add-HarnessCase $modCases 'lock: released after a block that threw' $false (-not (& $modFree))
 
+        # ---- the personal needles handed to the tools ----------------------------------------
+        Set-HarnessNeedles -Mode ci-optional -NeedleFile 'other-needles.txt'
+        $modNeedleArgs = (Get-HarnessNeedleArgs) -join ' '
+        Set-HarnessNeedles -Mode ci
+        $modNeedleArgsPlain = (Get-HarnessNeedleArgs) -join ' '
+        Set-HarnessNeedles -Mode local -NeedleFile $modNeedleFile
+        Add-HarnessCase $modCases 'needles: the mode and the needle file are handed on to the tools' $false ($modNeedleArgs -ne '--needles ci-optional --needles-file other-needles.txt')
+        Add-HarnessCase $modCases 'needles: without a needle file only the mode is handed on' $false ($modNeedleArgsPlain -ne '--needles ci')
+
+        # ---- the memo of real answers (self-test only) ---------------------------------------
+        # two directories with the same two scripts that print a random number: the same answer twice means the memo answered
+        $modNodeExe = Get-HarnessNode
+        $modMemoRoots = @(Join-Path $modTmp 'memo-a'; Join-Path $modTmp 'memo-b')
+        foreach ($modMemoRoot in $modMemoRoots) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $modMemoRoot 'scripts') | Out-Null
+            foreach ($modMemoName in @('p', 'q')) { [IO.File]::WriteAllText((Join-Path $modMemoRoot "scripts/$modMemoName.mjs"), "console.log('$modMemoName ' + Math.random());`n", [Text.UTF8Encoding]::new($false)) }
+        }
+        $modMemoAsk = { param($scriptName, $key) (Invoke-HarnessNodeScript "scripts/$scriptName.mjs" @() -MemoKey $key).Out }
+        $modNodeEnvMemo = $env:HARNESS_NODE
+        try {
+            $env:HARNESS_NODE = $modNodeExe
+            Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{}) -Log $modLog)
+            Set-HarnessRepoRoot $modMemoRoots[0]
+            $modMemoFirst = & $modMemoAsk 'p' 'k'
+            Add-HarnessCase $modCases 'memo: with a fake set, the real answer to the same question is remembered' $false ((& $modMemoAsk 'p' 'k') -ne $modMemoFirst)
+            Add-HarnessCase $modCases 'memo: another key is another question' $true ((& $modMemoAsk 'p' 'k2') -ne $modMemoFirst)
+            Add-HarnessCase $modCases 'memo: a key that differs only by letter case is another question' $true ((& $modMemoAsk 'p' 'K') -ne $modMemoFirst)
+            Add-HarnessCase $modCases 'memo: another script with the same key is another question' $true ((& $modMemoAsk 'q' 'k') -ne $modMemoFirst)
+            Set-HarnessRepoRoot $modMemoRoots[1]
+            Add-HarnessCase $modCases 'memo: another checkout with the same script and key is another question' $true ((& $modMemoAsk 'p' 'k') -ne $modMemoFirst)
+            Set-HarnessRepoRoot $modMemoRoots[0]
+            Set-HarnessNeedles -Mode local -NeedleFile $modNeedleFile
+            Add-HarnessCase $modCases 'memo: new needles forget the remembered answers' $true ((& $modMemoAsk 'p' 'k') -ne $modMemoFirst)
+            Set-HarnessFake $null
+            Add-HarnessCase $modCases 'memo: without a fake nothing is remembered' $true ((& $modMemoAsk 'p' 'k') -ne (& $modMemoAsk 'p' 'k'))
+        } finally {
+            $env:HARNESS_NODE = $modNodeEnvMemo
+            Set-HarnessRepoRoot $modRoot
+            Set-HarnessFake (New-HarnessFake -Routes $modRoutes -Log $modLog)
+        }
+
         # ---- the Node of the repository scripts ----------------------------------------------
-        # an empty directory is the repository root here, so a .node-version of the real checkout cannot change the pin
+        # an empty directory is the repository root here: the pin is exactly the .node-version this test writes into it
         $mod.Node = @{ Version = 'v22.4.1'; Config = $null; Crashes = $false }
         $modNodeRoutes = [ordered]@{
             '^node --version$'            = {
@@ -295,8 +367,10 @@ function Test-ModuleRules {
             $mod.Node.Config = 'configured-by-git-config'
             Add-HarnessCase $modCases 'node: git config harness.node is used when the variable is not set' $false ((& $modNodeGet) -ne 'configured-by-git-config')
             $mod.Node.Config = $null
-            Add-HarnessCase $modCases 'node: a PATH node of the pinned major version is used (22 without .node-version)' $false ((& $modNodeGet) -ne 'node')
             $modNodeWith = { param($version) $mod.Node.Version = $version; Get-ThrownMessage { Get-HarnessNode } }
+            Add-HarnessCase $modCases 'node: without .node-version the pin is unknown, which is an error even when the PATH node would do' $true ((& $modNodeWith 'v22.4.1') -match '^\.node-version is missing in this checkout')
+            Set-Content -LiteralPath (Join-Path $modNodeDir '.node-version') -Value "22.4.1`n"
+            Add-HarnessCase $modCases 'node: a PATH node of the pinned major version is used' $false ((& $modNodeGet) -ne 'node')
             Add-HarnessCase $modCases 'node: a newer PATH node is refused, never used silently' $true ((& $modNodeWith 'v25.1.0') -match '^The node on PATH is v25\.1\.0, the pinned major version is 22: set HARNESS_NODE')
             Add-HarnessCase $modCases 'node: an older PATH node is refused' $true ((& $modNodeWith 'v20.9.0') -match 'pinned major version is 22')
             Add-HarnessCase $modCases 'node: a major version that only starts like the pinned one is refused' $true ((& $modNodeWith 'v220.1.0') -match 'pinned major version is 22')
@@ -307,7 +381,7 @@ function Test-ModuleRules {
             Add-HarnessCase $modCases 'node: a PATH node that exits with an error is refused even when it printed a good version' $true ((& $modNodeWith 'v22.4.1') -match 'does not answer --version')
             $mod.Node.Crashes = $false
             Set-Content -LiteralPath (Join-Path $modNodeDir '.node-version') -Value "20.11.0`n"
-            Add-HarnessCase $modCases 'node: the pin of .node-version replaces the built-in one' $true ((& $modNodeWith 'v22.4.1') -match 'pinned major version is 20')
+            Add-HarnessCase $modCases 'node: the pin is the major version of .node-version' $true ((& $modNodeWith 'v22.4.1') -match 'pinned major version is 20')
             Add-HarnessCase $modCases 'node: a PATH node of the major version in .node-version is used' $false ($null -ne (& $modNodeWith 'v20.9.0'))
             Set-Content -LiteralPath (Join-Path $modNodeDir '.node-version') -Value "v20`n"
             Add-HarnessCase $modCases 'node: .node-version may be written as v20' $false ($null -ne (& $modNodeWith 'v20.9.0'))
@@ -322,6 +396,7 @@ function Test-ModuleRules {
         Set-HarnessFake $null
         Set-HarnessLockImpl $null
         Set-HarnessRepoRoot $modRoot
+        Set-HarnessNeedles
         Clear-HarnessPermCache
         Remove-Item -LiteralPath $modTmp -Recurse -Force -ErrorAction SilentlyContinue
     }
