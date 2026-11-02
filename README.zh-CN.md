@@ -12,7 +12,22 @@
 - **默认安全。** REAPER 走 Dummy 音频设备，用私有配置目录。这个目录有可能是 REAPER 的默认资源目录时，
   工具拒绝启动；只结束自己启动的进程；每轮前后都核对默认资源目录没有被改动。
 - **只在本机用。** 它驱动本机装好的 REAPER 7，需要真实的桌面会话；REAPER 的许可按 REAPER 自己的条款办理。
-  它不是给托管的 CI runner 用的。
+  它不是给托管的 CI runner 用的。它自己的自测不需要 REAPER，在任何 Windows 机器上都能跑。
+
+## 目前有什么
+
+安全底座与对拍器：私有配置目录的护栏、启动 REAPER 的进程宿主（看门狗、对话框处理、模块清单）、GUI 锁和
+WAV 对拍器，各自带自测。场景和运行它们的命令随后加入。保证了什么、为什么，见 [docs/SAFETY.md](docs/SAFETY.md)（英文）。
+
+需要：Windows 10 或 11、PowerShell 7.4+。
+
+```powershell
+# 私有配置目录（永远不能在 %APPDATA% 下）
+pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Init
+
+# 自测（不需要 REAPER）
+pwsh run.ps1 -SelfTest
+```
 
 REAPER 是 Cockos Incorporated 的商标。本项目与 Cockos 没有关联，也未获其认可。
 
