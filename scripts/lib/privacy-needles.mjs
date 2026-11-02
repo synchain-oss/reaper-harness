@@ -191,9 +191,18 @@ export function mask(text, personal = []) {
     return [...text].map((c, k) => (hide.has(k) ? "*" : c)).join("");
 }
 
+// Characters nobody sees: format characters, everything Unicode says to ignore when displaying (combining grapheme joiner, variation
+// selectors, Hangul and Mongolian fillers) and the two Unicode line separators
+const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu;
+
+/** The text without invisible characters: in the middle of a path or a needle they would hide it from every rule. */
+export const stripInvisible = (text) => text.replace(INVISIBLE, "");
+
 /**
- * Gate for public text and needle lists: rejects UTF-16 (every needle would become a NUL-interleaved
- * string that never matches), NUL and control characters; drops a UTF-8 BOM. buf is a Buffer or string.
+ * Gate for public text and needle lists; what it returns is what the rules read. Rejects UTF-16 (every needle would become a
+ * NUL-interleaved string that never matches), NUL, control characters (C0, C1, DEL) and a CR without its LF. Invisible characters are
+ * not rejected but removed: a zero-width space in the middle of a path is found that way, and the joiner of an emoji, Persian text or
+ * the variation selector of a warning sign do not turn a required check red for anyone. A UTF-8 BOM is dropped. buf is a Buffer or string.
  */
 export function plainText(buf, label) {
     const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf), "utf8");
@@ -202,15 +211,15 @@ export function plainText(buf, label) {
     }
     const bom = b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0;
     const text = b.subarray(bom).toString("utf8");
-    const bad = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.exec(text);
+    const bad = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)/.exec(text);
     if (bad) {
         // Only the position and the code are reported, never the content (pasted ANSI colour codes are the usual source)
         const before = text.slice(0, bad.index);
-        const code = bad[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, "0");
+        const code = bad[0].codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
         const where = `line ${before.split("\n").length}, byte offset ${bom + Buffer.byteLength(before)}`;
-        throw new Error(`${label} contains control character U+${code} (${where})`);
+        throw new Error(`${label} contains a control character U+${code} (${where})`);
     }
-    return text;
+    return stripInvisible(text);
 }
 
 const parseNeedles = (s) =>
@@ -272,6 +281,28 @@ export function loadPersonalNeedles({ env = process.env, cwd = process.cwd(), mo
 /** A fake needle for self-tests only. Real personal needles never enter the repository. */
 export const FAKE_NEEDLE = "harness-selftest-fake-needle-5d2a";
 const ROBOT = String.fromCodePoint(0x1f916);
+
+/** Invisible characters of different kinds, for the self-tests: each of them in the middle of a path must not hide it. */
+export const INVISIBLES = {
+    "a zero-width space": "\u200b",
+    "a zero-width joiner": "\u200d",
+    "a soft hyphen": "\u00ad",
+    "a direction override": "\u202e",
+    "a word joiner": "\u2060",
+    "a byte order mark": "\ufeff",
+    "a format character beyond the first plane": "\u{e0001}",
+    "a number sign that is a format character": "\u0600",
+    "a number sign beyond the first plane": "\u{110bd}",
+    "a combining grapheme joiner": "\u034f",
+    "a variation selector": "\ufe0f",
+    "a Mongolian variation selector": "\u180b",
+    "a Hangul filler": "\u3164",
+    "a halfwidth Hangul filler": "\uffa0",
+    "a line separator": "\u2028",
+    "a paragraph separator": "\u2029",
+};
+/** Text full of invisible characters with nothing to hide: an emoji sequence, a warning sign, Persian. */
+export const READABLE = "\u{1F468}\u200d\u{1F469}\u200d\u{1F467} \u26a0\ufe0f \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645";
 
 /** One standard bad sample per rule (PR or commit text). The binary fixture below is built from these. */
 const SAMPLES = {

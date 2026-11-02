@@ -20,6 +20,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { MAINTAINER, checkBranch, checkMessage } from "../check-commits.mjs";
 import { formatFinding, scanCommits } from "../check-privacy.mjs";
+import { scanRange } from "../check-secrets.mjs";
 import { FAKE_NEEDLE, loadPersonalNeedles, mask, redact, scan } from "../lib/privacy-needles.mjs";
 import * as kit from "../lib/check-kit.mjs";
 import { HOOKS } from "./commit-msg.mjs";
@@ -78,22 +79,10 @@ function ghLogin(env) {
     return (run("gh", ["api", "user", "--jq", ".login"], { ...env, GH_TOKEN: token }).stdout || "").trim();
 }
 
-/** The output of `gitleaks version` must be exactly the pinned version (a leading v aside). */
-export function versionErrors(output, want) {
-    const have = (output || "").trim().replace(/^v/, "");
-    return have === want ? [] : [`gitleaks must be ${want} (.gitleaks-version), found ${have || "nothing"}`];
-}
-
+/** How the commits are scanned and what counts as a clean answer is scripts/check-secrets.mjs. */
 function gitleaksCheck(revArgs, cwd, env) {
-    const bin = localSetting("HARNESS_GITLEAKS", "harness.gitleaks", { env, cwd }) || "gitleaks";
-    const want = fs.readFileSync(path.join(ROOT, ".gitleaks-version"), "utf8").trim();
-    const wrong = versionErrors(run(bin, ["version"], env).stdout, want);
-    if (wrong.length) return wrong;
-    // gitleaks runs git log -p itself; external diff and textconv drivers would rewrite the patches
-    const logOpts = [...revArgs, "--no-ext-diff", "--no-textconv"].join(" ");
-    const r = spawnSync(bin, ["git", "--no-banner", "--no-color", "--redact", "-v", `--log-opts=${logOpts}`, "."], { cwd, env, encoding: "utf8" });
-    if (r.status === 0) return [];
-    return ["gitleaks found possible secrets (redacted):", ...`${r.stdout}${r.stderr}`.trim().split("\n").map((l) => `  ${l}`)];
+    const r = scanRange(revArgs, { cwd, env });
+    return r.ok ? [] : r.message.trim().split("\n").map((l) => `  ${l}`);
 }
 
 export function prePush({ updates, remote, url, cwd, env, needles, login = () => ghLogin(env) }) {
@@ -168,10 +157,6 @@ export function selfTest() {
         threw = true;
     }
     cases.push({ label: "input: a malformed line fails", bad: true, passed: threw });
-    t("gitleaks: the pinned version", false, versionErrors("8.30.1\n", "8.30.1"));
-    t("gitleaks: the pinned version with a leading v", false, versionErrors("v8.30.1", "8.30.1"));
-    t("gitleaks: another version", true, versionErrors("8.30.0", "8.30.1"));
-    t("gitleaks: no output", true, versionErrors(undefined, "8.30.1"));
 
     // End to end through the real sh shell into a local bare repository. Bad commits are made in the temp repository
     // without hooks; the hook is attached only to the push.
@@ -228,6 +213,26 @@ export function selfTest() {
         bad("a committer who is not the maintainer", "docs/f.md", "x\n", `docs(test): someone else${signed}`, other, [`--author=${MAINTAINER}`]);
         const leak = j("gh", "p_", "Zr8XcV2nQ7tLm4Kp9Ws6Yb3Hd5Fg1Jq0Ae2T");
         bad("gitleaks catches a credential", "src/g.txt", `auth = "${leak}"\n`, `docs(test): credential${signed}`);
+        commit("docs/gone.md", "clean\n", `docs(test): to delete${signed}`);
+        push("a commit to delete", false, "HEAD:refs/heads/feat/ok");
+        repo.git(["rm", "-q", "docs/gone.md"]);
+        repo.git(["commit", "-q", "-m", `docs(test): delete${signed}`]);
+        push("a commit that only deletes: gitleaks counts 0 commits and that is right", false, "HEAD:refs/heads/feat/ok");
+        commit("docs/i.md", "clean\n", `docs(test): gitleaks does not run${signed}`);
+        push("a gitleaks that does not run", true, "HEAD:refs/heads/feat/ok", [], { HARNESS_GITLEAKS: `${repo.dir}-no-such-gitleaks` });
+        repo.git(["reset", "-q", "--hard", "HEAD~1"]);
+        // the credential is in the merge commit only: neither parent has it, so a plain git log -p shows nothing
+        const beforeMerge = repo.git(["rev-parse", "HEAD"]).trim();
+        repo.git(["checkout", "-q", "-b", "side", "HEAD~1"]);
+        commit("docs/side.md", "clean\n", `docs(test): side${signed}`);
+        repo.git(["checkout", "-q", "-"]);
+        repo.git(["merge", "-q", "--no-ff", "--no-commit", "side"]);
+        repo.write("src/m.txt", `auth = "${leak}"\n`);
+        repo.git(["add", "."]);
+        repo.git(["commit", "-q", "-m", "Merge branch 'side' into feat/ok"]);
+        push("a credential that only the merge commit adds", true, "HEAD:refs/heads/feat/ok");
+        repo.git(["reset", "-q", "--hard", beforeMerge]);
+        repo.git(["branch", "-q", "-D", "side"]);
         const allow = { HARNESS_ALLOW_TAG_PUSH: "1" };
         repo.git(["tag", "-a", "v0.0.1", "-m", "v0.0.1"]);
         push("an annotated tag with the switch", false, "refs/tags/v0.0.1", [], allow);
