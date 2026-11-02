@@ -680,7 +680,6 @@ function New-MergeMessage {
     param([Parameter(Mandatory)]$PrData, [Parameter(Mandatory)][string]$Summary)
     # the read-back compares with LF line endings, and that is what GitHub stores
     $text = ($Summary -replace "`r`n", "`n").Trim()
-    if (-not $text) { throw 'The summary paragraph is empty' }
     $title = "$($PrData.title) (#$($PrData.number))"
     $full = "$title`n`n$text`n`n$(Get-HarnessSignoff)"
     # the script adds the only sign-off, so a trailer of the summary shows up as a second one (or as an AI attribution)
@@ -690,6 +689,7 @@ function New-MergeMessage {
     # what goes out is what the rules read: the message without invisible characters, for good in the history of the line
     $sentParts = $checked.text -split "`n`n", 2
     $sentBody = $sentParts[1].Trim()
+    # read here and not above: a summary of nothing but invisible characters is empty as well
     if (Test-HarnessSameText $sentBody (Get-HarnessSignoff)) { throw 'The summary paragraph is empty' }
     @{ Title = $sentParts[0]; Body = $sentBody }
 }
@@ -705,7 +705,7 @@ function Get-SquashProblems {
     if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer)) -or -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) { $problems.Add("author is $AuthorName <$AuthorEmail>, not the maintainer") }
     if (-not (Test-HarnessTextIn $CommitterEmail.ToLowerInvariant() $AllowedCommitters)) { $problems.Add("committer email $CommitterEmail is not allowed") }
     if ((($Message -replace "`r`n", "`n") -split "`n")[0] -notmatch "\(#$Number\)$") { $problems.Add("the subject does not end with (#$Number)") }
-    # a message the tools refuse to read (a control character) is one more problem: after a merge the report must still name the commit
+    # a tool that cannot answer is one more problem: after a merge the report must still name the commit
     try {
         foreach ($e in @(Get-MessageErrors $Message -ExactlyOne)) { $problems.Add($e) }
         $scan = Test-PublicText $Message
@@ -1658,7 +1658,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'squash message: the summary carries its own Signed-off-by' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary "x`n`n$(Get-HarnessSignoff)" }) -match 'exactly one Signed-off-by line')
         Add-HarnessCase $cases 'squash message: the summary carries an AI attribution trailer' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ("x`n`nCo-Authored" + '-By: a <a@b.c>') }) -match 'AI attribution trailers are not allowed')
         Add-HarnessCase $cases 'squash message: the summary carries an AI session trailer' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ("x`n`nCla" + 'ude-Session: https://example.invalid/s') }) -match 'AI attribution trailers are not allowed')
-        Add-HarnessCase $cases 'squash message: the summary is empty' $true (Test-Throws { New-MergeMessage -PrData $pull -Summary '  ' })
+        Add-HarnessCase $cases 'squash message: the summary is empty' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary '  ' }) -match 'The summary paragraph is empty')
         Add-HarnessCase $cases 'squash message: a local path in the summary' $true (Test-Throws { New-MergeMessage -PrData $pull -Summary ('see C:' + '\Users\someone\x') })
         $escape = [string][char]27
         Add-HarnessCase $cases 'squash message: a local path split by an escape character is refused, the rules must not read around it' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ('see C:' + $escape + '\Users\someone\x') }) -match 'control character U\+001B')
@@ -1693,6 +1693,8 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'squash commit: the author email with a zero-width space behind it' $true ((& $squashFor $squashOk "$squashAuthor$zeroWidth") -match 'author is DLsnows')
         Add-HarnessCase $cases 'squash commit: the committer email with a zero-width space behind it' $true ((@(Get-SquashProblems -Number '7' -AuthorName 'DLsnows' -AuthorEmail $squashAuthor -CommitterEmail "noreply@github.com$zeroWidth" -Message $squashOk) -join ' | ') -match 'committer email')
         Add-HarnessCase $cases 'squash commit: a control character in the merged message is one more problem, not a crash' $true ((& $squashFor "feat(example): add (#7)`n`nAd$([char]27)ds it.`n`n$(Get-HarnessSignoff)") -match 'control character U\+001B')
+        $toolDown = & { function Get-MessageErrors { throw 'the tool gave no answer' }; & $squashFor $squashOk }
+        Add-HarnessCase $cases 'squash commit: a tool that cannot answer is one more problem, not a crash' $true ($toolDown -match 'could not be checked: the tool gave no answer')
         Add-HarnessCase $cases 'squash commit: a local path in the merged message is found by the public-text check' $true ((& $squashFor ("feat(example): add the example module (#7)`n`nsee C:" + '\Users\someone\x' + "`n`n$(Get-HarnessSignoff)")) -match 'failed the public-text check')
         $badTitle = Copy-HarnessObject $pull
         $badTitle.title = 'Add the example module'

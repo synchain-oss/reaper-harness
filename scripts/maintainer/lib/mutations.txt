@@ -1101,7 +1101,7 @@
 < if (-not $scan.Ok) { $problems.Add("the message failed
 > if ($false) { $problems.Add("the message failed
 @@ pr-merge.ps1 | empty summary accepted
-< if (-not $text) { throw 'The summary paragraph is empty' }
+< if (Test-HarnessSameText $sentBody (Get-HarnessSignoff)) { throw 'The summary paragraph is empty' }
 > 
 @@ pr-merge.ps1 | squash subject without the PR number
 < $title = "$($PrData.title) (#$($PrData.number))"
@@ -2492,8 +2492,8 @@
 < @{ Title = $sentParts[0]; Body = $sentBody }
 > @{ Title = $title; Body = $sentBody }
 @@ pr-merge.ps1 | squash message: a summary of invisible characters is sent
-< if (Test-HarnessSameText $sentBody (Get-HarnessSignoff)) { throw 'The summary paragraph is empty' }
-> $null = 0
+< if (Test-HarnessSameText $sentBody (Get-HarnessSignoff)) {
+> if (-not $text) {
 
 # ===================================================== the summary file, the commit range scan
 @@ pr-merge.ps1 | summary file: read without the rules of a body file
