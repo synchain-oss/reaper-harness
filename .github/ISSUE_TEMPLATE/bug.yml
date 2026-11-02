@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: MIT
+# The labels must be registered in .github/labels.json.
+name: 缺陷报告 · Bug report
+description: 结局不对、护栏误拦或漏拦、出错退出，或行为与说明不符 · Wrong verdict, guard misfire, crash, or behaviour that contradicts the docs
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **安全漏洞请不要在这里提**（例如工具碰了 REAPER 默认资源目录、结束了不是它启动的进程、结果文件泄露了个人信息），
+        改用私有漏洞报告（见 SECURITY.md）。
+        Please report security issues privately (see SECURITY.md), for example the harness touching REAPER's default
+        resource directory, ending a process it did not start, or a result file leaking personal data.
+
+        贴日志、结果文件或配置之前，先删掉用户名、主机名、本机路径与已装插件清单。
+        Before pasting logs, result files or configuration, remove user names, machine names, local paths and the list
+        of installed plugins.
+  - type: input
+    id: version
+    attributes:
+      label: 工具版本或 commit · Harness version or commit
+      placeholder: v0.1.0 / 0123abc
+    validations:
+      required: true
+  - type: input
+    id: reaper
+    attributes:
+      label: REAPER 版本 · REAPER version
+      placeholder: "7.82"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统 · OS
+      options:
+        - Windows 11
+        - Windows 10
+        - 其他 · Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么 · What happened
+      description: 结局、退出码与结局说明 · The verdicts, the exit code and the verdict details
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 · Steps to reproduce
+      description: 命令行与最小配置（删掉个人信息） · Command line and a minimal configuration (personal data removed)
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望的行为 · Expected behaviour
+  - type: textarea
+    id: results
+    attributes:
+      label: 结果文件摘录 · Result file excerpt
+      description: 结果 json 里相关的场景（先删掉个人信息） · The relevant scenarios of the result json (personal data removed first)
+      render: json

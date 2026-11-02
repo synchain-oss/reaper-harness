@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: MIT
+#
+# pr-agent (review / improve), DeepSeek V4.1 Flash through OpenCode Go, pay per use. Runs only on PRs into dev and
+# again on every push to the PR; promotion PRs (dev -> prod), drafts, forks and bot PRs are skipped by the called
+# workflow. It only comments: not a required check and not part of the merge criteria.
+# Model, limits, timeouts and the pinned pr-agent image are maintained centrally in the pr-agent.yml of
+# Synchain-oss/ci-workflows; this file only holds this repository's ignore list and switches. The reference is pinned
+# to a 40-character SHA with the tag in a trailing comment; when moving the SHA, check again that the shared workflow
+# still puts the untrusted-data statement into extra_instructions.
+# describe: false: describe appends a generated paragraph to the PR body, and the body's last line here must be the
+# sign-off (branch-gate checks it), so no base runs it. review_labels: false: no Review effort / Possible security
+# concern labels (.github/labels.json is the single source of labels). persistent_comments: false: see with below.
+name: PR Agent (DeepSeek V4.1 Flash)
+
+on:
+  pull_request:
+    branches: [dev]
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-agent:
+    # The called job needs these three; the caller may not give less. The only write scopes are the two comment scopes
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@070537914c9af4c2742b8fc5c7f63e06daef82ae # v1.3.3
+    with:
+      provider: opencode-go
+      describe: false
+      review_labels: false
+      # On dev pr-agent-claude runs as well and both share one comment identity. Persistent mode rewrites "the latest
+      # comment with a pr-agent marker", whichever pr-agent wrote it, so this one also posts a new comment per push
+      # instead of rewriting the other one's.
+      persistent_comments: false
+      # Keep in step with pr-agent-claude.yml (check-workflows.mjs compares them). Rendered WAV fixtures are binary.
+      ignore_globs: '["tests/fixtures/**/*.wav"]'
+    secrets:
+      api_key: ${{ secrets.OPENCODE_GO_API_KEY_FOR_REVIEW }}
