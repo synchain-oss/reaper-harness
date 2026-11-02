@@ -60,6 +60,18 @@ function New-BadExitTimeStandIn([string]$Command) {
 function New-BoxCommand([string]$Title, [string]$Buttons, [string]$OutFile) {
     "Add-Type -AssemblyName System.Windows.Forms; `$r = [System.Windows.Forms.MessageBox]::Show('x', '$Title', '$Buttons'); Set-Content -LiteralPath '$OutFile' -Value `$r"
 }
+# Waits until the process shows a visible dialog with this title, looking at the windows of that PID only
+function Wait-BoxShown($Process, [string]$Title, [int]$Seconds) {
+    $until = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $until -and -not $Process.HasExited) {
+        foreach ($row in [HarnessWin]::Windows([uint32]$Process.Id)) {
+            $cols = $row -split "`t", 4
+            if ($cols[1] -eq '1' -and $cols[2] -ceq '#32770' -and $cols[3] -ceq $Title) { return $true }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $false
+}
 
 # ---- pinning ----
 $pinned = Initialize-HarnessCfg $CfgA
@@ -147,10 +159,13 @@ $dialogCases = {
     $outBy = Join-Path $Work 'box-bystander.txt'
     $boxCmd = New-BoxCommand 'REAPER Query' 'YesNo' $outBy
     $bystander = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new($pwshExe, "-NoProfile -Command `"$boxCmd`""))
+    $bystanderLabel = "dialog: another process's REAPER Query is not clicked (only windows of the started PID are handled)"
     try {
-        Start-Sleep -Seconds 3 # let the bystander's dialog come up
-        $run = Invoke-HarnessHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 3 -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
-        Write-Case "dialog: another process's REAPER Query is not clicked (only windows of the started PID are handled)" $false ($run.Status -eq 'Killed' -and -not $bystander.HasExited -and -not (Test-Path -LiteralPath $outBy))
+        # Without the box on screen this case would prove nothing, so it is red when the box does not come up
+        if (Wait-BoxShown $bystander 'REAPER Query' 30) {
+            $run = Invoke-HarnessHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 3 -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+            Write-Case $bystanderLabel $false ($run.Status -eq 'Killed' -and @($run.Dismissed).Count -eq 0 -and -not $bystander.HasExited -and -not (Test-Path -LiteralPath $outBy))
+        } else { Write-Case "$bystanderLabel; its box did not come up within 30 s" $false $false }
     } finally { if (-not $bystander.HasExited) { Stop-Process -Id $bystander.Id -Force } }
 }
 if ([Environment]::UserInteractive) { Invoke-WithHarnessLocks -Names (Get-HarnessGuiLockSet -Extra $extra) -TimeoutSeconds 1800 -ScriptBlock $dialogCases }
@@ -185,3 +200,6 @@ $holder.WaitForExit()
 $taken = Enter-HarnessLocks -Names @($gui) -TimeoutSeconds 5 -Quiet
 Write-Case 'locks: a holder that was killed leaves the lock abandoned, and it is taken over, not stuck' $false ($null -ne $taken)
 Exit-HarnessLocks $taken
+
+# Keep this the last statement: the parent turns red when it does not see this case (an early exit 0 must not look green)
+Write-Case 'child: reached its last statement' $false $true

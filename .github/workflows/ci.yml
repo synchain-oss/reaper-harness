@@ -125,7 +125,9 @@ jobs:
           node scripts/check-commits.mjs commits --range "$BEFORE..$AFTER" --tier push --needles "$NEEDLES"
 
   # The self-test prints one line per case. Cases whose precondition this runner lacks (a desktop for real message
-  # boxes, 8.3 short names, a free subst letter) say so in their label.
+  # boxes, 8.3 short names, a free subst letter) say so in their label, and the summary line counts them. One check
+  # stays silent: the admin share spelling in a file identity case is not judged when the share cannot be read, and
+  # the label of that case does not change.
   self-test-windows:
     name: self-test-windows
     runs-on: windows-2025

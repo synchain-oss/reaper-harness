@@ -89,7 +89,7 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
     $noShort = $hasShort ? '' : ' (this volume has no 8.3 short names; not run for real)'
     & $add "the default resource directory as an 8.3 short name is refused (GetFullPath expands it; identity is the second layer)$noShort" $true ((-not $hasShort) -or (Test-Refused { Assert-HarnessCfgDir $short } '*never touched*'))
     & $add "a directory that does not exist yet below the 8.3 short name is refused too$noShort" $true ((-not $hasShort) -or (Test-Refused { Assert-HarnessCfgDir (Join-Path $short 'Data\not-yet') } '*never touched*'))
-    & $add 'file identity: the 8.3 short name and the long name are the same' $false ((-not $hasShort) -or ((Get-HarnessFileIdentity $short) -ceq (Get-HarnessFileIdentity $defaultDir)))
+    & $add "file identity: the 8.3 short name and the long name are the same$noShort" $false ((-not $hasShort) -or ((Get-HarnessFileIdentity $short) -ceq (Get-HarnessFileIdentity $defaultDir)))
     & $add 'file identity: different directories differ, a missing path has none' $false ((Get-HarnessFileIdentity $defaultDir) -and (Get-HarnessFileIdentity $defaultDir) -cne (Get-HarnessFileIdentity $Tmp) -and $null -eq (Get-HarnessFileIdentity (Join-Path $Tmp 'nope-nope')))
     & $add "the 8.3 short name in lower case is refused too (short names are case insensitive)$noShort" $true ((-not $hasShort) -or (Test-Refused { Assert-HarnessCfgDir $short.ToLowerInvariant() } '*never touched*'))
     & $add 'the default resource directory with a \\?\ prefix is refused' $true (Test-Refused { Assert-HarnessCfgDir ('\\?\' + $defaultDir) } '*drive letter*')
@@ -527,10 +527,41 @@ function Get-ChildCases([string]$Tmp, [string]$RepoRoot, [string[]]$ExtraGuiLock
         if ($f.Count -eq 4 -and $f[0] -eq 'RESULT') { $cases.Add([pscustomobject]@{ Label = $f[3]; Bad = ($f[1] -eq '1'); Passed = ($f[2] -eq '1') }) }
     }
     if ($run.Exit -ne 0 -or $cases.Count -eq 0) { $cases.Add([pscustomobject]@{ Label = "the child self-test failed (exit code $($run.Exit)): $(($run.Err + $run.Out).Trim() -replace '\s+', ' ')"; Bad = $false; Passed = $false }) }
-    # The real message box cases may only be missing where this session really has no desktop (the child then reports
-    # them as not run): a run that left them out by mistake must not look green
+    # A child that stops early with exit code 0 (an exit in the wrong place) must not look green: its last statement
+    # prints a case, and the parent has to see it, with or without a desktop.
+    $reachedEnd = @($cases | Where-Object { $_.Label -ceq 'child: reached its last statement' }).Count
+    $cases.Add([pscustomobject]@{ Label = "child: the child process ran to its last statement (seen: $reachedEnd)"; Bad = $false; Passed = ($reachedEnd -eq 1) })
+    # The real message box cases may only be missing where this session really has no desktop, and then the child has
+    # to say so: a run that left them out by mistake must not look green
     $dialogs = @($cases | Where-Object { $_.Label -like 'dialog:*' }).Count
-    $cases.Add([pscustomobject]@{ Label = "child: the real message box cases ran whenever this session has a desktop (desktop: $([Environment]::UserInteractive), cases: $dialogs)"; Bad = $false; Passed = ((-not [Environment]::UserInteractive) -or $dialogs -ge 5) })
+    $skipLines = @($cases | Where-Object { $_.Label -clike '(no interactive desktop in this session:*' }).Count
+    $desktop = [Environment]::UserInteractive
+    $cases.Add([pscustomobject]@{ Label = "child: the real message box cases ran whenever this session has a desktop; without one the child said they did not run (desktop: $desktop, cases: $dialogs, skip lines: $skipLines)"; Bad = $false; Passed = ($desktop ? $dialogs -ge 5 : $skipLines -eq 1) })
+    $cases
+}
+
+# ---------------------------------------------------------------- summary
+# A case whose precondition this machine lacks says so in its label with these words, which makes it countable: the
+# summary line gives the number, and on GitHub Actions a warning annotation repeats it, so a green run that proved less
+# than usual shows on the run's page and not only deep in its log.
+$script:NotRunWords = 'run for real'
+function Get-NotRunCount([object[]]$CaseList) { @($CaseList | Where-Object { $_.Label -clike "*$($script:NotRunWords)*" }).Count }
+function Get-NotRunWarning([int]$NotRun, [string]$ActionsFlag) {
+    if ($NotRun -lt 1 -or -not $ActionsFlag) { return $null }
+    "::warning::reaper-harness self-test: $NotRun case line(s) did not $($script:NotRunWords) on this runner; search the log for '$($script:NotRunWords)'"
+}
+
+function Get-SummaryCases {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $sample = @(
+        [pscustomobject]@{ Label = "first (this volume has no 8.3 short names; not $($script:NotRunWords))" }
+        [pscustomobject]@{ Label = "(no subst drive could be made: the cases did not $($script:NotRunWords))" }
+        [pscustomobject]@{ Label = 'an ordinary case that ran' }
+    )
+    & $add 'summary: only the cases whose label says they did not really run are counted' $false ((Get-NotRunCount $sample) -eq 2 -and (Get-NotRunCount @()) -eq 0)
+    & $add 'summary: on GitHub Actions the count also goes out as a warning annotation, at the start of its line' $false ((Get-NotRunWarning -NotRun 2 -ActionsFlag 'true') -cmatch '^::warning::.* 2 case line')
+    & $add 'summary: no warning outside GitHub Actions, and none when everything ran' $true ($null -eq (Get-NotRunWarning -NotRun 2 -ActionsFlag '') -and $null -eq (Get-NotRunWarning -NotRun 0 -ActionsFlag 'true'))
     $cases
 }
 
@@ -553,7 +584,7 @@ function Invoke-HarnessSelfTest {
         $env:APPDATA = $fakeRoam # from here on every "default resource directory" is the fake one; the child inherits it
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
-            { Get-HostCases }, { Get-WavCases $scratch }, { Get-WiringCases $RepoRoot },
+            { Get-HostCases }, { Get-WavCases $scratch }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {
@@ -574,7 +605,10 @@ function Invoke-HarnessSelfTest {
         if (-not $c.Passed) { $red++ }
         Write-Host ('  [{0}] {1}{2}' -f ($c.Passed ? 'PASS' : 'FAIL'), ($c.Bad ? 'negative: ' : ''), $c.Label)
     }
-    Write-Host ('reaper-harness self-test: {0} ({1} negative, {2} positive, {3} failed, {4:N0} s)' -f ($red -eq 0 ? 'passed' : 'FAILED'), $badCount, $goodCount, $red, $sw.Elapsed.TotalSeconds)
+    $notRunCount = Get-NotRunCount $cases
+    Write-Host ('reaper-harness self-test: {0} ({1} negative, {2} positive, {3} failed, {4} not run for real, {5:N0} s)' -f ($red -eq 0 ? 'passed' : 'FAILED'), $badCount, $goodCount, $red, $notRunCount, $sw.Elapsed.TotalSeconds)
+    $warning = Get-NotRunWarning -NotRun $notRunCount -ActionsFlag $env:GITHUB_ACTIONS
+    if ($warning) { Write-Host $warning }
     $red -eq 0 ? 0 : 1
 }
 

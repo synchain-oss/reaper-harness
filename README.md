@@ -18,7 +18,7 @@ your own REAPER setup.
   default resource directory has not changed.
 - **Local only.** It drives an installed copy of REAPER 7 in a real desktop session; you need a
   REAPER licence under REAPER's own terms. It is not meant for hosted CI runners. Its self-test
-  needs no REAPER and runs anywhere.
+  needs no REAPER and runs on any Windows machine.
 
 ## What is here so far
 
