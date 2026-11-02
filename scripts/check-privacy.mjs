@@ -189,15 +189,31 @@ export function selfTest() {
         check("--text rejects UTF-16", true, run(["--text", file("t16.md", utf16("clean\n"))], local).code === 1);
         const nul = run(["--text", file("tnul.md", "clean\0\n")], local);
         check("--text rejects NUL and reports the offset", true, nul.code === 1 && nul.out.includes("byte offset 5"));
-        // Characters nobody sees: in the middle of a path or a needle they hide it from every rule
+        // Characters nobody sees: removed before the rules read the text, so in the middle of a path or a needle they hide nothing
+        const pathWith = (ch) => kit.j("see C:", "\\", "Us", ch, "ers", "\\", "someone");
+        for (const [label, ch] of Object.entries(needles.INVISIBLES)) {
+            check(`--text finds a local path split by ${label}`, true, run(["--text", file("tsplit.md", `${pathWith(ch)}\n`)], local).code === 1);
+            const needle = run(["--text", file("tsplit.md", `${N.slice(0, 5)}${ch}${N.slice(5)}\n`)], local);
+            check(`--text finds a needle split by ${label}, and does not echo it`, true, needle.code === 1 && !needle.out.includes(N));
+            check(`--text takes ${label} that splits nothing`, false, run(["--text", file("thidden.md", `clean${ch}text\n`)], local).code === 0);
+        }
+        check("--text takes an emoji with a joiner, a warning sign and Persian text", false, run(["--text", file("treadable.md", `${needles.READABLE}\n`)], local).code === 0);
+        const gate = (text) => {
+            try {
+                return needles.plainText(text, "the text");
+            } catch (e) {
+                return `refused: ${e.message}`;
+            }
+        };
+        check("the gate returns the text without invisible characters", false, gate(`a${Object.values(needles.INVISIBLES).join("")}b`) === "ab");
+        check("the gate leaves CJK, accents and emoji alone", false, gate("\u56de\u73af \u00e9 \u{1F468}") === "\u56de\u73af \u00e9 \u{1F468}");
+        // Control characters stay refused
         for (const [label, ch, code] of [
-            ["a zero-width space", "\u200b", "200B"],
-            ["a soft hyphen", "\u00ad", "00AD"],
-            ["a direction override", "\u202e", "202E"],
-            ["a word joiner", "\u2060", "2060"],
+            ["an escape character", "\u001b", "001B"],
+            ["DEL", "\u007f", "007F"],
             ["a C1 control character", "\u0085", "0085"],
+            ["the last C1 control character", "\u009f", "009F"],
             ["a CR without its LF", "\r", "000D"],
-            ["a format character beyond the first plane", "\u{e0001}", "E0001"],
         ]) {
             const r = run(["--text", file("thidden.md", `clean${ch}text\n`)], local);
             check(`--text rejects ${label}`, true, r.code === 1 && r.out.includes(`U+${code}`));

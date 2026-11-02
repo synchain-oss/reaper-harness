@@ -26,7 +26,7 @@ import fs from "node:fs";
 import { UsageError, assertNodeVersion, caseResult, git, j, reportSelfTest, runCli } from "./lib/check-kit.mjs";
 import * as needles from "./lib/privacy-needles.mjs";
 
-const { FAKE_NEEDLE, plainText, redact, scan } = needles;
+const { FAKE_NEEDLE, INVISIBLES, READABLE, plainText, redact, scan } = needles;
 
 export const MAINTAINER = "DLsnows <noreply@synchain.ca>";
 export const SIGNOFF = `Signed-off-by: ${MAINTAINER}`;
@@ -75,12 +75,26 @@ function trailers(text) {
     return block ? found : [];
 }
 
-/** One commit message. author = { name, email }; merge commits skip the subject and sign-off rules (no new content). */
+/** A message the way the rules read it: { text } with LF line ends, or { refused } when the gate for public text says no. */
+function readMessage(message) {
+    try {
+        return { text: plainText(message, "the commit message").replace(/\r\n/g, "\n") };
+    } catch (e) {
+        return { refused: e.message };
+    }
+}
+
+/**
+ * One commit message. author = { name, email }; merge commits skip the subject and sign-off rules (no new content). The rules read it
+ * through plainText, so an invisible character cannot hide a path or a trailer from them; a control character is an error of that message.
+ */
 export function checkMessage(message, opts = {}) {
     const { tier = "same", author, merge = false, exactlyOne = false, personal = [] } = opts;
     // In the push tier, authors outside the allow list are outside contributors and judged as fork
     const fork = tier === "fork" || (tier === "push" && !!author && !SAME_AUTHORS.includes(author.email.toLowerCase()));
-    const text = message.replace(/\r\n/g, "\n").trimEnd();
+    const read = readMessage(message);
+    if (read.refused) return { errors: [read.refused], warns: [] };
+    const text = read.text.trimEnd();
     const { errors, warns } = textFindings(text, { fork, personal, label: "message " });
     const lines = text.split("\n");
     const subjectOk = merge || SUBJECT.test(lines[0]) || GIT_SUBJECT.test(lines[0]);
@@ -123,8 +137,10 @@ export function checkCommit(c, { tier = "same", prAuthor, personal = [] } = {}) 
     const ce = c.committer.email.toLowerCase();
     if (dependabotExempt(c, { tier, prAuthor })) {
         // Only the subject, sign-off and identity rules are waived: privacy rules and AI attribution stay errors
-        const { errors } = textFindings(c.message, { fork: true, aiWarns: false, personal });
-        if (hasAiTrailer(c.message.split(/\r?\n/))) errors.push("AI attribution trailers are not allowed");
+        const read = readMessage(c.message);
+        if (read.refused) return { errors: [read.refused], warns: [] };
+        const { errors } = textFindings(read.text, { fork: true, aiWarns: false, personal });
+        if (hasAiTrailer(read.text.split("\n"))) errors.push("AI attribution trailers are not allowed");
         return { errors, warns: [] };
     }
     const errors = [];
@@ -285,6 +301,18 @@ export function selfTest() {
     c("same: session trailer", true, commit(msg(j("Cla", "ude-Session: abc"), SIGNOFF)));
     c("same: generated-with line", true, commit(msg(j("Generated with Cla", "ude Code"), "", SIGNOFF)));
     c("same: AI email", true, commit(msg(j("see noreply@anthr", "opic.com"), "", SIGNOFF)));
+    // Invisible characters are removed before the rules read the message: each of these splits a local path
+    const splitPath = (ch) => j("see C:", "\\", "Us", ch, "ers", "\\", "someone");
+    for (const [name, ch] of Object.entries(INVISIBLES)) {
+        c(`same: a local path split by ${name}`, true, commit(msg(splitPath(ch), "", SIGNOFF)));
+    }
+    c("same: the path without a split is found as well", true, commit(msg(splitPath(""), "", SIGNOFF)));
+    c("same: a co-author trailer split by a zero-width space", true, commit(msg(j("Co-\u200bauthored", "-by: Someone <s@example.com>"), "", SIGNOFF)));
+    c("same: a sign-off with a zero-width space reads as the sign-off", false, commit(msg(`${SIGNOFF}\u200b`)));
+    c("same: an emoji with a joiner, a warning sign and Persian text", false, commit(msg(READABLE, "", SIGNOFF)));
+    t("same: a control character is an error of that message, no crash", true, checkMessage(msg("colour \u001b[31m", "", SIGNOFF)).errors.filter((e) => /control character U\+001B/.test(e)));
+    t("same: a CR without its LF is an error of that message", true, checkMessage(msg("one\rtwo", "", SIGNOFF)).errors.filter((e) => /control character U\+000D/.test(e)));
+    c("same: CRLF line ends are no control character", false, commit(msg(SIGNOFF).replace(/\n/g, "\r\n")));
     c("same: another trailer", true, commit(msg("Reviewed-by: Someone <s@example.com>", SIGNOFF)));
     c("same: prose line inside the trailer block", true, commit(msg("note", "Reviewed-by: Someone <s@example.com>", SIGNOFF)));
     c("same: sign-off variant", true, commit(msg("Signed-off-by : DLsnows <noreply@synchain.ca>")));
@@ -307,11 +335,16 @@ export function selfTest() {
     c("dependabot: an AI trailer is an error", true, bump(j("Co-authored", "-by: Someone <s@example.com>")), "same", "dependabot[bot]");
     c("dependabot: an AI trailer as a # line is an error", true, bump(j("# Co-authored", "-by: Someone <s@example.com>")), "same", "dependabot[bot]");
     c("dependabot: an AI attribution line is an error", true, bump(j("Generated with Cla", "ude Code")), "same", "dependabot[bot]");
+    c("dependabot: a local path split by a zero-width space is found", true, bump(splitPath("\u200b")), "same", "dependabot[bot]");
+    c("dependabot: an AI trailer split by a zero-width space is found", true, bump(j("Co-\u200bauthored", "-by: Someone <s@example.com>")), "same", "dependabot[bot]");
+    t("dependabot: a control character is an error of that message", true, checkCommit(bump("colour \u001b[31m"), { tier: "same", prAuthor: "dependabot[bot]" }).errors.filter((e) => /control character U\+001B/.test(e)));
     c("dependabot: push tier with an AI trailer", true, bump(j("Co-authored", "-by: Someone <s@example.com>")), "push");
     c("fork: a dependabot-looking commit gets no exemption", true, bump("Bumps x."), "fork", "dependabot[bot]");
     const own = `Signed-off-by: ${OUTSIDER.name} <${OUTSIDER.email}>`;
     c("fork: real author email with own sign-off", false, commit(msg(own), { author: OUTSIDER, committer: OUTSIDER }), "fork");
     c("fork: sign-off does not match the author", true, commit(msg(SIGNOFF), { author: OUTSIDER, committer: OUTSIDER }), "fork");
+    c("fork: an emoji with a joiner, a warning sign and Persian text", false, commit(msg(READABLE, "", own), { author: OUTSIDER, committer: OUTSIDER }), "fork");
+    c("fork: a local path split by a zero-width space is found", true, commit(msg(splitPath("\u200b"), "", own), { author: OUTSIDER, committer: OUTSIDER }), "fork");
     const forkAi = checkCommit(commit(msg(j("Co-Authored", "-By: Bot <b@example.com>"), own), { author: OUTSIDER }), { tier: "fork" });
     t("fork: AI trailer only warns", false, forkAi.warns.length ? forkAi.errors : ["no warning"]);
     c("push: web merge of an outside contribution", false, commit(msg(own), { author: OUTSIDER, committer: WEB }), "push");

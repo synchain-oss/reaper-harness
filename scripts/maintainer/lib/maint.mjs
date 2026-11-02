@@ -13,11 +13,13 @@
 //   node scripts/maintainer/lib/maint.mjs infra --file <path JSON array> [--module <infra-paths.mjs>]
 //        the paths that touch the infrastructure list; --module names another list module and is for the self-test only
 //   node scripts/maintainer/lib/maint.mjs message --file <message> [--merge] [--exactly-one] [--needles <mode>] [--needles-file <path>]
-//        checkMessage of check-commits.mjs, same-repository tier: { errors, warns }
+//        checkMessage of check-commits.mjs, same-repository tier: { errors, warns, text }; text is the message the rules read,
+//        without invisible characters, and that is the one to send
 //   node scripts/maintainer/lib/maint.mjs pr-text --file <JSON { title, body }> [--needles <mode>] [--needles-file <path>]
 //        checkPrText of check-commits.mjs: { errors, warns }
 //   node scripts/maintainer/lib/maint.mjs text --file <text>
-//        { aiTrailerLines } : the lines hasAiTrailer of check-commits.mjs takes for an AI attribution trailer, any author
+//        { aiTrailerLines } : the lines hasAiTrailer of check-commits.mjs takes for an AI attribution trailer, any author,
+//        with invisible characters removed first
 //   node scripts/maintainer/lib/maint.mjs same-authors --file <ignored>
 //        { authors } : the author emails check-commits.mjs allows for the same repository
 //   node scripts/maintainer/lib/maint.mjs --self-test
@@ -29,7 +31,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { SAME_AUTHORS, SIGNOFF, checkMessage, checkPrText, hasAiTrailer } from "../../check-commits.mjs";
 import { FOOTER, findPrevious, headMark, postedRecord, sectionCounts, validateSummary } from "../../review-bot.mjs";
 import { assertNodeVersion, isMain, j } from "../../lib/check-kit.mjs";
-import { FAKE_NEEDLE, loadPersonalNeedles, needlesArgs, plainText } from "../../lib/privacy-needles.mjs";
+import { FAKE_NEEDLE, READABLE, loadPersonalNeedles, needlesArgs, plainText, stripInvisible } from "../../lib/privacy-needles.mjs";
 
 /** Run page link on the second line of a bot summary. */
 const RUN_LINK = /\/actions\/runs\/(\d+)/;
@@ -300,6 +302,9 @@ export function selfTest() {
     t("pr-text: a personal needle in the body is an error", true, prTextErrors(title, `## x\n${FAKE_NEEDLE}\n\n${SIGNOFF}`, [FAKE_NEEDLE]).errors.length > 0);
     t("pr-text: a control character in the title is refused", true, (() => { try { prTextErrors("ci(example): a\u001b[31mb", prBody); return false; } catch { return true; } })());
     t("pr-text: a control character in the body is refused", true, (() => { try { prTextErrors(title, `x\u001b[31my\n\n${SIGNOFF}`); return false; } catch { return true; } })());
+    t("pr-text: an emoji with a joiner in the title and the body passes", false, prTextErrors(`${title} \u{1F468}\u200d\u{1F469}`, `${READABLE}\n\n${SIGNOFF}`).errors.length > 0);
+    t("pr-text: a needle split by a zero-width space in the body is an error", true, prTextErrors(title, `## x\n${FAKE_NEEDLE.slice(0, 5)}\u200b${FAKE_NEEDLE.slice(5)}\n\n${SIGNOFF}`, [FAKE_NEEDLE]).errors.length > 0);
+    t("pr-text: a needle split by a zero-width space in the title is an error", true, prTextErrors(`${title} ${FAKE_NEEDLE.slice(0, 5)}\u200b${FAKE_NEEDLE.slice(5)}`, prBody, [FAKE_NEEDLE]).errors.length > 0);
     const co = j("Co-Authored", "-By: A <a@b.c>");
     t("text: a generic co-author trailer is found with its line number", false, aiTrailerLines(`a\nb\n${co}\n`).join() !== "3");
     t("text: a trailer written as a # line is found", false, aiTrailerLines(`# ${co}`).join() !== "1");
@@ -363,9 +368,9 @@ async function main(argv) {
         const paths = JSON.parse(fs.readFileSync(file, "utf8"));
         print({ hits: await infraHits(paths, opt("--module") ? path.resolve(opt("--module")) : DEFAULT_INFRA) });
     } else if (cmd === "message") {
-        // control and invisible characters are refused, not scanned: one in the middle of a path or a needle would hide it from every rule
+        // control characters are refused and invisible ones removed: one in the middle of a path or a needle would hide it from every rule
         const text = plainText(fs.readFileSync(file), "the commit message");
-        print(messageErrors(text, { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }));
+        print({ ...messageErrors(text, { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }), text });
     } else if (cmd === "same-authors") {
         print({ authors: SAME_AUTHORS });
     } else if (cmd === "pr-text") {
@@ -373,7 +378,7 @@ async function main(argv) {
         if (typeof title !== "string" || typeof body !== "string") throw new Error("pr-text needs a JSON object with string title and body");
         print(prTextErrors(title, body, personalNeedles(rest)));
     } else if (cmd === "text") {
-        print({ aiTrailerLines: aiTrailerLines(fs.readFileSync(file, "utf8")) });
+        print({ aiTrailerLines: aiTrailerLines(stripInvisible(fs.readFileSync(file, "utf8"))) });
     } else {
         throw new Error("usage: review-state | infra | message | pr-text | text | same-authors | --self-test (see the header comment)");
     }
