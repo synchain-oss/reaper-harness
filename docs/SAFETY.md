@@ -102,6 +102,9 @@ above is a pure function and is tested everywhere.
 
 - A render with no frames is `INCOMPLETE`, before every other criterion and with or without a tolerance: nothing was
   compared, and two empty files being bit-identical says nothing.
+- A render whose data length is still the placeholder `0xFFFFFFFF` is unreadable, so `INCOMPLETE` in a comparison and on
+  its own alike: the writer never came back to fill in the length, so the file is not finished, and what is in it says
+  nothing about what is missing. REAPER's finished renders hold the real length.
 - With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven.
 
 ## Scripts

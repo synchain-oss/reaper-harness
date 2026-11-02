@@ -23,7 +23,8 @@ $ErrorActionPreference = 'Stop'
 
 # The identity comes from an open handle (FILE_ID_INFO), so 8.3 short names, case, trailing separators, subst
 # drives, junctions and symbolic links all collapse to the same value. That is more reliable than comparing string
-# prefixes. FILE_FLAG_OPEN_REPARSE_POINT is not used, so links are followed to their targets.
+# prefixes. Get opens without FILE_FLAG_OPEN_REPARSE_POINT, so it follows a link to its target. LinkCount opens with that
+# flag, so it does not follow one and looks at the name it was given. The two differ on purpose.
 if (-not ('HarnessFileId' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -168,10 +169,10 @@ function Assert-HarnessOutsideDefaultDir([string]$CfgDir) {
 # that cannot be listed, and any file with more than one name on its volume. That last one is a hard link: writing the
 # file changes it under its other name too, and that name can be anywhere on the volume and called anything, so looking
 # for it in the default resource directory could never be complete. A count that cannot be read proves nothing and is
-# refused as well. Returns the directories of this level, for the walk below. Root only sets how an entry is named in
-# the refusal.
+# refused as well. Returns the directories of this level, for the walk below. Root only sets how a level or an entry is
+# named in the refusal, always relative to it (the top level is .).
 function Assert-HarnessCfgEntries([string]$Folder, [string]$Root = $Folder) {
-    $entries = try { @(Get-ChildItem -LiteralPath $Folder -Force -ErrorAction Stop) } catch { Stop-Refuse 'the configuration directory cannot be listed, so nothing in it can be proven to stay inside it' }
+    $entries = try { @(Get-ChildItem -LiteralPath $Folder -Force -ErrorAction Stop) } catch { Stop-Refuse "the configuration directory cannot be listed ($([IO.Path]::GetRelativePath($Root, $Folder))), so nothing in it can be proven to stay inside it" }
     foreach ($entry in $entries) {
         $shown = [IO.Path]::GetRelativePath($Root, $entry.FullName)
         if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { Stop-Refuse "the configuration directory holds a link or junction ($shown): reads and writes would follow it out of the directory" }

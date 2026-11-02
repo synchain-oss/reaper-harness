@@ -243,9 +243,13 @@ function Get-CfgEntryCases([string]$Tmp) {
         try { & $add 'whole tree: a junction in a subdirectory is refused when the path is pinned' $true (Test-Refused { Initialize-HarnessCfg $treeJunction } '*link or junction*') }
         finally { [IO.Directory]::Delete($elsewhere) } # removes the link only
         $treeClosed = & $newCfg 'tree-closed'
-        $closedSub = Join-Path $treeClosed 'plugins'
-        $subDenied = Invoke-WithListingDenied $closedSub { Test-Refused { Initialize-HarnessCfg $treeClosed } '*cannot be listed*' }
-        & $add "whole tree: a subdirectory that cannot be listed is refused when the path is pinned$($subDenied.Denied ? '' : ' (a deny entry has no effect here; not run for real)')" $true ((-not $subDenied.Denied) -or $subDenied.Result)
+        $closedSub = Join-Path $treeClosed 'plugins\deep'
+        $null = New-Item -ItemType Directory -Path $closedSub
+        $refusalOf = { param([scriptblock]$Action) try { $null = & $Action; '' } catch { $_.Exception.Message } }
+        $subDenied = Invoke-WithListingDenied $closedSub { & $refusalOf { Initialize-HarnessCfg $treeClosed } }
+        $noSubDeny = $subDenied.Denied ? '' : ' (a deny entry has no effect here; not run for real)'
+        & $add "whole tree: a subdirectory that cannot be listed is refused when the path is pinned$noSubDeny" $true ((-not $subDenied.Denied) -or $subDenied.Result -like 'REFUSED:*cannot be listed*')
+        & $add "whole tree: that refusal names the level, relative to the configuration directory$noSubDeny" $true ((-not $subDenied.Denied) -or $subDenied.Result -clike 'REFUSED:*cannot be listed (plugins\deep),*')
         & $add 'whole tree: that deny entry was taken away again' $false ($subDenied.Restored -and (Assert-HarnessCfgDir $treeClosed).Dir -like '*tree-closed' -and @(Get-ChildItem -LiteralPath $closedSub -Force).Count -eq 0)
         # A symbolic link needs a privilege most sessions do not have (runners do); a junction does not
         $sym = & $newCfg 'entries-symlink'
@@ -264,9 +268,10 @@ function Get-CfgEntryCases([string]$Tmp) {
         } finally { [IO.Directory]::Delete($plugins) } # removes the link only
         # A directory that cannot be listed: nothing in it can be proven to stay inside it
         $closed = & $newCfg 'entries-closed'
-        $denied = Invoke-WithListingDenied $closed { Test-Refused { Assert-HarnessCfgDir $closed } '*cannot be listed*' }
+        $denied = Invoke-WithListingDenied $closed { & $refusalOf { Assert-HarnessCfgDir $closed } }
         $noDeny = $denied.Denied ? '' : ' (a deny entry has no effect here; not run for real)'
-        & $add "top level: a configuration directory that cannot be listed is refused$noDeny" $true ((-not $denied.Denied) -or $denied.Result)
+        & $add "top level: a configuration directory that cannot be listed is refused$noDeny" $true ((-not $denied.Denied) -or $denied.Result -like 'REFUSED:*cannot be listed*')
+        & $add "top level: that refusal names the level as .$noDeny" $true ((-not $denied.Denied) -or $denied.Result -clike 'REFUSED:*cannot be listed (.),*')
         & $add 'top level: that deny entry was taken away again' $false ($denied.Restored -and (Assert-HarnessCfgDir $closed).Dir -like '*entries-closed')
     } finally { Get-ChildItem -LiteralPath $defaultDir -Recurse -Filter 'reaper*.ini' -File | Remove-Item } # only this self-test's fake directory
     $cases
@@ -745,10 +750,20 @@ function Get-WavCases([string]$Tmp) {
     $pf = Join-Path $Tmp 'partial-frame.wav'; [IO.File]::WriteAllBytes($pf, $partial)
     $pr = & $cmp $pf
     & $add 'WAV: a data chunk that ends inside a frame is INCOMPLETE' $true ($pr.Status -eq 'INCOMPLETE' -and $pr.Detail -like '*WAV: data chunk does not hold whole frames*')
-    # A streaming writer's placeholder length 0xFFFFFFFF: the data runs to the end of the file (whole frames), not cut off
+    # The placeholder length 0xFFFFFFFF: the writer never filled in the length, so the file is not finished. This one holds
+    # every frame of a.wav and nothing else, so reading it to its end would find nothing wrong and compare as identical
     $open = [byte[]]$bytes.Clone(); [BitConverter]::GetBytes([uint32]::MaxValue).CopyTo($open, 40)
-    $of = Join-Path $Tmp 'open-length.wav'; [IO.File]::WriteAllBytes($of, [byte[]]($open + [byte[]](1, 2, 3)))
-    & $add 'WAV: a data length of 0xFFFFFFFF (length unknown) reads to the end of the file; a partial last frame is dropped' $false ((& $cmp $of).Detail -cmatch '^identical=yes lag=0 ')
+    $of = Join-Path $Tmp 'open-length.wav'; [IO.File]::WriteAllBytes($of, $open)
+    $ofp = Join-Path $Tmp 'open-length-partial.wav'; [IO.File]::WriteAllBytes($ofp, [byte[]]($open + [byte[]](1, 2, 3)))
+    $neverWritten = 'WAV: the data length was never written*'
+    $readError = { param($p) try { $null = Read-HarnessWav $p; '' } catch { $_.Exception.Message } }
+    & $add 'WAV: a data length of 0xFFFFFFFF does not read, with a reason of its own, also when the file ends inside a frame' $true ((& $readError $of) -like $neverWritten -and (& $readError $ofp) -like $neverWritten)
+    $openB = & $cmp $of
+    $openA = Compare-HarnessWavFiles -A $of -B $a
+    & $add 'WAV: a data length of 0xFFFFFFFF compared on either side is INCOMPLETE, not bit-identical' $true ($openB.Status -eq 'INCOMPLETE' -and $openB.Detail -like "cannot read render B: $neverWritten" -and $openA.Status -eq 'INCOMPLETE' -and $openA.Detail -like "cannot read render A: $neverWritten")
+    $openAlone = Test-HarnessWavFile -Path $of
+    $openLoud = Test-HarnessWavFile -Path $of -NotSilent -PeakMaxDb 6
+    & $add 'WAV: a data length of 0xFFFFFFFF on its own is INCOMPLETE, with or without criteria the frames would meet (never PASS)' $true ($openAlone.Status -eq 'INCOMPLETE' -and $openAlone.Detail -like "cannot read the render: $neverWritten" -and $openLoud.Status -eq 'INCOMPLETE')
     & $add 'WAV: a missing render is INCOMPLETE' $true ((& $cmp (Join-Path $Tmp 'none.wav')).Status -eq 'INCOMPLETE')
     $silent = & $file 'silent.wav' ([double[]]::new(200))
     & $add 'WAV: one render on its own: silent with notSilent is FAIL; the signal passes' $true ((Test-HarnessWavFile -Path $silent -NotSilent).Status -eq 'FAIL' -and (Test-HarnessWavFile -Path $a -NotSilent).Status -eq 'PASS')

@@ -44,15 +44,16 @@ public static class HarnessWav {
         byte[] b;
         try { b = File.ReadAllBytes(path); } catch (Exception e) { throw Bad("cannot read the file (" + e.GetType().Name + ")"); }
         if (b.Length < 12 || Encoding.ASCII.GetString(b, 0, 4) != "RIFF" || Encoding.ASCII.GetString(b, 8, 4) != "WAVE") throw Bad("not a RIFF/WAVE file");
-        int pos = 12, fmtAt = -1, fmtLen = 0, dataAt = -1; long dataLen = 0; bool openEnded = false;
+        int pos = 12, fmtAt = -1, fmtLen = 0, dataAt = -1; long dataLen = 0;
         while (pos + 8 <= b.Length) {
             string id = Encoding.ASCII.GetString(b, pos, 4);
             long len = BitConverter.ToUInt32(b, pos + 4);
             int body = pos + 8;
             if (id == "fmt ") { fmtAt = body; fmtLen = (int)Math.Min(len, int.MaxValue); }
             else if (id == "data") {
-                // 0xFFFFFFFF is the "length unknown" placeholder of streaming writers: the data runs to the end of the file
-                if (len == 0xFFFFFFFFL) { openEnded = true; len = (long)b.Length - body; }
+                // 0xFFFFFFFF is the "length unknown" placeholder: the writer never came back to fill in the length, so the file
+                // is not finished, however many whole frames it holds
+                if (len == 0xFFFFFFFFL) throw Bad("the data length was never written (placeholder 0xFFFFFFFF), the file is not finished");
                 // a render cut off (a crash, a full disk, a writer that never finished) is never read as a shorter file
                 if (len > (long)b.Length - body) throw Bad("data chunk is truncated (" + len + " bytes declared, " + ((long)b.Length - body) + " in the file)");
                 dataAt = body; dataLen = len; break;
@@ -86,7 +87,6 @@ public static class HarnessWav {
         else throw Bad("unsupported encoding (format tag " + tag + ", " + bits + " bits)");
         int bytes = bits / 8;
         if (align != bytes * channels) throw Bad("block align " + align + " does not match " + channels + " channels of " + bits + " bits");
-        if (openEnded) dataLen -= dataLen % align; // a streamed file may end inside a frame; only whole frames count
         if (dataLen % align != 0) throw Bad("data chunk does not hold whole frames (" + dataLen + " bytes, " + align + " per frame)");
         long frames = dataLen / align;
         var s = new double[frames * channels];
