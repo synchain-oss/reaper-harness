@@ -49,7 +49,9 @@ function New-HarnessContext {
         Locks = $Locks; LockWaitSec = [double]$Config.Limits.lockWaitSec; SkipMarkers = $SkipMarkers; LuaExtensions = $LuaExtensions; Kinds = $Kinds
         Installed = $byId; Blocks = @{}; Names = @{}; Launches = 0; LaunchLog = [Collections.Generic.List[object]]::new()
         Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new()
-        Launcher = $null; ModuleSampler = $null # self-test only
+        Started = [Collections.Generic.List[object]]::new() # every process started: Pid, StartUtc
+        StillRunning = $null # set when the watchdog could not end a process: Pid, Label, Lock
+        Launcher = $null; ModuleSampler = $null; Stopper = $null # self-test only
         Api = $null # filled in below
     }
 }
@@ -64,32 +66,49 @@ function Set-HarnessAudioConfig([int]$Sr, [int]$Block) {
 
 function Get-HarnessSkipMarkerHit([string[]]$Markers) { @($Markers | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) | Select-Object -First 1 }
 
+# The locks of a launch whose process could not be ended stay held until this process exits, when the kernel takes them
+# back. Referenced from here so that no garbage collection closes them earlier, which would end them just the same.
+$script:KeptLocks = [Collections.Generic.List[object]]::new()
+
 # Starts REAPER once while holding every lock of the set. Lock not available -> Status LockBusy; a skip marker that
-# appeared since the preflight -> Status SkipMarker. In both cases REAPER is not started (the caller records
-# INCOMPLETE; the harness never runs REAPER without its locks).
+# appeared since the preflight -> Status SkipMarker; an earlier process of this context that could not be ended ->
+# Status Blocked. In all three REAPER is not started (the caller records INCOMPLETE; the harness never runs REAPER
+# without its locks, nor next to a REAPER it could not end). The launch that reports StillRunning keeps its locks: its
+# window may still be on the desktop, and the next start of any harness has to wait for it.
 function Invoke-HarnessLaunch {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs, [string]$Label = '')
-    $none = { param($s) [pscustomobject]@{ Status = $s; ExitCode = $null; Seconds = 0; Pid = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{}; SampleLost = @(); Modules = @{}; ModuleScans = 0; PluginModules = @() } }
+    $none = { param($s) [pscustomobject]@{ Status = $s; ExitCode = $null; Seconds = 0; Pid = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{}; SampleLost = @(); Modules = @{}; ModuleScans = 0; PluginModules = @(); StillRunning = $false } }
+    if ($Ctx.StillRunning) { return & $none 'Blocked' }
     if (Get-HarnessSkipMarkerHit $Ctx.SkipMarkers) { return & $none 'SkipMarker' }
     $lock = Enter-HarnessLocks -Names $Ctx.Locks -TimeoutSeconds $Ctx.LockWaitSec
     if (-not $lock) { return & $none 'LockBusy' }
+    $keepLock = $false
     try {
         # The marker is checked again while holding the locks: someone may have started a manual test meanwhile
         if (Get-HarnessSkipMarkerHit $Ctx.SkipMarkers) { return & $none 'SkipMarker' }
         $Ctx.Launches++
         $Watch = @($Ctx.Installed.get_Values() | ForEach-Object { $_.BinaryLeaf })
-        $extra = @{ WatchModules = $Watch }
+        $extra = @{ WatchModules = $Watch; StartedList = $Ctx.Started }
         if ($Ctx.Launcher) { $extra.Launcher = $Ctx.Launcher }
         if ($Ctx.ModuleSampler) { $extra.ModuleSampler = $Ctx.ModuleSampler }
-        $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work @HostArgs @extra
+        if ($Ctx.Stopper) { $extra.Stopper = $Ctx.Stopper }
+        $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work -Lock $lock @HostArgs @extra
         $Ctx.LaunchLog.Add([pscustomobject]@{ Label = $Label; Status = $Run.Status; Modules = $Run.Modules; PluginModules = @($Run.PluginModules) })
+        if ($Run.StillRunning) {
+            $keepLock = $true
+            $script:KeptLocks.Add($lock)
+            $Ctx.StillRunning = [pscustomobject]@{ Pid = $Run.Pid; Label = $Label; Lock = $lock }
+        }
         $Run
-    } finally { Exit-HarnessLocks $lock }
+    } finally { if (-not $keepLock) { Exit-HarnessLocks $lock } }
 }
 
-# Did this launch end normally; if not, how it ended (the start of these texts is what the negative cases match).
+# Did this launch end normally; if not, how it ended (the start of these texts is what the negative cases match, so a
+# process that is still there has a text of its own: the watchdog did not do its job).
 function Get-HarnessHostFailure($Run) {
+    if ($Run.PSObject.Properties['StillRunning'] -and $Run.StillRunning) { return "the watchdog could not end process $($Run.Pid) ($($Run.Status) after $($Run.Seconds) s): the GUI locks stay held and REAPER is not started again" }
     switch ($Run.Status) {
+        'Blocked' { return 'an earlier REAPER of this round could not be ended; REAPER was not started' }
         'LockBusy' { return 'the GUI locks were not available in time; REAPER was not started' }
         'SkipMarker' { return 'a skip marker appeared; REAPER was not started' }
         'Timeout' { return "timed out after $($Run.Seconds) s and was ended" }
@@ -132,7 +151,7 @@ function New-HarnessRun {
 }
 
 function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Label = 'render') {
-    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Label -HostArgs @{ ReaperArgs = @('-renderproject', "`"$Project`""); TimeoutSec = [double]$Ctx.Limits.renderTimeoutSec }
+    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Label -HostArgs @{ ReaperArgs = @('-renderproject', $Project); TimeoutSec = [double]$Ctx.Limits.renderTimeoutSec }
     $why = Get-HarnessHostFailure $Run
     if (-not $why -and -not (Test-Path -LiteralPath $Wav)) { $why = 'the render produced no file' }
     [pscustomobject]@{ Run = $Run; Why = $why }
@@ -151,7 +170,7 @@ function Invoke-HarnessLuaStep {
     foreach ($k in $Job.get_Keys()) { $full[$k] = $Job[$k] }
     Write-HarnessText -Path $jobFile -Text (ConvertTo-HarnessLuaTable $full)
     $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -HostArgs @{
-        ReaperArgs = @("`"$($Ctx.Driver)`""); Environment = @{ REAPER_HARNESS_JOB = $jobFile }; WatchFiles = $Watch
+        ReaperArgs = @($Ctx.Driver); Environment = @{ REAPER_HARNESS_JOB = $jobFile }; WatchFiles = $Watch
         TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
     }
     $report = @{}
@@ -345,12 +364,15 @@ function Invoke-HarnessInstancesScenario($Ctx, $s) {
 
 # A driver step that never finishes: timeout and kill must both end as INCOMPLETE, with the process gone and every
 # lock of the set free again. Returns INCOMPLETE when the watchdog did that; PASS (the hang ended by itself) or FAIL
-# (process still alive, lock still held) otherwise. A lock that is busy because another process took it right after
-# ours was released cannot be told apart from ours not being released: that is INCOMPLETE without the "free" text.
+# (process still alive though the launch says it is gone) otherwise. A process the watchdog says it could not end is
+# INCOMPLETE like every launch with StillRunning, and without the "free" text, so the negative case is not verified. A
+# lock that is busy because another process took it right after ours was released cannot be told apart from ours not
+# being released: that is INCOMPLETE without the "free" text as well.
 function Invoke-HarnessHangScenario($Ctx, $s) {
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step hang -TimeoutSec ([double]$s.timeoutSec) -KillAfterSec ([double]$s.killAfterSec)
     if (-not $lua.Why) { return New-HarnessOutcome PASS 'the driver that should hang finished normally (the negative case did not take effect)' }
-    if ($lua.Run.Status -in 'LockBusy', 'SkipMarker') { return New-HarnessOutcome INCOMPLETE "$($lua.Why); the watchdog could not be checked" }
+    if ($lua.Run.Status -in 'LockBusy', 'SkipMarker', 'Blocked') { return New-HarnessOutcome INCOMPLETE "$($lua.Why); the watchdog could not be checked" }
+    if ($lua.Run.StillRunning) { return New-HarnessOutcome INCOMPLETE $lua.Why }
     if ($lua.Run.Pid -and (Get-Process -Id $lua.Run.Pid -ErrorAction SilentlyContinue)) { return New-HarnessOutcome FAIL "process $($lua.Run.Pid) is still alive" }
     $busy = @()
     $deadline = (Get-Date).AddSeconds(20)

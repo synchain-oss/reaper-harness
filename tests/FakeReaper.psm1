@@ -209,13 +209,15 @@ function Invoke-FakeStep([string]$JobFile) {
 }
 
 function Invoke-FakeLaunch($psi) {
-    $script:Spec.Seen.Add($psi.Arguments)
+    $given = @($psi.ArgumentList)
+    $script:Spec.Seen.Add($given -join ' ')
     $behave = 'quick'
-    $m = [regex]::Match($psi.Arguments, '-renderproject "([^"]+)"')
-    if ($m.Success) { Invoke-FakeRender $m.Groups[1].Value }
+    $renderAt = [array]::IndexOf($given, '-renderproject')
+    if ($renderAt -ge 0) { Invoke-FakeRender $given[$renderAt + 1] }
     elseif ($psi.Environment['REAPER_HARNESS_JOB']) { $behave = Invoke-FakeStep $psi.Environment['REAPER_HARNESS_JOB'] }
     $psi.FileName = $script:Spec.Pwsh
-    $psi.Arguments = '-NoProfile -NonInteractive -Command ' + @{ quick = 'exit 0'; linger = 'Start-Sleep -Milliseconds 1500'; hang = 'Start-Sleep -Seconds 60' }[$behave]
+    $psi.ArgumentList.Clear()
+    foreach ($part in '-NoProfile', '-NonInteractive', '-Command', @{ quick = 'exit 0'; linger = 'Start-Sleep -Milliseconds 1500'; hang = 'Start-Sleep -Seconds 60' }[$behave]) { $psi.ArgumentList.Add($part) }
     [Diagnostics.Process]::Start($psi)
 }
 

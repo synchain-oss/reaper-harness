@@ -786,17 +786,35 @@ function Get-VerdictCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'summary: FAIL beats INCOMPLETE' $true ((Get-HarnessWorstStatus @('INCOMPLETE', 'FAIL', 'PASS')) -eq 'FAIL')
     & $add 'summary: only all SKIPPED is SKIPPED; mixed with PASS it is INCOMPLETE' $false ((Get-HarnessWorstStatus @('SKIPPED', 'SKIPPED')) -eq 'SKIPPED' -and (Get-HarnessWorstStatus @('PASS', 'SKIPPED')) -eq 'INCOMPLETE')
     & $add 'summary: an empty list (nothing ran) is never PASS' $true ((Get-HarnessWorstStatus @()) -eq 'INCOMPLETE' -and (Get-HarnessWorstStatus $null) -eq 'INCOMPLETE')
-    & $add 'round: a round without any rows is not PASS' $true ((Get-HarnessRunVerdict -RowStatuses @() -CfgUnchanged $true -Residual 0) -eq 'INCOMPLETE')
-    & $add 'round: all rows green but the default resource directory changed is FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $false -Residual 0) -eq 'FAIL')
-    & $add 'round: all rows green but a reaper.exe left after the round is FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 1) -eq 'FAIL')
-    & $add 'round: all green, directory unchanged, nothing left: PASS' $false ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $true -Residual 0) -eq 'PASS')
-    & $add 'rounds: a changed default resource directory stops all further rounds' $true ((Get-HarnessRoundStop -CfgUnchanged $false) -ne '' -and (Get-HarnessRoundStop -CfgUnchanged $true) -eq '')
+    & $add 'round: a round without any rows is not PASS' $true ((Get-HarnessRunVerdict -RowStatuses @() -CfgChanged $false -Residual 0) -eq 'INCOMPLETE')
+    & $add 'round: all rows green but the default resource directory changed is FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'PASS') -CfgChanged $true -Residual 0) -eq 'FAIL')
+    & $add 'round: all rows green but a process of this round left after it is FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -CfgChanged $false -Residual 1) -eq 'FAIL')
+    & $add 'round: all green, directory unchanged, nothing left: PASS' $false ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'PASS') -CfgChanged $false -Residual 0) -eq 'PASS')
+    & $add 'round: all rows green but the directory could not be listed in full: INCOMPLETE, neither PASS nor FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -CfgUnreadable $true) -ceq 'INCOMPLETE')
+    & $add 'round: a change that was seen stays FAIL when something else could not be listed too' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -CfgChanged $true -CfgUnreadable $true) -ceq 'FAIL')
+    & $add 'round: a FAIL row stays FAIL when the directory could not be listed' $true ((Get-HarnessRunVerdict -RowStatuses @('FAIL') -CfgUnreadable $true) -ceq 'FAIL')
+    & $add 'round: all rows green but a process that could not be ended: INCOMPLETE, neither PASS nor FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -StillRunning $true) -ceq 'INCOMPLETE')
+    & $add 'round: a FAIL row stays FAIL when a process could not be ended' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'FAIL') -StillRunning $true) -ceq 'FAIL')
+    & $add 'round: a process nobody reported stays FAIL next to one that was reported' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -Residual 1 -StillRunning $true) -ceq 'FAIL')
+    & $add 'rounds: a changed default resource directory stops all further rounds' $true ((Get-HarnessRoundStop -CfgChanged $true) -like '*changed*')
+    & $add 'rounds: a default resource directory that could not be listed stops all further rounds' $true ((Get-HarnessRoundStop -CfgUnreadable $true) -like '*could not be listed*')
+    & $add 'rounds: a process that could not be ended stops all further rounds' $true ((Get-HarnessRoundStop -StillRunning $true) -like '*could not be ended*')
+    & $add 'rounds: with none of those the next round runs' $false ((Get-HarnessRoundStop) -ceq '')
+    # What was seen to change, next to what could not be read
+    $seen = { param([string[]]$Changed, [string[]]$Unreadable) @(Get-HarnessCfgChangesSeen -Changed $Changed -Unreadable $Unreadable) -join '|' }
+    & $add 'directory changes: with nothing unreadable every change counts' $true ((& $seen @('changed:a.ini', 'added:b\c', 'removed:d') @()) -ceq 'changed:a.ini|added:b\c|removed:d')
+    & $add 'directory changes: an entry that could not be read and all below it are no change that was seen, in any case of letters' $false ((& $seen @('changed:DATA', 'removed:data\x.ini') @('Data')) -ceq '')
+    & $add 'directory changes: a change next to an unreadable entry counts, also when its name only starts the same' $true ((& $seen @('changed:Data2\x.ini', 'changed:a.ini') @('Data')) -ceq 'changed:Data2\x.ini|changed:a.ini')
+    & $add 'directory changes: when the directory itself could not be read nothing was seen' $false ((& $seen @('removed:a.ini') @('.')) -ceq '')
     # Negative rows need both the outcome and the reason. The outcome alone can be reached without the case running:
     # with the GUI lock busy REAPER is not started, and a watchdog case is INCOMPLETE then too, without any watchdog
     $negs = @{}
     foreach ($neg in (Get-HarnessBuiltinNegatives)) { $negs[$neg.id] = $neg }
     $verdict = { param($id, $observed, $detail) Get-HarnessNegativeVerdict -Expect $negs[$id].expect -ExpectDetail $negs[$id].expectDetail -Observed $observed -Detail $detail }
     $hang = { param($state, $exitCode = 0) $w = Get-HarnessHostFailure ([pscustomobject]@{ Status = $state; Seconds = 8.2; ExitCode = $exitCode; Modal = 'license-nag'; Windows = @('license-nag') }); "$w; the process has ended and the GUI locks are free" } # the shape the hang kind builds
+    # A process that could not be ended cannot verify the watchdog cases, even with the "free" text glued on
+    $stuckText = Get-HarnessHostFailure ([pscustomobject]@{ Status = 'Timeout'; Seconds = 8.2; ExitCode = $null; Modal = $null; Windows = @(); Pid = 77; StillRunning = $true })
+    & $add 'negative verdict: a process the watchdog could not end has its own text and verifies neither watchdog case' $true ($stuckText -like 'the watchdog could not end process 77*' -and (& $verdict 'neg-timeout' 'INCOMPLETE' "$stuckText; the process has ended and the GUI locks are free").Status -ceq 'INCOMPLETE' -and (& $verdict 'neg-killed' 'INCOMPLETE' "$stuckText; the process has ended and the GUI locks are free").Status -ceq 'INCOMPLETE')
     & $add 'negative verdict (built-in): the timeout case is PASS only when ended at the timeout' $false ((& $verdict 'neg-timeout' 'INCOMPLETE' (& $hang 'Timeout')).Status -eq 'PASS')
     & $add 'negative verdict (built-in): the kill case is PASS only when ended at the kill point' $false ((& $verdict 'neg-killed' 'INCOMPLETE' (& $hang 'Killed')).Status -eq 'PASS')
     $busy = & $verdict 'neg-timeout' 'INCOMPLETE' 'the GUI locks were not available in time; REAPER was not started; the watchdog could not be checked'
@@ -810,6 +828,9 @@ function Get-VerdictCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'negative verdict: the -6 dB case cannot pass on a lag=1 FAIL' $true ((& $verdict 'neg-track-minus-6db' 'FAIL' (Get-HarnessCompareVerdict -Facts (New-Facts @{ Identical = $false; BestLag = 1 })).Detail).Status -eq 'INCOMPLETE')
     & $add 'negative verdict: observed INCOMPLETE (the case could not run) when FAIL is expected is INCOMPLETE, not FAIL' $true ((& $verdict 'neg-offset-1-sample' 'INCOMPLETE' 'cannot read render A: WAV: no RIFF header').Status -eq 'INCOMPLETE')
     & $add 'negative verdict: what should have turned red did not (observed PASS, expected FAIL) is FAIL' $true ((& $verdict 'neg-offset-1-sample' 'PASS' 'identical=yes lag=0 ').Status -eq 'FAIL')
+    # A render with no frames says nothing, so a comparer case cannot pass on one: not PASS, and not FAIL either
+    $noFrames = Get-HarnessCompareVerdict -Facts (New-Facts @{ FramesA = 0; FramesB = 0; Identical = $false; BestLag = 1 })
+    & $add 'negative verdict: an empty render when the comparer cases expect FAIL is INCOMPLETE, whatever else its facts say' $true ($noFrames.Status -ceq 'INCOMPLETE' -and (& $verdict 'neg-offset-1-sample' $noFrames.Status $noFrames.Detail).Status -ceq 'INCOMPLETE' -and (& $verdict 'neg-track-minus-6db' $noFrames.Status $noFrames.Detail).Status -ceq 'INCOMPLETE')
     $refusal = { param($block) try { $null = & $block; 'NOTHROW' } catch { $_.Exception.Message -replace '\s+', ' ' } } # the shape Invoke-HarnessGuardNegative records
     $msgDefault = & $refusal { Assert-HarnessCfgDir (Get-HarnessDefaultCfgDir) }
     $bareDir = Join-Path $Tmp 'neg-bare'
@@ -831,6 +852,19 @@ function Get-VerdictCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'build label: up to three plugins, 12 hex digits each joined by -; more plugins fewer digits; above five one hash; always within the label pattern' $false (
         $labels[0] -cmatch '^[0-9a-f]{12}$' -and $labels[1] -cmatch '^[0-9a-f]{12}-[0-9a-f]{12}$' -and $labels[3] -cmatch '^([0-9a-f]{9}-){3}[0-9a-f]{9}$' -and $labels[5] -cmatch '^[0-9a-f]{12}$' -and
         $labels[5] -cne $labels[6] -and @($labels | Where-Object { $_ -cnotmatch '^[0-9A-Za-z._-]{1,40}$' }).Count -eq 0 -and (Get-HarnessDefaultLabel ([ordered]@{})) -ceq 'unknown')
+    # What a round counts as left over: a process it started itself, by PID and start time
+    $t0 = [DateTime]::new(2026, 11, 2, 1, 0, 0, [DateTimeKind]::Utc)
+    $startedRows = @(
+        [pscustomobject]@{ Pid = 11; StartUtc = $t0 }, [pscustomobject]@{ Pid = 22; StartUtc = $t0 }, [pscustomobject]@{ Pid = 33; StartUtc = $t0 }, [pscustomobject]@{ Pid = 44; StartUtc = $null }, [pscustomobject]@{ Pid = 55; StartUtc = $null }
+    )
+    $startOf = { param($id) switch ($id) { 11 { $t0 } 22 { $t0.AddSeconds(30) } 33 { $null } 44 { $t0 } 55 { $null } } }.GetNewClosure()
+    $leftIds = @((Get-HarnessOwnProcessesLeft -Started $startedRows -StartOf $startOf) | ForEach-Object { $_.Pid })
+    & $add 'left over: a process of this round still alive, same PID and same start time, counts' $true (11 -in $leftIds)
+    & $add 'left over: the same PID with another start time is a later process that got the number: it does not count' $false (22 -notin $leftIds)
+    & $add 'left over: a PID that is gone does not count, with or without a start time' $false (33 -notin $leftIds -and 55 -notin $leftIds)
+    & $add 'left over: a start time that was never read cannot tell it apart, so a live PID counts' $true (44 -in $leftIds)
+    & $add 'left over: nothing started, nothing left' $false (@(Get-HarnessOwnProcessesLeft -Started @() -StartOf $startOf).Count -eq 0)
+    & $add 'left over: this very process found through the real lookup, with its real start time' $true (@(Get-HarnessOwnProcessesLeft -Started @([pscustomobject]@{ Pid = $PID; StartUtc = (Get-HarnessProcessStartUtc (Get-Process -Id $PID)) })).Count -eq 1)
     $cases
 }
 
@@ -853,6 +887,7 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     $mutations = @(
         @{ L = 'an unknown key at the top'; E = { param($c) $c['surprise'] = 1 }; M = "unknown key 'surprise'" }
         @{ L = 'an unknown key in a scenario'; E = { param($c) (& $scenario $c 'bus')['speed'] = 2 }; M = "unknown key 'speed'" }
+        @{ L = 'a configuration without any plugin (a run would have no binary to prove)'; E = { param($c) $c['plugins'] = [ordered]@{} }; M = 'config.plugins: needs at least 1 entry' }
         @{ L = 'schema 2'; E = { param($c) $c['schema'] = 2 }; M = 'schema' }
         @{ L = 'a string where a number belongs'; E = { param($c) $c['signal']['seconds'] = 'long' }; M = 'seconds' }
         @{ L = 'a sample rate out of range'; E = { param($c) (& $scenario $c 'bus')['sr'] = 100 }; M = 'sr' }

@@ -130,7 +130,8 @@ Renders the layout and compares the render with a reference.
 
 The pass criteria are fields of the scenario itself, not a nested object: in negative cases `expect` names the
 expected outcome. Both renders must be readable, comparable (same rate and channel count) and free of NaN and Inf
-in every case. The verdict line always starts with the same facts, in this order:
+in every case. A render with no frames is INCOMPLETE before any of this, so a negative case expecting FAIL does not
+pass on one. The verdict line always starts with the same facts, in this order:
 `identical= lag= maxdiff= head= frames= channels= rate= format= nonfinite= peak=`, followed by `; failed: <reasons>`
 on a FAIL. Negative cases match that line with a regex.
 

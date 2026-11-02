@@ -33,14 +33,15 @@ hashes are cut to their first 12 hex digits.
 |---|---|---|
 | `index` | integer | 1-based |
 | `seconds` | number | |
-| `verdict` | string | worst of the rows and the module check; FAIL when the default resource directory changed or a `reaper.exe` was left |
+| `verdict` | string | worst of the rows and the module check; FAIL when the default resource directory was seen to change or a process this round started was left that no launch reported; else INCOMPLETE when part of that directory could not be listed or a process could not be ended |
 | `launches` | integer | REAPER starts in this round |
 | `counts` | object | rows per outcome: `PASS`, `FAIL`, `INCOMPLETE`, `SKIPPED` |
-| `defaultCfgDir` | object | `unchanged` (bool), `entries` (listed before), `changed` (up to 8 entries, `added:` / `removed:` / `changed:` + relative path) |
-| `reaperProcessesLeft` | integer | `reaper.exe` processes after the round (must be 0) |
+| `defaultCfgDir` | object | `unchanged` (bool), `entries` (listed before), `changed` (up to 8 entries seen to change, `added:` / `removed:` / `changed:` + relative path), `unreadable` (up to 8 entries that could not be listed, `.` for the directory itself; `unchanged` is false when there are any) |
+| `reaperProcessesLeft` | integer | processes this round started that are still there after it, recognised by process ID and start time (must be 0); a `reaper.exe` of somebody else is not counted |
+| `stillRunning` | boolean | a process of this round could not be ended by the watchdog: its GUI locks stay held and nothing was started after it (must be false) |
 | `moduleCheck` | object | `status`, `detail`, `launches`, `foreign` (tested binaries seen from elsewhere, with the launch), `otherPlugins` (count of other `.vst3` / `.clap` modules seen) |
 | `scenarios` | object[] | the rows, in run order |
-| `stoppedBecause` | string | only when no further round ran |
+| `stoppedBecause` | string | only when no further round ran: the default resource directory changed, could not be listed in full, or a process could not be ended |
 
 ## A row (`scenarios[]`)
 
@@ -70,7 +71,7 @@ Negative rows also have `negative` (true), `builtin`, `expected` (the expected o
   "runs": [ {
     "index": 1, "seconds": 212.4, "verdict": "PASS", "launches": 31,
     "counts": { "PASS": 19, "FAIL": 0, "INCOMPLETE": 0, "SKIPPED": 0 },
-    "defaultCfgDir": { "unchanged": true, "entries": 118, "changed": [] }, "reaperProcessesLeft": 0,
+    "defaultCfgDir": { "unchanged": true, "entries": 118, "changed": [], "unreadable": [] }, "reaperProcessesLeft": 0, "stillRunning": false,
     "moduleCheck": { "status": "PASS", "detail": "no tested binary was loaded from anywhere but the private copy in 31 launches",
                      "launches": 31, "foreign": [], "otherPlugins": 0 },
     "scenarios": [

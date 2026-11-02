@@ -43,11 +43,13 @@ is always the element right after `-cfgfile`. Before the start, `-ReaperArgs` ho
 quoting for itself, which would hand REAPER literal quotes) or naming the `-cfgfile` switch again is refused.
 
 Before and after every round the harness lists `%APPDATA%\REAPER` (file sizes and write times, read only), and the
-self-test does so before and after it runs. If anything changed the round is FAIL and no further round runs. A file or
+self-test does so before and after it runs. If anything was seen to change the round is FAIL and no further round runs. A file or
 directory that cannot be listed is recorded as `unreadable` (the directory itself under the name `.`), and a comparison
 with anything unreadable on either side is not "unchanged", also when both listings say the same: what cannot be read
 cannot be proven to have stayed as it was. The comparison names those entries. A round where that happens is
 INCOMPLETE, not FAIL (nothing was seen to change, it just cannot be shown that nothing did), and no further round runs.
+An entry listed once and unreadable the other time, and what was below it, counts as that same lack of evidence and not
+as a change. A change anywhere else in the directory is still FAIL, whatever could not be listed next to it.
 
 The self-test reaches a mapped network drive and a link count that cannot be read through stand-ins for the functions
 that read them, and uses a real letter with nothing mounted on it. A real mapped drive changes the machine, so one is
@@ -59,14 +61,19 @@ machine (a deny entry, a subst drive, a mapped drive) is checked as undone, and 
 
 - The watchdog ends only the process ID it started, at the time limit (`Timeout`) or at a kill point (`Killed`).
   A `reaper.exe` that was already running makes the whole suite SKIPPED: the harness does not run alongside it,
-  and changes to the default resource directory could not be attributed. A `reaper.exe` left over after a round
-  makes the round FAIL.
+  and changes to the default resource directory could not be attributed. After a round only the processes that round
+  started count, each recognised by its process ID and start time: one of them still there and reported by no launch
+  makes the round FAIL. A `reaper.exe` of somebody else that appeared during the round is not looked for, since the
+  locks are free between launches and it says nothing about this round, and neither is a later process that got the
+  same number.
 - A process the watchdog could not end is reported, not assumed gone: the launch result has `StillRunning`, true when
   the stop failed or the process was still there after the wait, and false when it is gone (a process that had already
   exited is no failure). A caller that sees `StillRunning` true records `INCOMPLETE`, does not release its GUI lock and
   does not start the next launch: that window may still be on the desktop. `Invoke-WithHarnessLocks` always releases
   when its block ends, so a caller that can start REAPER must not use it: it takes and releases the locks itself with
-  `Enter-HarnessLocks` and `Exit-HarnessLocks`.
+  `Enter-HarnessLocks` and `Exit-HarnessLocks`. The run command does just that: `Invoke-HarnessLaunch` keeps the locks
+  and notes the process, every later launch of that context starts nothing and reports `Blocked`, the round is
+  INCOMPLETE and no further round runs. The kernel takes the locks back when the run's process ends.
 - Before every launch the GUI lock has to be held: `Invoke-HarnessHost` enforces it, and without the object
   `Enter-HarnessLocks` returned for a set holding the default lock it refuses before anything starts. The other two
   checks before a launch, that no other `reaper.exe` is running and the listing of the default directory, are the job
@@ -183,7 +190,9 @@ above is a pure function and is tested everywhere.
 - A render whose data length is still the placeholder `0xFFFFFFFF` is unreadable, so `INCOMPLETE` in a comparison and on
   its own alike: the writer never came back to fill in the length, so the file is not finished, and what is in it says
   nothing about what is missing. REAPER's finished renders hold the real length.
-- With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven.
+- With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven. A configuration
+  cannot get there: it needs at least one plugin (the schema refuses an empty `plugins`), so every run has a binary to
+  prove, and a test that only needs JSFX still names one.
 
 ## Scripts
 

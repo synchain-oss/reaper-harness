@@ -66,6 +66,19 @@ function New-BadExitTimeStandIn([string]$Command) {
 function New-BoxCommand([string]$Title, [string]$Buttons, [string]$OutFile) {
     "Add-Type -AssemblyName System.Windows.Forms; `$r = [System.Windows.Forms.MessageBox]::Show('x', '$($Title -replace "'", "''")', '$Buttons'); Set-Content -LiteralPath '$($OutFile -replace "'", "''")' -Value `$r"
 }
+# Replaces one command for the suite module only. This reaches what must not be made on the machine the self-test runs on
+# (a reaper.exe of somebody else, a default resource directory that cannot be listed) with the real suite around it.
+function Set-SuiteCommand([string]$Name, [scriptblock]$Stub) {
+    & (Get-Module Suite) { param($n, $s) $was = (Get-Item "function:$n").ScriptBlock; Set-Item "function:script:$n" $s; $was } $Name $Stub
+}
+function Invoke-WithSuiteCommand([string]$Name, [scriptblock]$Stub, [scriptblock]$Action) {
+    $was = Set-SuiteCommand $Name $Stub
+    try { & $Action } finally { $null = Set-SuiteCommand $Name $was }
+}
+# A launcher that starts what the given one starts and remembers the process, so a case can end it when it is judged
+function New-TrackedLauncher($Launcher, [hashtable]$Box) {
+    { param($psi) $p = & $Launcher $psi; $Box.Pid = $p.Id; $p }.GetNewClosure()
+}
 # Waits until the process shows a visible dialog with this title, looking at the windows of that PID only
 function Wait-BoxShown($Process, [string]$Title, [int]$Seconds) {
     $until = (Get-Date).AddSeconds($Seconds)
@@ -125,6 +138,18 @@ try { Write-Case 'watchdog: a stop that reports nothing but leaves the process a
 finally { & $endStandIn $run.Pid }
 $run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -KillAfterSec 1 -Stopper { param($id) Stop-Process -Id $id -Force; throw 'it had already gone' } -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
 Write-Case 'watchdog: a stop that complains about a process that is gone is no failure: not StillRunning' $false ($run.Status -eq 'Killed' -and $run.StillRunning -eq $false -and (& $gone $run.Pid))
+# What a caller learns about the process it had started, also when it is still there
+$startedRows = [Collections.Generic.List[object]]::new()
+$run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -KillAfterSec 1 -Stopper { param($id) } -StartedList $startedRows -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+try {
+    Write-Case 'started list: the process is listed with its PID and its start time right after the start' $true ($startedRows.Count -eq 1 -and $startedRows[0].Pid -eq $run.Pid -and $startedRows[0].StartUtc -is [datetime] -and $startedRows[0].StartUtc -ge $run.StartedUtc.AddSeconds(-5))
+    Write-Case 'left over: a process of the list that is still alive is found' $true (@(Get-HarnessOwnProcessesLeft -Started $startedRows.ToArray()).Count -eq 1)
+    $otherStart = [pscustomobject]@{ Pid = $run.Pid; StartUtc = $startedRows[0].StartUtc.AddSeconds(-1) }
+    Write-Case 'left over: the same PID with another start time is not this process' $false (@(Get-HarnessOwnProcessesLeft -Started @($otherStart)).Count -eq 0)
+} finally { & $endStandIn $run.Pid }
+$until = (Get-Date).AddSeconds(10)
+while (-not (& $gone $run.Pid) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 100 }
+Write-Case 'left over: once it is gone it is not found any more' $false (@(Get-HarnessOwnProcessesLeft -Started $startedRows.ToArray()).Count -eq 0)
 # The mark file appears after the process has exited (the stand-in waits for its process, then writes the mark):
 # recorded as SampleLost with that reason
 $quickMark = Join-Path $Work 'mark-after-exit.txt'
@@ -336,13 +361,21 @@ try {
     Write-Case 'built-in neg-timeout while the lock is busy: the row is INCOMPLETE (not PASS), says it was not verified, REAPER not started' $true ($rowTimeout.observed -eq 'INCOMPLETE' -and $rowTimeout.status -eq 'INCOMPLETE' -and $rowTimeout.detail -like '*not verified*' -and $hangCtx.Launches -eq 0)
     Write-Case 'built-in neg-killed while the lock is busy: the row is INCOMPLETE (not PASS)' $true ($rowKilled.observed -eq 'INCOMPLETE' -and $rowKilled.status -eq 'INCOMPLETE' -and $rowKilled.detail -like '*not verified*')
     Write-Case 'lock check: a lock held elsewhere is seen as not free from a child process' $true (-not (Test-HarnessLockFree -FullName $gui))
-    # A context with other lock names uses them both for the start and for the check afterwards
-    $injCtx = & $newCtx @($gui.Replace('-gui', '-other'))
-    $injCtx.LockWaitSec = 5; $injCtx.Launcher = New-StandIn 'Start-Sleep -Seconds 60' @{}
-    $quick = [pscustomobject]@{}; foreach ($p in $negs['neg-timeout'].PSObject.Properties) { $quick | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
-    $quick.timeoutSec = 2.0
-    $rowInj = Invoke-HarnessNegativeRow -Context $injCtx -Scenario $quick -GuardParams @{} -TempRoot $Work
-    Write-Case 'watchdog negative: the lock names of the context are used for the start and the check, so a busy default lock does not matter' $false ($rowInj.status -eq 'PASS' -and $rowInj.detail -like 'timed out after *' -and $injCtx.Launches -eq 1)
+    # A context with other lock names uses them both for the start and for the check afterwards. The start needs the
+    # default lock in that set, so the default is switched to one of them for this case: the one that is busy here is not it
+    $otherDefault = $gui.Replace('-gui', '-other')
+    & $useDefaultLock $otherDefault
+    try {
+        $injCtx = & $newCtx @($otherDefault)
+        $injCtx.LockWaitSec = 5; $injCtx.Launcher = New-StandIn 'Start-Sleep -Seconds 60' @{}
+        $quick = [pscustomobject]@{}; foreach ($p in $negs['neg-timeout'].PSObject.Properties) { $quick | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+        $quick.timeoutSec = 2.0
+        $rowInj = Invoke-HarnessNegativeRow -Context $injCtx -Scenario $quick -GuardParams @{} -TempRoot $Work
+        Write-Case 'watchdog negative: the lock names of the context are used for the start and the check, so a lock outside the set being busy does not matter' $false ($rowInj.status -eq 'PASS' -and $rowInj.detail -like 'timed out after *' -and $injCtx.Launches -eq 1)
+    } finally { & $useDefaultLock $gui }
+    $noDefaultCtx = & $newCtx @($otherDefault)
+    $noDefaultCtx.LockWaitSec = 5; $during.Called = $false; $noDefaultCtx.Launcher = New-StandIn 'exit 0' $during
+    Write-Case 'locks: a context whose set does not hold the default lock is refused by the host, whatever it holds; the stand-in is never called' $true ((Test-Throws { $null = Invoke-HarnessLaunch -Ctx $noDefaultCtx -HostArgs @{ TimeoutSec = 5 } } 'REFUSED:*GUI lock*') -and -not $during.Called -and (Test-HarnessLockFree -FullName $otherDefault))
 } finally { if (-not $holder.HasExited) { $holder.Kill(); $holder.WaitForExit() } }
 
 # The watchdog negatives triggered for real are PASS: the stand-in sleeps, timeout and kill end it (the built-in cases
@@ -360,7 +393,41 @@ $selfExit.Launcher = New-StandIn 'exit 3' @{}
 $row = Invoke-HarnessNegativeRow -Context $selfExit -Scenario (& $copyNeg 'neg-timeout' 'timeoutSec' 5.0) -GuardParams @{} -TempRoot $Work
 Write-Case 'neg-timeout where REAPER exits by itself (no watchdog involved) is not verified: INCOMPLETE' $true ($row.status -eq 'INCOMPLETE')
 
+# ---- a process the watchdog could not end: the locks stay held and nothing starts next to it ----
+# Each stand-in here is ended by this self-test once its case has been judged, and the locks kept for it are released,
+# which a real run leaves to the end of its process.
+$noStop = { param($id) throw 'access denied' }
+$releaseKept = { foreach ($kept in @(& (Get-Module Scenarios) { $script:KeptLocks.ToArray(); $script:KeptLocks.Clear() })) { Exit-HarnessLocks $kept } }
+$stuckCtx = & $newCtx @($gui)
+$stuckCtx.Launcher = New-StandIn 'Start-Sleep -Seconds 60' @{}
+$stuckCtx.Stopper = $noStop
+$stuckRun = Invoke-HarnessLaunch -Ctx $stuckCtx -HostArgs @{ TimeoutSec = 30; KillAfterSec = 1 }
+try {
+    Write-Case 'still running: the launch reports it and the context records the process' $true ($stuckRun.Status -eq 'Killed' -and $stuckRun.StillRunning -eq $true -and -not (& $gone $stuckRun.Pid) -and $stuckCtx.StillRunning.Pid -eq $stuckRun.Pid)
+    Write-Case 'still running: the GUI lock stays held after the launch: another process cannot take it' $true ((& $probeExit) -eq 1)
+    Write-Case 'still running: the failure says the process could not be ended, not that it was' $true ((Get-HarnessHostFailure $stuckRun) -like 'the watchdog could not end process *' -and (Get-HarnessHostFailure $stuckRun) -notlike '*and was ended*')
+    $seenLate = @{ Called = $false }
+    $stuckCtx.Launcher = New-StandIn 'exit 0' $seenLate
+    $late = Invoke-HarnessLaunch -Ctx $stuckCtx -HostArgs @{ TimeoutSec = 5 }
+    Write-Case 'still running: the next launch does not start anything: status Blocked, not counted, with its own text' $true ($late.Status -ceq 'Blocked' -and $late.StillRunning -eq $false -and -not $seenLate.Called -and $stuckCtx.Launches -eq 1 -and (Get-HarnessHostFailure $late) -like 'an earlier REAPER*')
+    $lateRender = Invoke-HarnessRender $stuckCtx (Join-Path $Work 'late.rpp') (Join-Path $Work 'late.wav')
+    Write-Case 'still running: a render after it has that reason and starts nothing' $true ($lateRender.Why -like 'an earlier REAPER*' -and -not $seenLate.Called)
+    $lateHang = Invoke-HarnessScenario -Ctx $stuckCtx -Scenario ([pscustomobject]@{ id = 'hang-blocked'; kind = 'hang'; timeoutSec = 2; killAfterSec = 0 })
+    Write-Case 'still running: a hang scenario after it is INCOMPLETE, the watchdog could not be checked' $true ($lateHang.Status -ceq 'INCOMPLETE' -and $lateHang.Detail -like 'an earlier REAPER*could not be checked' -and -not $seenLate.Called)
+} finally { & $endStandIn $stuckRun.Pid; & $releaseKept }
+Write-Case 'still running: with the kept locks released the lock is free again (what the end of the process does in a real run)' $false ((& $probeExit) -eq 0)
+# The same launch as the one a watchdog negative case is about
+$stuckNeg = & $newCtx @($gui)
+$stuckNeg.Launcher = New-StandIn 'Start-Sleep -Seconds 60' @{}
+$stuckNeg.Stopper = $noStop
+$stuckRow = Invoke-HarnessNegativeRow -Context $stuckNeg -Scenario (& $copyNeg 'neg-killed' 'killAfterSec' 1.0) -GuardParams @{} -TempRoot $Work
+try { Write-Case 'still running: built-in neg-killed whose process could not be ended is not verified: the row is INCOMPLETE, never PASS or FAIL' $true ($stuckRow.observed -ceq 'INCOMPLETE' -and $stuckRow.status -ceq 'INCOMPLETE' -and $stuckRow.detail -clike '*does not match*so the case was not verified: the watchdog could not end process *' -and $stuckRow.detail -cnotlike '*not verified: killed at the deadline*') }
+finally { & $endStandIn $stuckNeg.StillRunning.Pid; & $releaseKept }
+
 # ---- entry guards ----
+# Nothing from here on starts a REAPER. A reaper.exe of another session on this machine has nothing to do with these cases,
+# so it must not add a reason or make them SKIPPED; the cases on what such a process does to a run set this command themselves.
+$null = Set-SuiteCommand 'Get-HarnessReaperProcessIds' { }
 $fixtures = Join-Path $RepoRoot 'tests/fixtures'
 $configFile = Join-Path $fixtures 'config.json'
 $suite = @{ CfgDir = $CfgA; Config = $configFile; PluginDir = (Join-Path $fixtures 'plugins'); ResultDir = (Join-Path $Work 'results'); ReaperExe = (Join-Path $Work 'no-reaper.exe') }
@@ -460,34 +527,86 @@ $seenArgs = [Collections.Generic.List[string]]::new()
 Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs }
 $hooks = @{ Launcher = (Get-FakeReaperLauncher); ModuleSampler = (Get-FakeModuleSampler) }
 $e2e = $suite.Clone(); $e2e.ReaperExe = $pwshExe; $e2e.ResultDir = Join-Path $Work 'e2e'
-if (@(Get-HarnessReaperProcessIds).Count) {
-    Write-Case '(a reaper.exe is running on this machine: the end-to-end cases could not run)' $false $true
-} else {
-    $r = Invoke-HarnessSuite @e2e -SelfTestHooks $hooks
-    $rowsOut = @($r.runs[0].scenarios)
-    $notPass = @($rowsOut | Where-Object { $_.status -ne 'PASS' } | ForEach-Object { "$($_.id)=$($_.status): $($_.detail)" })
-    Write-Case "end to end: every row of the fixture configuration passes against the stand-in ($($notPass -join ' | '))" $false ($r.verdict -eq 'PASS' -and $notPass.Count -eq 0 -and $rowsOut.Count -eq 22)
-    Write-Case 'end to end: learn ran once, first, and proved the private copy; the module check over all launches passed' $false (
-        $rowsOut[0].id -eq 'learn' -and $rowsOut[0].status -eq 'PASS' -and $rowsOut[0].facts.modules -eq 'Proven' -and $r.runs[0].moduleCheck.status -eq 'PASS' -and @($seenArgs | Where-Object { $_ -notmatch 'renderproject' }).Count -ge 5)
-    Write-Case 'end to end: every launch is counted and the default resource directory is unchanged' $false ($r.launches -eq $seenArgs.Count -and $r.runs[0].launches -eq $seenArgs.Count -and $r.runs[0].defaultCfgDir.unchanged -and $r.runs[0].reaperProcessesLeft -eq 0)
-    $path = Write-HarnessResult -Data $r -ResultDir $e2e.ResultDir
-    $json = [IO.File]::ReadAllText($path)
-    $back = ConvertFrom-HarnessJson $json
-    Write-Case 'result file: valid JSON with schema 1, the plugin hashes (12 hex digits) and no local path' $false (
-        $back['schema'] -eq 1 -and $back['plugins'][0]['sha256'] -cmatch '^[0-9a-f]{12}$' -and $json -notmatch '[A-Za-z]:\\\\' -and (Split-Path -Leaf $path) -cmatch "-fixture-$($back['buildLabel'])\.json$")
-    Write-Case 'end to end: the work files of an all-green round are removed' $false (-not (Test-Path -LiteralPath (Join-Path $e2e.ResultDir 'work')) -or @(Get-ChildItem -LiteralPath (Join-Path $e2e.ResultDir 'work') -Recurse -File).Count -eq 0)
-    # The module list shows the release build of the same name: not the private copy, so no conclusion (INCOMPLETE)
-    $sameName = Join-Path $env:COMMONPROGRAMFILES 'VST3\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3' # the release build of the shield case
-    $foreignSampler = { param($proc) @($sameName) }.GetNewClosure()
-    $r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks @{ Launcher = $hooks.Launcher; ModuleSampler = $foreignSampler }
-    Write-Case 'end to end: a same-name binary from outside the private directory makes learn and the round INCOMPLETE, and nothing else runs' $true (
-        $r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].status -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like 'not the private copy*' -and $r.runs[0].scenarios[1].detail -like 'not run: learning*' -and $r.runs[0].moduleCheck.status -eq 'INCOMPLETE')
-    $r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks @{ Launcher = $hooks.Launcher; ModuleSampler = { param($proc) @() } }
-    Write-Case 'end to end: a tested binary never seen loaded makes learn INCOMPLETE (the private copy is not proven)' $true ($r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like '*not proven*')
-    Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = @{ ($plugins.get_Keys() | Where-Object { $_ -like '*Gain*' }) = $plugins[($plugins.get_Keys() | Where-Object { $_ -like '*Gain*' })] }; Seen = $seenArgs }
-    $r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks $hooks
-    Write-Case 'end to end: a plugin REAPER cannot add makes learn FAIL with the plugin named, and the round FAIL' $true ($r.verdict -eq 'FAIL' -and $r.runs[0].scenarios[0].status -eq 'FAIL' -and $r.runs[0].scenarios[0].detail -like 'bus could not be added*')
-}
+$r = Invoke-WithSuiteCommand 'Get-HarnessReaperProcessIds' { 4242 } { Invoke-HarnessSuite @e2e -SelfTestHooks $hooks }
+Write-Case 'entry: a reaper.exe already running makes the whole suite SKIPPED with that reason, REAPER never started' $true ($r.verdict -ceq 'SKIPPED' -and $r.launches -eq 0 -and $seenArgs.Count -eq 0 -and @($r.skipReasons -match '^a reaper\.exe not started by this tool').Count -eq 1)
+
+$r = Invoke-HarnessSuite @e2e -SelfTestHooks $hooks
+$rowsOut = @($r.runs[0].scenarios)
+$notPass = @($rowsOut | Where-Object { $_.status -ne 'PASS' } | ForEach-Object { "$($_.id)=$($_.status): $($_.detail)" })
+Write-Case "end to end: every row of the fixture configuration passes against the stand-in ($($notPass -join ' | '))" $false ($r.verdict -eq 'PASS' -and $notPass.Count -eq 0 -and $rowsOut.Count -eq 22)
+Write-Case 'end to end: learn ran once, first, and proved the private copy; the module check over all launches passed' $false (
+    $rowsOut[0].id -eq 'learn' -and $rowsOut[0].status -eq 'PASS' -and $rowsOut[0].facts.modules -eq 'Proven' -and $r.runs[0].moduleCheck.status -eq 'PASS' -and @($seenArgs | Where-Object { $_ -notmatch 'renderproject' }).Count -ge 5)
+Write-Case 'end to end: every launch is counted and the default resource directory is unchanged' $false ($r.launches -eq $seenArgs.Count -and $r.runs[0].launches -eq $seenArgs.Count -and $r.runs[0].defaultCfgDir.unchanged -and $r.runs[0].reaperProcessesLeft -eq 0 -and $r.runs[0].stillRunning -eq $false)
+# Every path went through the host as one argument, in a work directory with a space and an apostrophe in its name
+$rendered = @($seenArgs | Where-Object { $_ -match '-renderproject' }).Count
+Write-Case 'end to end: projects and the Lua driver reached the stand-in without quotes of their own' $false ($rendered -gt 0 -and @($seenArgs | Where-Object { $_.Contains('"') }).Count -eq 0)
+$path = Write-HarnessResult -Data $r -ResultDir $e2e.ResultDir
+$json = [IO.File]::ReadAllText($path)
+$back = ConvertFrom-HarnessJson $json
+Write-Case 'result file: valid JSON with schema 1, the plugin hashes (12 hex digits) and no local path' $false (
+    $back['schema'] -eq 1 -and $back['plugins'][0]['sha256'] -cmatch '^[0-9a-f]{12}$' -and $json -notmatch '[A-Za-z]:\\\\' -and (Split-Path -Leaf $path) -cmatch "-fixture-$($back['buildLabel'])\.json$")
+Write-Case 'end to end: the work files of an all-green round are removed' $false (-not (Test-Path -LiteralPath (Join-Path $e2e.ResultDir 'work')) -or @(Get-ChildItem -LiteralPath (Join-Path $e2e.ResultDir 'work') -Recurse -File).Count -eq 0)
+
+# ---- what a round counts as left behind ----
+$oneScenario = @{ Only = '^chain-offline-48000$'; NoNegative = $true }
+# A reaper.exe of somebody else appearing while the round runs: the locks are free between launches, so that can happen
+$byNameCalls = @{ N = 0 }
+$r = Invoke-WithSuiteCommand 'Get-HarnessReaperProcessIds' { $byNameCalls.N++; if ($byNameCalls.N -gt 1) { 4242 } }.GetNewClosure() { Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $hooks }
+Write-Case 'left behind: only a reaper.exe of somebody else on the machine does not turn a green round red, and is not counted' $false ($r.verdict -ceq 'PASS' -and $r.runs[0].verdict -ceq 'PASS' -and $r.runs[0].reaperProcessesLeft -eq 0)
+# A process this round started, and no launch reported: the host threw after the start
+$leftBox = @{ Pid = 0 }
+$leftHooks = @{ Launcher = (New-TrackedLauncher (New-StandIn 'Start-Sleep -Seconds 60' @{}) $leftBox); ModuleSampler = { param($proc) throw 'the module list broke' } }
+$r = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $leftHooks
+try { Write-Case 'left behind: a process this round started that did not exit makes the round FAIL, and is counted' $true ($leftBox.Pid -gt 0 -and -not (& $gone $leftBox.Pid) -and $r.verdict -ceq 'FAIL' -and $r.runs[0].verdict -ceq 'FAIL' -and $r.runs[0].reaperProcessesLeft -eq 1 -and $r.runs[0].stillRunning -eq $false) }
+finally { if ($leftBox.Pid) { & $endStandIn $leftBox.Pid } }
+
+# ---- a process the watchdog could not end, in a whole run of two rounds ----
+$stuckBox = @{ Pid = 0 }
+$stuckHooks = @{ Launcher = (New-TrackedLauncher $hooks.Launcher $stuckBox); ModuleSampler = $hooks.ModuleSampler; Stopper = $noStop }
+$launchesBefore = $seenArgs.Count
+$r = Invoke-HarnessSuite @e2e -Only '^neg-killed$' -Repeat 2 -SelfTestHooks $stuckHooks
+try {
+    Write-Case 'end to end: a process that could not be ended makes the round and the run INCOMPLETE, not FAIL, and it is counted' $true ($r.verdict -ceq 'INCOMPLETE' -and $r.runs[0].verdict -ceq 'INCOMPLETE' -and $r.runs[0].stillRunning -eq $true -and $r.runs[0].reaperProcessesLeft -eq 1 -and -not (& $gone $stuckBox.Pid))
+    Write-Case 'end to end: after it no further round runs and nothing else was started' $true (@($r.runs).Count -eq 1 -and $r.runs[0].stoppedBecause -like '*could not be ended*' -and $r.launches -eq 1 -and $seenArgs.Count -eq $launchesBefore + 1)
+    Write-Case 'end to end: the GUI lock stays held after the run' $true ((& $probeExit) -eq 1)
+} finally { if ($stuckBox.Pid) { & $endStandIn $stuckBox.Pid }; & $releaseKept }
+# A negative case of a configuration expecting just that: its row is PASS, and the round still is not green
+$ownStuck = & $writeVariant { param($c) & $noExt $c; $c.limits = @{ renderTimeoutSec = 1 }; $c.scenarios = @(@{ id = 'one'; kind = 'render'; layout = 'chain' }); $c.negative = @(@{ id = 'own-stuck'; kind = 'render'; layout = 'chain'; expect = 'INCOMPLETE'; expectDetail = 'could not end process' }) }
+$ownStuck.ReaperExe = $pwshExe; $ownStuck.ResultDir = $e2e.ResultDir
+$ownBox = @{ Pid = 0 }
+$sleepRender = New-StandIn 'Start-Sleep -Seconds 60' @{}
+$fakeLaunch = $hooks.Launcher
+$renderHangs = { param($psi) if ('-renderproject' -cin @($psi.ArgumentList)) { $sleeper = & $sleepRender $psi; $ownBox.Pid = $sleeper.Id; $sleeper } else { & $fakeLaunch $psi } }.GetNewClosure()
+$r = Invoke-HarnessSuite @ownStuck -Only '^own-stuck$' -SelfTestHooks @{ Launcher = $renderHangs; ModuleSampler = $hooks.ModuleSampler; Stopper = $noStop }
+try { Write-Case 'end to end: every row green and the module check too, but a process could not be ended: the round is INCOMPLETE' $true ($ownBox.Pid -gt 0 -and @($r.runs[0].scenarios | Where-Object { $_.status -cne 'PASS' }).Count -eq 0 -and $r.runs[0].moduleCheck.status -ceq 'PASS' -and $r.runs[0].verdict -ceq 'INCOMPLETE' -and $r.verdict -ceq 'INCOMPLETE') }
+finally { if ($ownBox.Pid) { & $endStandIn $ownBox.Pid }; & $releaseKept }
+
+# ---- a default resource directory that could not be listed in full, in a whole run of two rounds ----
+$closedListing = { [ordered]@{ 'reaper.ini' = '1|1'; 'Data' = 'unreadable' } }
+$r = Invoke-WithSuiteCommand 'Get-HarnessDefaultCfgSnapshot' $closedListing { Invoke-HarnessSuite @e2e @oneScenario -Repeat 2 -SelfTestHooks $hooks }
+Write-Case 'end to end: part of the default resource directory could not be listed, every row green: INCOMPLETE, not FAIL' $true ($r.verdict -ceq 'INCOMPLETE' -and $r.runs[0].verdict -ceq 'INCOMPLETE' -and @($r.runs[0].scenarios | Where-Object { $_.status -cne 'PASS' }).Count -eq 0)
+Write-Case 'end to end: after that no further round runs, the row says why and names the entry' $true (@($r.runs).Count -eq 1 -and $r.runs[0].stoppedBecause -like '*could not be listed*' -and $r.runs[0].defaultCfgDir.unchanged -eq $false -and @($r.runs[0].defaultCfgDir.changed).Count -eq 0 -and ($r.runs[0].defaultCfgDir.unreadable -join ',') -ceq 'Data')
+$closedLater = @{ N = 0 }
+$turnsUnreadable = { $closedLater.N++; if ($closedLater.N -eq 1) { [ordered]@{ 'Data' = 'dir'; 'Data\a.ini' = '1|1' } } else { [ordered]@{ 'Data' = 'unreadable' } } }.GetNewClosure()
+$r = Invoke-WithSuiteCommand 'Get-HarnessDefaultCfgSnapshot' $turnsUnreadable { Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $hooks }
+Write-Case 'end to end: a directory that could be listed before and not after is INCOMPLETE too: what is below it was not seen to change' $true ($r.verdict -ceq 'INCOMPLETE' -and $r.runs[0].stoppedBecause -notlike '*changed*')
+$changedToo = @{ N = 0 }
+$reallyChanged = { $changedToo.N++; [ordered]@{ 'reaper.ini' = "1|$($changedToo.N)"; 'Data' = 'unreadable' } }.GetNewClosure()
+$r = Invoke-WithSuiteCommand 'Get-HarnessDefaultCfgSnapshot' $reallyChanged { Invoke-HarnessSuite @e2e @oneScenario -Repeat 2 -SelfTestHooks $hooks }
+Write-Case 'end to end: a file that changed next to what could not be listed is FAIL, no further round runs, and the change is named' $true ($r.verdict -ceq 'FAIL' -and @($r.runs).Count -eq 1 -and ($r.runs[0].defaultCfgDir.changed -join ',') -ceq 'changed:reaper.ini' -and $r.runs[0].stoppedBecause -like '*changed*')
+
+# ---- the private copy ----
+# The module list shows the release build of the same name: not the private copy, so no conclusion (INCOMPLETE)
+$sameName = Join-Path $env:COMMONPROGRAMFILES 'VST3\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3' # the release build of the shield case
+$foreignSampler = { param($proc) @($sameName) }.GetNewClosure()
+$r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks @{ Launcher = $hooks.Launcher; ModuleSampler = $foreignSampler }
+Write-Case 'end to end: a same-name binary from outside the private directory makes learn and the round INCOMPLETE, and nothing else runs' $true (
+    $r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].status -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like 'not the private copy*' -and $r.runs[0].scenarios[1].detail -like 'not run: learning*' -and $r.runs[0].moduleCheck.status -eq 'INCOMPLETE')
+$r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks @{ Launcher = $hooks.Launcher; ModuleSampler = { param($proc) @() } }
+Write-Case 'end to end: a tested binary never seen loaded makes learn INCOMPLETE (the private copy is not proven)' $true ($r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like '*not proven*')
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = @{ ($plugins.get_Keys() | Where-Object { $_ -like '*Gain*' }) = $plugins[($plugins.get_Keys() | Where-Object { $_ -like '*Gain*' })] }; Seen = $seenArgs }
+$r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks $hooks
+Write-Case 'end to end: a plugin REAPER cannot add makes learn FAIL with the plugin named, and the round FAIL' $true ($r.verdict -eq 'FAIL' -and $r.runs[0].scenarios[0].status -eq 'FAIL' -and $r.runs[0].scenarios[0].detail -like 'bus could not be added*')
 
 # ---- the fixture extension ----
 $ext = Import-HarnessExtensions (Read-HarnessConfigExtensions $configFile)

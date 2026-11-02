@@ -219,6 +219,8 @@ function Stop-HostRefuse([string]$Why) { throw [System.InvalidOperationException
 # Sampler and ModuleSampler are for the self-test only too: they replace Get-HarnessProcessSample and
 # Get-HarnessProcessModulePaths. So is Stopper: it replaces the call that ends the process, so a process that cannot
 # be ended can be tested.
+# StartedList: a list of the caller; it gets one row (Pid, StartUtc) right after the start, so that the caller knows of
+# the process even when something later in here throws. Get-HarnessOwnProcessesLeft reads those rows.
 function Invoke-HarnessHost {
     param(
         [Parameter(Mandatory)][string]$ReaperExe,
@@ -233,7 +235,8 @@ function Invoke-HarnessHost {
         [scriptblock]$Launcher = $null,
         [scriptblock]$Sampler = $null,
         [scriptblock]$ModuleSampler = $null,
-        [scriptblock]$Stopper = $null
+        [scriptblock]$Stopper = $null,
+        $StartedList = $null
     )
     if (-not (Test-HarnessLockHeld -Lock $Lock -Name (Get-HarnessDefaultGuiLock))) { Stop-HostRefuse 'REAPER is only started while holding the default GUI lock: pass the object from Enter-HarnessLocks as -Lock' }
     $cfgArgs = @('-nosplash', '-newinst', '-cfgfile', (Get-HarnessCfgArgument))
@@ -250,6 +253,7 @@ function Invoke-HarnessHost {
     $startedUtc = [DateTime]::UtcNow # taken before the start: files written by this launch are never older
     $proc = $Launcher ? (& $Launcher $psi) : [Diagnostics.Process]::Start($psi)
     $ownPid = $proc.Id
+    if ($null -ne $StartedList) { $StartedList.Add([pscustomobject]@{ Pid = $ownPid; StartUtc = (Get-HarnessProcessStartUtc $proc) }) }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $status = $null
     $modal = $null
@@ -329,9 +333,31 @@ function Invoke-HarnessHost {
     }
 }
 
-# IDs of the reaper.exe processes on this machine right now (taken before and after: if somebody else's REAPER is
-# running the suite does not run; after a run none of ours may be left).
+# IDs of the reaper.exe processes on this machine right now, whoever started them: if there are any before a run, the
+# suite does not run. Only for that check: a process found by name may be anybody's. What a run itself left behind is
+# Get-HarnessOwnProcessesLeft.
 function Get-HarnessReaperProcessIds { Get-Process -Name reaper -ErrorAction SilentlyContinue | ForEach-Object { $_.Id } }
 
+# When a process started, in UTC, or $null when that cannot be read. Through the get_ method: a property that throws
+# is swallowed by PowerShell into an empty value.
+function Get-HarnessProcessStartUtc($Process) {
+    try { $Process.get_StartTime().ToUniversalTime() } catch { $null }
+}
+
+# The rows of Started (Pid, StartUtc; see StartedList of Invoke-HarnessHost) whose process is still alive. A PID alone
+# proves nothing, since Windows hands out the number again once a process is gone, so the start time has to match as well.
+# A row whose start time was never read cannot be told apart from a new process of that number and counts when its PID
+# is alive: better a round that is red for nothing than a process of ours nobody noticed. StartOf: PID -> start time
+# in UTC, or $null when no such process can be read (injectable for the self-test); a process that cannot be read now
+# is not ours, since this tool could read what it started itself.
+function Get-HarnessOwnProcessesLeft {
+    param([object[]]$Started = @(), [scriptblock]$StartOf = $null)
+    $lookup = $StartOf ?? { param($id) $found = Get-Process -Id $id -ErrorAction SilentlyContinue; $found ? (Get-HarnessProcessStartUtc $found) : $null }
+    $Started | Where-Object {
+        $now = & $lookup $_.Pid
+        $null -ne $now -and ($null -eq $_.StartUtc -or $now -eq $_.StartUtc)
+    }
+}
+
 Export-ModuleMember -Function Get-HarnessModalVerdict, ConvertTo-HarnessSafeTitle, Resolve-HarnessExitedUtc, Invoke-HarnessHost, Get-HarnessReaperProcessIds, Get-HarnessProcessSample,
-    Get-HarnessMarkProblem, Get-HarnessModuleVerdict, Get-HarnessProcessModulePaths, Test-HarnessSameFile
+    Get-HarnessMarkProblem, Get-HarnessModuleVerdict, Get-HarnessProcessModulePaths, Test-HarnessSameFile, Get-HarnessProcessStartUtc, Get-HarnessOwnProcessesLeft

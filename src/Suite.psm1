@@ -5,7 +5,8 @@
 #   Select-HarnessScenarios     what -Only and -NoNegative pick (nothing picked is a usage error)
 #   Get-HarnessWorstStatus      worst of a set of outcomes; an empty set is INCOMPLETE, never PASS
 #   Get-HarnessRunVerdict       a round: the worst row, but FAIL whenever the default resource directory changed or a
-#                               reaper.exe was left behind, however green the rows are
+#                               process of this round was left behind, and at least INCOMPLETE when that directory could
+#                               not be listed or a process could not be ended, however green the rows are
 #   Get-HarnessNegativeVerdict  a negative case passes only with the expected outcome AND the expected reason
 #   Invoke-HarnessGuardNegative the guard negative cases: the real entry point run again in-process
 #   Invoke-HarnessSuite         everything above for one configuration
@@ -81,15 +82,43 @@ function Get-HarnessWorstStatus([string[]]$StatusList) {
     'PASS'
 }
 
-function Get-HarnessRunVerdict {
-    param([string[]]$RowStatuses, [bool]$CfgUnchanged, [int]$Residual)
-    if (-not $CfgUnchanged -or $Residual -gt 0) { return 'FAIL' }
-    Get-HarnessWorstStatus $RowStatuses
+# Pure function: the changes of the default resource directory that were really seen (Changed and Unreadable as
+# Compare-HarnessDefaultCfgSnapshot gives them). An entry listed once and unreadable the other time shows up as changed
+# or removed, and so does everything below it: that is the same lack of evidence as the entry being unreadable, not a
+# change somebody saw. A change anywhere else counts, whatever could not be read.
+function Get-HarnessCfgChangesSeen {
+    param([string[]]$Changed = @(), [string[]]$Unreadable = @())
+    if ('.' -cin $Unreadable) { return }
+    $Changed | Where-Object {
+        $rel = $_ -replace '^(?:added|removed|changed):', ''
+        @($Unreadable | Where-Object { $rel -ieq $_ -or $rel.StartsWith("$_\", [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0
+    }
 }
 
-# Pure function: whether to go on with the next round. A changed default resource directory stops everything at once:
-# REAPER is not started again.
-function Get-HarnessRoundStop([bool]$CfgUnchanged) { $CfgUnchanged ? '' : 'the default resource directory changed' }
+# Pure function. CfgChanged: entries of the default resource directory were seen to change. Residual: processes this
+# round started that are still alive and that no launch reported. Those two are a FAIL. CfgUnreadable (part of that
+# directory could not be listed) is no conclusion: nothing was seen to change, it just cannot be shown that nothing did.
+# StillRunning (the watchdog reported a process it could not end) is no conclusion either: the launch was not finished,
+# and whatever came after did not run. Neither can be made green by the rows.
+function Get-HarnessRunVerdict {
+    param([string[]]$RowStatuses, [bool]$CfgChanged = $false, [bool]$CfgUnreadable = $false, [int]$Residual = 0, [bool]$StillRunning = $false)
+    if ($CfgChanged -or $Residual -gt 0) { return 'FAIL' }
+    $worst = Get-HarnessWorstStatus $RowStatuses
+    if ($worst -cne 'FAIL' -and ($CfgUnreadable -or $StillRunning)) { return 'INCOMPLETE' }
+    $worst
+}
+
+# Pure function: why no further round may run ('' when one may). A default resource directory that changed or could not
+# be listed stops everything at once, and so does a process that could not be ended: REAPER is not started again.
+function Get-HarnessRoundStop {
+    param([bool]$CfgChanged = $false, [bool]$CfgUnreadable = $false, [bool]$StillRunning = $false)
+    $why = @(
+        if ($CfgChanged) { 'the default resource directory changed' }
+        if ($CfgUnreadable) { 'the default resource directory could not be listed in full' }
+        if ($StillRunning) { 'a REAPER of this round could not be ended' }
+    )
+    $why -join '; '
+}
 
 # Pure function: the outcome of a negative row. The outcome alone is not enough: some outcomes come about without
 # the case having run at all (a lock that could not be taken leaves REAPER unstarted, and a watchdog case is then
@@ -201,7 +230,7 @@ function Invoke-HarnessSuite {
         [string]$CfgDir = '', [Parameter(Mandatory)][string]$Config, [Parameter(Mandatory)][string]$PluginDir, [Parameter(Mandatory)][string]$ResultDir,
         [Parameter(Mandatory)][string]$ReaperExe, [string[]]$SkipMarker = @(), [string[]]$ExtraGuiLock = @(), [string]$Only = '', [int]$Repeat = 1,
         [switch]$NoNegative, [string]$BuildLabel = '', [switch]$KeepWork,
-        [hashtable]$SelfTestHooks = @{} # self-test only: Launcher (a stand-in for REAPER), ModuleSampler
+        [hashtable]$SelfTestHooks = @{} # self-test only: Launcher (a stand-in for REAPER), ModuleSampler, Stopper
     )
     $null = Initialize-HarnessCfg $CfgDir # refuses (REFUSED) before anything is touched
     if ($Repeat -lt 1) { Stop-Usage '-Repeat must be at least 1' }
@@ -244,6 +273,7 @@ function Invoke-HarnessSuite {
         $ctx = New-HarnessContext -ReaperExe $ReaperExe -WorkDir $work -Driver $driver -Config $conf -Installed $installed -Locks $locks -SkipMarkers $SkipMarker -LuaExtensions $ext.Lua -Kinds $ext.Kinds
         if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
         if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
+        if ($SelfTestHooks['Stopper']) { $ctx.Stopper = $SelfTestHooks['Stopper'] }
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $rows = [Collections.Generic.List[object]]::new()
         $NotRun = ''
@@ -279,22 +309,30 @@ function Invoke-HarnessSuite {
         if (-not (Get-ChildItem -LiteralPath $work -Force)) { Remove-Item -LiteralPath $work -ErrorAction SilentlyContinue }
         $after = Get-HarnessDefaultCfgSnapshot
         $cmp = Compare-HarnessDefaultCfgSnapshot -Before $before -After $after
-        $strayCount = @(Get-HarnessReaperProcessIds).Count
+        $changesSeen = @(Get-HarnessCfgChangesSeen -Changed $cmp.Changed -Unreadable $cmp.Unreadable)
+        $dirChanged = $changesSeen.Count -gt 0
+        $dirUnreadable = @($cmp.Unreadable).Count -gt 0
+        # Only processes this round started count. The locks are free between launches, so a reaper.exe found by name may be
+        # another session's, which started after the preflight and says nothing about this round.
+        $ownLeft = @(Get-HarnessOwnProcessesLeft -Started $ctx.Started.ToArray())
+        $notEnded = [bool]$ctx.StillRunning
+        $unreported = @($ownLeft | Where-Object { -not $notEnded -or $_.Pid -ne $ctx.StillRunning.Pid })
         $statuses = @($rows | ForEach-Object { $_.status }) + $mods.Status
-        $verdict = Get-HarnessRunVerdict -RowStatuses $statuses -CfgUnchanged $cmp.Same -Residual $strayCount
+        $verdict = Get-HarnessRunVerdict -RowStatuses $statuses -CfgChanged $dirChanged -CfgUnreadable $dirUnreadable -Residual $unreported.Count -StillRunning $notEnded
         $counts = [ordered]@{}
         foreach ($st in 'PASS', 'FAIL', 'INCOMPLETE', 'SKIPPED') { $counts[$st] = @($rows | Where-Object { $_.status -eq $st }).Count }
         $runRow = [ordered]@{
             index = $k; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); verdict = $verdict; launches = $ctx.Launches; counts = $counts
-            defaultCfgDir = [ordered]@{ unchanged = $cmp.Same; entries = $cmp.Count; changed = @($cmp.Changed | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }) }
-            reaperProcessesLeft = $strayCount
+            defaultCfgDir = [ordered]@{ unchanged = $cmp.Same; entries = $cmp.Count; changed = @($changesSeen | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }); unreadable = @($cmp.Unreadable | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }) }
+            reaperProcessesLeft = $ownLeft.Count
+            stillRunning = $notEnded
             moduleCheck = [ordered]@{ status = $mods.Status; detail = (Hide-HarnessPaths $mods.Detail); launches = $mods.Facts.launches; foreign = @($mods.Facts.foreign); otherPlugins = $mods.Facts.otherPlugins }
             scenarios = $rows.ToArray()
         }
         $result.runs += $runRow
         Write-HarnessLine ("round {0}/{1}: {2}, {3} s, REAPER started {4} times, module check {5}, default resource directory {6}" -f $k, $Repeat, $verdict, $runRow.seconds, $ctx.Launches, $mods.Status,
-            ($cmp.Same ? 'unchanged' : "CHANGED: $(@($cmp.Changed | Select-Object -First 8) -join ', ')"))
-        $stop = Get-HarnessRoundStop -CfgUnchanged $cmp.Same
+            ($cmp.Same ? 'unchanged' : "$($dirChanged ? "CHANGED: $(@($changesSeen | Select-Object -First 8) -join ', ')" : 'not shown unchanged')$($dirUnreadable ? "; could not be listed: $(@($cmp.Unreadable | Select-Object -First 8) -join ', ')" : '')"))
+        $stop = Get-HarnessRoundStop -CfgChanged $dirChanged -CfgUnreadable $dirUnreadable -StillRunning $notEnded
         if ($stop) { $runRow.stoppedBecause = $stop; Write-HarnessLine "  no further rounds: $stop"; break }
     }
     $result.launches = $launches
@@ -311,5 +349,5 @@ function Write-HarnessResult {
     $path
 }
 
-Export-ModuleMember -Function Get-HarnessPreflight, Get-HarnessDefaultLabel, Get-HarnessWorstStatus, Get-HarnessRunVerdict, Get-HarnessRoundStop, Get-HarnessNegativeVerdict,
+Export-ModuleMember -Function Get-HarnessPreflight, Get-HarnessDefaultLabel, Get-HarnessWorstStatus, Get-HarnessCfgChangesSeen, Get-HarnessRunVerdict, Get-HarnessRoundStop, Get-HarnessNegativeVerdict,
     Invoke-HarnessGuardNegative, Invoke-HarnessNegativeRow, Select-HarnessScenarios, Test-HarnessNeedsLearn, Invoke-HarnessSuite, Write-HarnessResult
