@@ -68,7 +68,7 @@
   <gitleaks> dir . --no-banner --redact
   ```
 
-- hooks 在 `scripts/hooks/`：`commit-msg`（身份、恰好一个签名、零 AI 署名、隐私）与 `pre-push`（只推 `feat/*`、只快进、提交身份与隐私、gitleaks、gh 登录核对）。启用方式只用本仓的 git config，不改全局：
+- hooks 在 `scripts/hooks/`：`commit-msg`（身份、恰好一个签名、零 AI 署名、隐私）与 `pre-push`（只推 `feat/*`、只快进、提交身份与隐私、gitleaks、gh 登录核对）。我方提交的标题行与签名行不得含不可见字符（`branch-gate` 同样判红，外部贡献和合并提交不受此条约束）。启用方式只用本仓的 git config，不改全局：
 
   ```sh
   git config core.hooksPath scripts/hooks
