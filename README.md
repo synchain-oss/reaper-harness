@@ -30,12 +30,14 @@ your own REAPER setup.
 
 | kind | |
 |---|---|
-| `render` | renders a layout (tracks, folders, FX chains, parameters set by name) and compares it with a dry render, a repeat render or a variant (another block size, render mode, bypass or layout): bit-identical, or within a residual, at an expected lag, with peak and silence checks |
-| `device` | the dummy device runs at the configured block size and sample rate; every FX is loaded, not offline, reports the expected latency and reads back its parameters |
-| `savereopen` | saving and reopening keeps every FX and parameter, and the reopened project renders bit-identically |
+| `render` | renders a layout (tracks, folders, sends, pan and mute, FX chains with parameters set by name or named plugin states, a test signal per track) and compares it with a dry render, a repeat render or a variant (another block size, render mode, bypass or layout), or judges it on its own: bit-identical, or within a residual, at an expected lag, with peak, silence and per-channel level and balance checks; the master and any track as a stem of its own |
+| `device` | the dummy device runs at the configured block size, sample rate and anticipative FX setting; every FX is loaded, not offline, reports the expected latency, reads back its parameters and holds the state it was given |
+| `savereopen` | saving and reopening, once or many times, keeps every FX, parameter and state, and the reopened project renders bit-identically |
 | `instances` | adding and removing instances many times does not grow handles or memory beyond limits |
 
-Extensions add product-specific kinds and driver steps ([docs/EXTENDING.md](docs/EXTENDING.md)).
+A small JSFX that ships with the tool delays the signal and reports the delay as latency (or not), so plugin delay
+compensation can be tested without depending on the effects that come with REAPER. Extensions add
+product-specific kinds and driver steps ([docs/EXTENDING.md](docs/EXTENDING.md)).
 
 ## Quick start
 

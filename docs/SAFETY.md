@@ -133,6 +133,14 @@ what every other project of the round uses. `TrackFX_AddByName` matches loosely 
 so the full name `VST3: <Name> (<Vendor>)` is used and checked after adding: the displayed name, `fx_ident` and the
 class ID of the saved block must all be the expected ones. A plugin that does not load is FAIL.
 
+A named state is a block REAPER saved for you (see [CONFIG.md](CONFIG.md#states)). It is not added by name: the
+project the learn launch opens already holds the block, REAPER loads it as it loads any saved project, and the
+block REAPER saves back must be the one it was given. Before anything starts, the block's name and class ID must
+be the plugin's (from `moduleinfo.json`); a block of another plugin is a usage error. Of a template project only
+that one block is read: other tracks, other plugins and file paths in it never reach the console, the logs or the
+result file, and the block itself only goes into projects in the work directory. A JSFX shipped with the tool is
+copied into the private configuration directory and checked by the name REAPER shows and by its path there.
+
 ## Scripts
 
 Every script runs under `Set-StrictMode -Version Latest`. PowerShell variable names are case insensitive, so a loop

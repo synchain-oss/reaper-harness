@@ -2,12 +2,16 @@
 #
 # Learning the plugin blocks, and proving which plugin binary REAPER loaded.
 # Once per round, one REAPER launch adds every plugin variant the round needs (each configured plugin with its
-# default state, plus every distinct parameter set a layout asks for) by name, sets the parameters by name, reads
-# them back, and saves the project. The plugin blocks REAPER wrote into that project are what every other project of
-# the round uses, so no plugin state is ever written by hand.
+# default state, plus every distinct parameter set and named state a layout asks for) by name, sets the parameters
+# by name, reads them back, and saves the project. A variant with a named state is not added by name: the project
+# the launch opens already has its block (from the template or state file), so REAPER loads that state. The plugin
+# blocks REAPER wrote into the saved project are what every other project of the round uses, so no plugin state is
+# ever written by hand.
 # Checks: each FX was added (TrackFX_AddByName matches loosely, so the name REAPER shows must equal the expected
 # "VST3: <Name> (<Vendor>)" exactly), is not offline, fx_ident names the private binary and the class ID from
 # moduleinfo.json, the saved block has that class ID too, and every parameter exists and reads back as configured.
+# A named state without parameters on top must come back from REAPER as it was given. A JSFX shipped with the tool
+# is checked by its name ("JS: <desc>"), its path under Effects in fx_ident and in the saved block.
 # Proof of the private copy: the module list of the REAPER process, sampled while it ran, must show each tested
 # binary from the private plugins directory and no file of the same name from anywhere else.
 #   Get-HarnessLearnVariants  the variants a set of scenarios needs (pure)
@@ -27,11 +31,12 @@ Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
 function Get-HarnessReaperName($Info) { "VST3: $($Info.Name) ($($Info.Vendor))" }
 
 # Variants: one per configured plugin with no parameters (always: the module proof and the instances kind need
-# them), then every distinct FX variant of the layouts the scenarios use, in first-use order.
+# them), then every distinct FX variant of the layouts the scenarios use, in first-use order. State: the name of a
+# state of the plugin ('' for its default state).
 function Get-HarnessLearnVariants {
     param([Parameter(Mandatory)]$Config, [object[]]$Scenarios = @())
     $out = [ordered]@{}
-    foreach ($id in $Config.Plugins.get_Keys()) { $out["$id|"] = [pscustomobject]@{ Key = "$id|"; Plugin = $id; Params = [ordered]@{} } }
+    foreach ($id in $Config.Plugins.get_Keys()) { $out["$id|"] = [pscustomobject]@{ Key = "$id|"; Plugin = $id; State = ''; Params = [ordered]@{} } }
     $layoutIds = [Collections.Generic.List[string]]::new()
     foreach ($s in $Scenarios) {
         foreach ($name in 'layout') { if ($s.PSObject.Properties[$name] -and $s.$name -and $s.$name -notlike '@*' -and $s.$name -cnotin $layoutIds) { $layoutIds.Add($s.$name) } }
@@ -39,7 +44,7 @@ function Get-HarnessLearnVariants {
     }
     foreach ($lid in $layoutIds) {
         foreach ($t in $Config.Layouts[$lid].Tracks) {
-            foreach ($fx in $t.Fx) { if (-not $out.Contains($fx.Variant)) { $out[$fx.Variant] = [pscustomobject]@{ Key = $fx.Variant; Plugin = $fx.Plugin; Params = $fx.Params } } }
+            foreach ($fx in $t.Fx) { if (-not $out.Contains($fx.Variant)) { $out[$fx.Variant] = [pscustomobject]@{ Key = $fx.Variant; Plugin = $fx.Plugin; State = $fx.State; Params = $fx.Params } } }
         }
     }
     , @($out.get_Values())
@@ -52,33 +57,44 @@ function Split-HarnessFxIdent([string]$Ident) {
     [pscustomobject]@{ Path = $m.Groups[1].Value; Cid = $m.Groups[2].Value.ToUpperInvariant() }
 }
 
-# Pure function. Variants and Installed (id -> install row with Binary and Info) describe what was asked; Report is
+# Pure function. Variants, Installed (VST3 id -> install row with Binary and Info) and Jsfx (JSFX id -> row with Name,
+# AddName, Ident) describe what was asked; States ("<plugin>@<state>" -> state with Lines) the named states; Report is
 # the driver's key=value table; Saved is Get-HarnessFxBlocks of the saved project; SameFile (a, b) decides whether
 # two paths are one file (default Test-HarnessSameFile). Returns @{ Fail; Foreign; Blocks (variant key -> lines);
-# Names (id -> REAPER name) }.
+# Names (id -> name REAPER shows); AddNames (id -> name to add it by) }.
 function Test-HarnessLearnReport {
-    param([Parameter(Mandatory)][object[]]$Variants, [Parameter(Mandatory)][hashtable]$Installed, [Parameter(Mandatory)][hashtable]$Report, $Saved, [scriptblock]$SameFile)
+    param([Parameter(Mandatory)][object[]]$Variants, [Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Jsfx = @{}, [System.Collections.IDictionary]$States = @{},
+          [Parameter(Mandatory)][hashtable]$Report, $Saved, [scriptblock]$SameFile)
     $same = $SameFile ?? ${function:Test-HarnessSameFile}
     $fail = [Collections.Generic.List[string]]::new()
     $foreign = [Collections.Generic.List[string]]::new()
     $blocks = @{}
     $names = @{}
+    $addNames = @{}
     for ($n = 1; $n -le $Variants.Count; $n++) {
         $v = $Variants[$n - 1]
-        $row = $Installed[$v.Plugin]
-        $want = Get-HarnessReaperName $row.Info
+        $js = $Jsfx.ContainsKey($v.Plugin) ? $Jsfx[$v.Plugin] : $null
+        $row = $js ? $null : $Installed[$v.Plugin]
+        $want = $js ? $js.Name : (Get-HarnessReaperName $row.Info)
         $names[$v.Plugin] = $want
+        $addNames[$v.Plugin] = $js ? $js.AddName : $want
         $k = "fx${n}_"
-        $label = "$($v.Plugin)$($v.Params.get_Count() ? " (variant $n)" : '')"
+        $label = "$($v.Plugin)$($v.State ? " state $($v.State)" : '')$($v.Params.get_Count() ? " (variant $n)" : '')"
         $idx = $Report["${k}idx"]
-        if ($idx -ne '0') { $fail.Add("$label could not be added as '$want' (index $idx): the plugin did not load or is not known to REAPER"); continue }
+        if ($idx -ne '0') {
+            $fail.Add($v.State ? "$label did not load from its state block (index $idx)" : "$label could not be added as '$($addNames[$v.Plugin])' (index $idx): the plugin did not load or is not known to REAPER"); continue
+        }
         if ($Report["${k}name"] -cne $want) { $fail.Add("$label was added as '$($Report["${k}name"])', expected '$want' (another plugin matched the name)"); continue }
         if ($Report["${k}offline"] -ne 'false') { $fail.Add("$label is offline (the plugin failed to load)") }
-        $Ident = Split-HarnessFxIdent ([string]$Report["${k}ident"])
-        if (-not $Ident.Path) { $fail.Add("$label has no VST3 fx_ident") }
-        else {
-            if (-not (& $same $Ident.Path $row.Binary)) { $foreign.Add("$label was loaded from $(Hide-HarnessPaths $Ident.Path), not from the private copy") }
-            if ($Ident.Cid -cne $row.Info.Cid) { $fail.Add("$label class ID in fx_ident is $($Ident.Cid), moduleinfo.json says $($row.Info.Cid)") }
+        if ($js) {
+            if ([string]$Report["${k}ident"] -cne $js.Ident) { $fail.Add("$label has fx_ident '$($Report["${k}ident"])', expected '$($js.Ident)' (another effect of that name)") }
+        } else {
+            $Ident = Split-HarnessFxIdent ([string]$Report["${k}ident"])
+            if (-not $Ident.Path) { $fail.Add("$label has no VST3 fx_ident") }
+            else {
+                if (-not (& $same $Ident.Path $row.Binary)) { $foreign.Add("$label was loaded from $(Hide-HarnessPaths $Ident.Path), not from the private copy") }
+                if ($Ident.Cid -cne $row.Info.Cid) { $fail.Add("$label class ID in fx_ident is $($Ident.Cid), moduleinfo.json says $($row.Info.Cid)") }
+            }
         }
         $i = 0
         foreach ($pn in $v.Params.get_Keys()) {
@@ -89,11 +105,22 @@ function Test-HarnessLearnReport {
         $track = "learn-$n"
         $list = @(($null -ne $Saved -and $Saved.Contains($track)) ? $Saved[$track] : @())
         if ($list.Count -ne 1) { $fail.Add("$label : the saved project has $($list.Count) plugin blocks on its track, expected 1"); continue }
-        if ($list[0].Cid -cne $row.Info.Cid) { $fail.Add("$label : the saved block has class ID $($list[0].Cid), moduleinfo.json says $($row.Info.Cid)"); continue }
-        if ($list[0].Name -cne $want) { $fail.Add("$label : the saved block is named '$($list[0].Name)', expected '$want'"); continue }
+        if ($js) {
+            if ($list[0].Kind -ne 'JS' -or $list[0].File -cne $js.Ident) { $fail.Add("$label : the saved block is not the JS block of $($js.Ident)"); continue }
+        } else {
+            if ($list[0].Cid -cne $row.Info.Cid) { $fail.Add("$label : the saved block has class ID $($list[0].Cid), moduleinfo.json says $($row.Info.Cid)"); continue }
+            if ($list[0].Name -cne $want) { $fail.Add("$label : the saved block is named '$($list[0].Name)', expected '$want'"); continue }
+        }
+        # A state with nothing set on top must be what the plugin holds after loading it (the header line aside)
+        $sk = "$($v.Plugin)@$($v.State)"
+        if ($v.State -and -not $v.Params.get_Count() -and $States.Contains($sk)) {
+            if ((@($States[$sk].Lines | Select-Object -Skip 1) -join "`n") -cne (@($list[0].Lines | Select-Object -Skip 1) -join "`n")) {
+                $fail.Add("$label : the plugin saved its state back changed, so it does not hold the state as given"); continue
+            }
+        }
         $blocks[$v.Key] = $list[0].Lines
     }
-    [pscustomobject]@{ Fail = $fail.ToArray(); Foreign = $foreign.ToArray(); Blocks = $blocks; Names = $names }
+    [pscustomobject]@{ Fail = $fail.ToArray(); Foreign = $foreign.ToArray(); Blocks = $blocks; Names = $names; AddNames = $addNames }
 }
 
 # The learn launch. Returns an outcome (Status PASS / FAIL / INCOMPLETE, Detail, Facts) and fills Ctx.Blocks and
@@ -103,21 +130,28 @@ function Invoke-HarnessLearn {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][object[]]$Variants, [scriptblock]$SameFile = $null)
     $same = $SameFile ?? ${function:Test-HarnessSameFile}
     $saveAs = Join-Path $Ctx.Work 'learn.rpp'
+    $project = Join-Path $Ctx.Work 'learn-in.rpp'
     if (Test-Path -LiteralPath $saveAs) { Remove-Item -LiteralPath $saveAs }
-    $Ctx.Files.Add($saveAs)
+    $Ctx.Files.Add($saveAs); $Ctx.Files.Add($project)
+    $stateLines = @{}
+    foreach ($v in $Variants) { if ($v.State) { $stateLines[$v.Key] = $Ctx.States["$($v.Plugin)@$($v.State)"].Lines } }
+    Write-HarnessText -Path $project -Text (New-HarnessLearnProjectText -Variants $Variants -States $stateLines)
     $fx = @(foreach ($v in $Variants) {
-            $row = $Ctx.Installed[$v.Plugin]
-            @{ name = (Get-HarnessReaperName $row.Info); params = @(foreach ($pn in $v.Params.get_Keys()) { @{ name = $pn; value = [double]$v.Params[$pn].Normalized } }) }
+            $js = $Ctx.Jsfx.ContainsKey($v.Plugin) ? $Ctx.Jsfx[$v.Plugin] : $null
+            @{ name = ($js ? $js.AddName : (Get-HarnessReaperName $Ctx.Installed[$v.Plugin].Info)); preloaded = [bool]$v.State
+               params = @(foreach ($pn in $v.Params.get_Keys()) { @{ name = $pn; value = [double]$v.Params[$pn].Normalized } }) }
         })
     Set-HarnessAudioConfig -Sr 48000 -Block 512
-    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name 'learn' -Step learn -Job @{ fx = $fx; saveAs = $saveAs } -TimeoutSec ([double]$Ctx.Limits.learnTimeoutSec)
+    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name 'learn' -Step learn -Job @{ fx = $fx; saveAs = $saveAs; project = $project } -TimeoutSec ([double]$Ctx.Limits.learnTimeoutSec)
     $expected = @{}
     foreach ($row in $Ctx.Installed.get_Values()) { $expected[$row.BinaryLeaf] = $row.Binary }
     $mod = Get-HarnessModuleVerdict -Expected $expected -Seen $lua.Run.Modules -SameFile $same
     $facts = [ordered]@{ variants = $Variants.Count; modules = $mod.Verdict; binaries = $mod.Binaries }
+    $used = @($Variants | Where-Object { $_.State } | ForEach-Object { "$($_.Plugin)@$($_.State)" } | Select-Object -Unique)
+    if ($used.Count) { $facts.states = @($used | ForEach-Object { [ordered]@{ plugin = $Ctx.States[$_].Plugin; state = $Ctx.States[$_].State; sha256 = $Ctx.States[$_].Sha } }) }
     if ($lua.Why) { return New-HarnessOutcome INCOMPLETE "the learn launch failed: $($lua.Why)" $facts }
     $Saved = (Test-Path -LiteralPath $saveAs) ? (Get-HarnessFxBlocks ([IO.File]::ReadAllText($saveAs))) : $null
-    $check = Test-HarnessLearnReport -Variants $Variants -Installed $Ctx.Installed -Report $lua.Result -Saved $Saved -SameFile $same
+    $check = Test-HarnessLearnReport -Variants $Variants -Installed $Ctx.Installed -Jsfx $Ctx.Jsfx -States $Ctx.States -Report $lua.Result -Saved $Saved -SameFile $same
     $foreignMods = @($mod.Binaries.get_Keys() | Where-Object { $mod.Binaries[$_] -eq 'Foreign' })
     $why = @($check.Foreign) + @($foreignMods | ForEach-Object { "a module named $_ was loaded from outside the private plugins directory" })
     if ($why.Count) { return New-HarnessOutcome INCOMPLETE ("not the private copy: " + ($why -join '; ')) $facts }
@@ -127,7 +161,7 @@ function Invoke-HarnessLearn {
         return New-HarnessOutcome INCOMPLETE "the module list never showed $($unseen -join ', ') loaded, so the private copy is not proven" $facts
     }
     foreach ($k in $check.Blocks.get_Keys()) { $Ctx.Blocks[$k] = $check.Blocks[$k] }
-    foreach ($k in $check.Names.get_Keys()) { $Ctx.Names[$k] = $check.Names[$k] }
+    foreach ($k in $check.Names.get_Keys()) { $Ctx.Names[$k] = $check.Names[$k]; $Ctx.AddNames[$k] = $check.AddNames[$k] }
     New-HarnessOutcome PASS "$($Variants.Count) plugin variants learned; every tested binary loaded from the private copy (module list and fx_ident)" $facts
 }
 

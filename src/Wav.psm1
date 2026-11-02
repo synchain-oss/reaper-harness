@@ -34,7 +34,9 @@ public sealed class HarnessCompareFacts {
     public double MaxDiff;       // largest |A[n] - B[n + ExpectLag]| over the overlap, finite pairs only
     public double HeadDiff;      // the same within the first HeadSeconds of A
     public long NonFiniteA, NonFiniteB;
+    public long NanA, NanB, InfA, InfB; // the non-finite samples, NaN and infinite counted apart
     public double PeakA, PeakB;  // largest |x| over finite samples
+    public double[] RmsA, RmsB;  // RMS per channel over its finite samples; NaN for a channel without any
 }
 
 public static class HarnessWav {
@@ -162,13 +164,25 @@ public static class HarnessWav {
 
     static bool Finite(double v) { return !double.IsNaN(v) && !double.IsInfinity(v); }
 
+    public static double[] Rms(HarnessWavData w) {
+        var sum = new double[w.Channels]; var count = new long[w.Channels]; var r = new double[w.Channels];
+        for (long i = 0; i < w.Samples.LongLength; i++) {
+            double v = w.Samples[i]; int c = (int)(i % w.Channels);
+            if (Finite(v)) { sum[c] += v * v; count[c]++; }
+        }
+        for (int c = 0; c < w.Channels; c++) r[c] = count[c] > 0 ? Math.Sqrt(sum[c] / count[c]) : double.NaN;
+        return r;
+    }
+
     public static HarnessCompareFacts Compare(HarnessWavData a, HarnessWavData b, int expectLag, int lagSearch, double headSeconds) {
         var f = new HarnessCompareFacts {
             RateA = a.Rate, RateB = b.Rate, ChannelsA = a.Channels, ChannelsB = b.Channels, FramesA = a.Frames, FramesB = b.Frames,
             FormatA = a.Format, FormatB = b.Format, ExpectLag = expectLag, BestLag = 0, MaxDiff = double.NaN, HeadDiff = double.NaN
         };
-        foreach (var v in a.Samples) { if (!Finite(v)) f.NonFiniteA++; else if (Math.Abs(v) > f.PeakA) f.PeakA = Math.Abs(v); }
-        foreach (var v in b.Samples) { if (!Finite(v)) f.NonFiniteB++; else if (Math.Abs(v) > f.PeakB) f.PeakB = Math.Abs(v); }
+        foreach (var v in a.Samples) { if (double.IsNaN(v)) f.NanA++; else if (double.IsInfinity(v)) f.InfA++; else if (Math.Abs(v) > f.PeakA) f.PeakA = Math.Abs(v); }
+        foreach (var v in b.Samples) { if (double.IsNaN(v)) f.NanB++; else if (double.IsInfinity(v)) f.InfB++; else if (Math.Abs(v) > f.PeakB) f.PeakB = Math.Abs(v); }
+        f.NonFiniteA = f.NanA + f.InfA; f.NonFiniteB = f.NanB + f.InfB;
+        f.RmsA = Rms(a); f.RmsB = Rms(b);
         f.Comparable = a.Rate == b.Rate && a.Channels == b.Channels;
         if (!f.Comparable) return f;
         int ch = a.Channels;
@@ -236,19 +250,80 @@ function New-HarnessSignalFile {
     [HarnessWav]::Write($Path, $Rate, $Channels, 'float32', $false, $s)
 }
 
+# An RMS as a level for the channel criteria: digital silence counts as -400 dB (the lowest value a criterion can
+# name, so [-400, x] accepts it); NaN (a channel without finite samples) stays NaN.
+function ConvertTo-HarnessLevelDb([double]$Linear) {
+    if ([double]::IsNaN($Linear)) { return [double]::NaN }
+    if ($Linear -le 0) { return -400.0 }
+    [Math]::Max(-400.0, 20 * [Math]::Log10($Linear))
+}
+
+function Format-HarnessRmsList($Rms) { (@($Rms) | ForEach-Object { Format-HarnessDb $_ }) -join ',' }
+
+# Pure function: the channel criteria against compare facts (B is the render judged, A the reference). Criteria are
+# tables from the configuration: key -> @{ Key; Channels (1-based numbers); Min; Max }. Returns the problems.
+#   RmsDb          RMS of a channel of B
+#   EnergyRatioDb  RMS of one channel of B minus RMS of another; two silent channels have no ratio
+#   RmsChangeDb    RMS of a channel of B minus the same channel of A
+function Get-HarnessChannelProblems {
+    param([Parameter(Mandatory)]$Facts, $RmsDb = $null, $EnergyRatioDb = $null, $RmsChangeDb = $null)
+    $why = [Collections.Generic.List[string]]::new()
+    $fmt = { param([double]$v) $v.ToString('0.00', $script:Inv) }
+    $range = { param($c) "[$(& $fmt $c.Min), $(& $fmt $c.Max)]" }
+    $rmsA = @($Facts.RmsA | Where-Object { $null -ne $_ }); $rmsB = @($Facts.RmsB | Where-Object { $null -ne $_ })
+    $level = { param($list, [int]$n) ($n -le $list.Count) ? (ConvertTo-HarnessLevelDb $list[$n - 1]) : $null }
+    foreach ($c in @(($null -ne $RmsDb) ? $RmsDb.get_Values() : @())) {
+        $v = & $level $rmsB $c.Channels[0]
+        if ($null -eq $v) { $why.Add("rms $($c.Key): the render has no channel $($c.Channels[0])"); continue }
+        if ([double]::IsNaN($v)) { $why.Add("rms $($c.Key) is undefined (no finite samples)"); continue }
+        if ($v -lt $c.Min -or $v -gt $c.Max) { $why.Add("rms $($c.Key) $(& $fmt $v) dB outside $(& $range $c)") }
+    }
+    foreach ($c in @(($null -ne $EnergyRatioDb) ? $EnergyRatioDb.get_Values() : @())) {
+        $x = & $level $rmsB $c.Channels[0]; $y = & $level $rmsB $c.Channels[1]
+        if ($null -eq $x -or $null -eq $y) { $why.Add("ratio $($c.Key): the render has no channel $(($null -eq $x) ? $c.Channels[0] : $c.Channels[1])"); continue }
+        if ([double]::IsNaN($x) -or [double]::IsNaN($y)) { $why.Add("ratio $($c.Key) is undefined (no finite samples)"); continue }
+        if ($x -le -400 -and $y -le -400) { $why.Add("ratio $($c.Key) is undefined (both channels are silent)"); continue }
+        $r = $x - $y
+        if ($r -lt $c.Min -or $r -gt $c.Max) { $why.Add("ratio $($c.Key) $(& $fmt $r) dB outside $(& $range $c)") }
+    }
+    foreach ($c in @(($null -ne $RmsChangeDb) ? $RmsChangeDb.get_Values() : @())) {
+        $n = $c.Channels[0]
+        $levelA = & $level $rmsA $n; $levelB = & $level $rmsB $n
+        if ($null -eq $levelA -or $null -eq $levelB) { $why.Add("rms change $($c.Key): the $(($null -eq $levelA) ? 'reference' : 'render') has no channel $n"); continue }
+        if ([double]::IsNaN($levelA) -or [double]::IsNaN($levelB)) { $why.Add("rms change $($c.Key) is undefined (no finite samples)"); continue }
+        $d = $levelB - $levelA
+        if ($d -lt $c.Min -or $d -gt $c.Max) { $why.Add("rms change $($c.Key) $(& $fmt $d) dB outside $(& $range $c)") }
+    }
+    , $why.ToArray()
+}
+
+# The facts appended after the fixed ones: RMS per channel when a channel criterion is given (A/B, or only B for a
+# render judged on its own), NaN and Inf counted apart when there are any.
+function Get-HarnessExtraFacts($Facts, [bool]$Channels, [switch]$Single) {
+    $f = $Facts
+    $x = ''
+    if ($Channels) { $x += $Single ? " rms=$(Format-HarnessRmsList $f.RmsB)" : " rms=$(Format-HarnessRmsList $f.RmsA)/$(Format-HarnessRmsList $f.RmsB)" }
+    if ($Single ? ($f.NonFiniteB -gt 0) : ($f.NonFiniteA -gt 0 -or $f.NonFiniteB -gt 0)) { $x += $Single ? " nan=$($f.NanB) inf=$($f.InfB)" : " nan=$($f.NanA)/$($f.NanB) inf=$($f.InfA)/$($f.InfB)" }
+    $x
+}
+
 # Pure function: compare facts + criteria -> @{ Status; Detail }. Criteria (all optional):
 #   MaxDiffDb  allowed residual in dBFS at the expected lag; absent means the renders must be bit-identical
 #   Lag        expected lag (B later than A is positive), default 0; the best lag found must equal it
 #   PeakMaxDb  B's peak must not exceed it; NotSilent  B's peak must be above -120 dBFS
+#   RmsDb, EnergyRatioDb, RmsChangeDb  channel criteria (Get-HarnessChannelProblems)
 # Always checked: both files comparable (same rate and channel count), no NaN / Inf in either. The line starts with
 # the fixed facts (identical, lag, maxdiff, head, frames, channels, rate, format, nonfinite, peak), so negative
-# cases can match it with a regex; a failure appends "; failed: <reasons>".
+# cases can match it with a regex; RMS per channel (with channel criteria) and NaN / Inf counts (when there are
+# any) follow; a failure appends "; failed: <reasons>".
 function Get-HarnessCompareVerdict {
-    param([Parameter(Mandatory)]$Facts, [Nullable[double]]$MaxDiffDb = $null, [int]$Lag = 0, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent)
+    param([Parameter(Mandatory)]$Facts, [Nullable[double]]$MaxDiffDb = $null, [int]$Lag = 0, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent,
+          $RmsDb = $null, $EnergyRatioDb = $null, $RmsChangeDb = $null)
     $f = $Facts
     $line = 'identical={0} lag={1} maxdiff={2} head={3} frames={4}/{5} channels={6}/{7} rate={8}/{9} format={10}/{11} nonfinite={12}/{13} peak={14}/{15}' -f `
         ($f.Identical ? 'yes' : 'no'), ($f.Comparable ? [string]$f.BestLag : '?'), (Format-HarnessDb $f.MaxDiff), (Format-HarnessDb $f.HeadDiff), $f.FramesA, $f.FramesB,
         $f.ChannelsA, $f.ChannelsB, $f.RateA, $f.RateB, $f.FormatA, $f.FormatB, $f.NonFiniteA, $f.NonFiniteB, (Format-HarnessDb $f.PeakA), (Format-HarnessDb $f.PeakB)
+    $line += Get-HarnessExtraFacts $f ($null -ne $RmsDb -or $null -ne $EnergyRatioDb -or $null -ne $RmsChangeDb)
     $why = [Collections.Generic.List[string]]::new()
     if (-not $f.Comparable) { $why.Add('sample rate or channel count differ, the renders cannot be compared') }
     if ($f.NonFiniteA -gt 0 -or $f.NonFiniteB -gt 0) { $why.Add('NaN or Inf samples present') }
@@ -264,6 +339,24 @@ function Get-HarnessCompareVerdict {
     }
     if ($null -ne $PeakMaxDb -and $f.PeakB -gt 0 -and 20 * [Math]::Log10($f.PeakB) -gt [double]$PeakMaxDb) { $why.Add("peak $(Format-HarnessDb $f.PeakB) dBFS above $(([double]$PeakMaxDb).ToString('0.00', $script:Inv))") }
     if ($NotSilent -and ($f.PeakB -le 0 -or 20 * [Math]::Log10($f.PeakB) -le -120)) { $why.Add('silent (peak not above -120 dBFS)') }
+    foreach ($p in (Get-HarnessChannelProblems -Facts $f -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb -RmsChangeDb $RmsChangeDb)) { $why.Add($p) }
+    if ($why.Count) { return [pscustomobject]@{ Status = 'FAIL'; Detail = "$line; failed: $($why -join ', ')" } }
+    [pscustomobject]@{ Status = 'PASS'; Detail = $line }
+}
+
+# Pure function: one render judged on its own (facts of the file compared with itself, B side). The line starts with
+# frames= channels= rate= format= nonfinite= peak=; then the extra facts and, on a FAIL, "; failed: <reasons>".
+# Always checked: no NaN / Inf. Optional: PeakMaxDb, NotSilent, RmsDb, EnergyRatioDb.
+function Get-HarnessRenderVerdict {
+    param([Parameter(Mandatory)]$Facts, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent, $RmsDb = $null, $EnergyRatioDb = $null)
+    $f = $Facts
+    $line = 'frames={0} channels={1} rate={2} format={3} nonfinite={4} peak={5}' -f $f.FramesB, $f.ChannelsB, $f.RateB, $f.FormatB, $f.NonFiniteB, (Format-HarnessDb $f.PeakB)
+    $line += Get-HarnessExtraFacts $f ($null -ne $RmsDb -or $null -ne $EnergyRatioDb) -Single
+    $why = [Collections.Generic.List[string]]::new()
+    if ($f.NonFiniteB -gt 0) { $why.Add('NaN or Inf samples present') }
+    if ($null -ne $PeakMaxDb -and $f.PeakB -gt 0 -and 20 * [Math]::Log10($f.PeakB) -gt [double]$PeakMaxDb) { $why.Add("peak $(Format-HarnessDb $f.PeakB) dBFS above $(([double]$PeakMaxDb).ToString('0.00', $script:Inv))") }
+    if ($NotSilent -and ($f.PeakB -le 0 -or 20 * [Math]::Log10($f.PeakB) -le -120)) { $why.Add('silent (peak not above -120 dBFS)') }
+    foreach ($p in (Get-HarnessChannelProblems -Facts $f -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb)) { $why.Add($p) }
     if ($why.Count) { return [pscustomobject]@{ Status = 'FAIL'; Detail = "$line; failed: $($why -join ', ')" } }
     [pscustomobject]@{ Status = 'PASS'; Detail = $line }
 }
@@ -271,24 +364,25 @@ function Get-HarnessCompareVerdict {
 # Reads both files and compares them. A file that cannot be read gives INCOMPLETE (nothing was compared), never PASS.
 function Compare-HarnessWavFiles {
     param([Parameter(Mandatory)][string]$A, [Parameter(Mandatory)][string]$B, [Nullable[double]]$MaxDiffDb = $null, [int]$Lag = 0, [int]$LagSearch = 64,
-          [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent, [double]$HeadSeconds = 2)
+          [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent, [double]$HeadSeconds = 2, $RmsDb = $null, $EnergyRatioDb = $null, $RmsChangeDb = $null)
     foreach ($pair in @(@('A', $A), @('B', $B))) {
         if (-not (Test-Path -LiteralPath $pair[1] -PathType Leaf)) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "render $($pair[0]) does not exist" } }
     }
     try { $wa = [HarnessWav]::Read($A) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read render A: $(($_.Exception.InnerException ?? $_.Exception).Message)" } }
     try { $wb = [HarnessWav]::Read($B) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read render B: $(($_.Exception.InnerException ?? $_.Exception).Message)" } }
     $Facts = [HarnessWav]::Compare($wa, $wb, $Lag, [Math]::Max([Math]::Abs($Lag), $LagSearch), $HeadSeconds)
-    Get-HarnessCompareVerdict -Facts $Facts -MaxDiffDb $MaxDiffDb -Lag $Lag -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent
+    Get-HarnessCompareVerdict -Facts $Facts -MaxDiffDb $MaxDiffDb -Lag $Lag -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb -RmsChangeDb $RmsChangeDb
 }
 
-# Checks one render on its own (instances and similar kinds that have nothing to compare against): readable, all
-# finite, optional peak and silence criteria. Returns @{ Status; Detail }.
+# Checks one render on its own (compare "none", and kinds that have nothing to compare against): readable, all
+# finite, optional peak, silence and channel criteria (Get-HarnessRenderVerdict). Returns @{ Status; Detail }.
 function Test-HarnessWavFile {
-    param([Parameter(Mandatory)][string]$Path, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent)
+    param([Parameter(Mandatory)][string]$Path, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent, $RmsDb = $null, $EnergyRatioDb = $null)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = 'the render does not exist' } }
     try { $w = [HarnessWav]::Read($Path) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read the render: $(($_.Exception.InnerException ?? $_.Exception).Message)" } }
     $Facts = [HarnessWav]::Compare($w, $w, 0, 0, 0)
-    Get-HarnessCompareVerdict -Facts $Facts -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent
+    Get-HarnessRenderVerdict -Facts $Facts -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb
 }
 
-Export-ModuleMember -Function Format-HarnessDb, Read-HarnessWav, Write-HarnessWav, New-HarnessSignalFile, Get-HarnessCompareVerdict, Compare-HarnessWavFiles, Test-HarnessWavFile
+Export-ModuleMember -Function Format-HarnessDb, Read-HarnessWav, Write-HarnessWav, New-HarnessSignalFile, Get-HarnessCompareVerdict, Get-HarnessRenderVerdict, Get-HarnessChannelProblems,
+    ConvertTo-HarnessLevelDb, Compare-HarnessWavFiles, Test-HarnessWavFile

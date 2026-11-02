@@ -3,9 +3,16 @@
 # A stand-in for REAPER for the self-test's end-to-end case (the CI machine has no REAPER). It is handed to
 # Invoke-HarnessHost as the Launcher: it does what REAPER would do with the command line (render a project, or run
 # one driver step from the job file) right away, then starts a short-lived pwsh as "the process" (a sleeping one
-# for the hang step). Plugins are pass-through. Parameter values travel inside the plugin blocks, like real plugin
-# state, so device and savereopen read back what the learn step set.
+# for the hang step). Parameter values travel inside the plugin blocks, like real plugin state, so device and
+# savereopen read back what the learn step set, and a state block put into a project is what the plugin then holds.
+# The mix follows what REAPER was measured to do (docs/CONFIG.md): folders sum their children, sends tap before the
+# FX (prefx), after the FX (pre) or after the fader (post), pan is a balance (the far side is turned down), a muted
+# track and all its sends are silent, a stem is the track's output whether or not it goes to the master.
+# Plugins: a parameter named "Trim" is a gain of 2 x its value (0.5 = unchanged); every other parameter does
+# nothing. The PDC JSFX reports "Delay (samples)" as PDC and, being compensated, leaves the timing alone; with
+# "Report delay as PDC" off it delays the audio instead.
 #   Set-FakeReaper -Spec @{ Pwsh; CfgDir; Plugins (REAPER name -> @{ Bundle; Cid }); Seen (a list) }
+#       JSFX are found by their add name ("JS:<path under Effects>") in the configuration directory's Effects
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
 #   ConvertFrom-FakeLua <text>                        reads a job file written by ConvertTo-HarnessLuaTable
 
@@ -14,10 +21,33 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot '../src/Wav.psm1') -ErrorAction Stop
 
+if (-not ('FakeMix' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+public static class FakeMix {
+    // dst += src scaled per channel (interleaved; gl for channel 1, gr for channel 2 of a stereo signal)
+    public static void Add(double[] dst, double[] src, double gl, double gr, int channels) {
+        int n = Math.Min(dst.Length, src.Length);
+        if (channels == 2) { for (int i = 0; i + 1 < n; i += 2) { dst[i] += gl * src[i]; dst[i + 1] += gr * src[i + 1]; } }
+        else { for (int i = 0; i < n; i++) dst[i] += gl * src[i]; }
+    }
+    public static double[] Scale(double[] x, double g) { var y = new double[x.Length]; for (int i = 0; i < x.Length; i++) y[i] = g * x[i]; return y; }
+    public static double[] Delay(double[] x, int frames, int channels) {
+        var y = new double[x.Length];
+        int off = frames * channels;
+        for (int i = off; i < x.Length; i++) y[i] = x[i - off];
+        return y;
+    }
+}
+'@
+}
+
 $script:Spec = $null
 $script:Inv = [Globalization.CultureInfo]::InvariantCulture
 $script:Src = ''
 $script:At = 0
+$script:DelayParam = 'Delay (samples)'
+$script:ReportParam = 'Report delay as PDC'
 
 function Set-FakeReaper([hashtable]$Spec) { $script:Spec = $Spec }
 function Get-FakeReaperLauncher { { param($psi) Invoke-FakeLaunch $psi } }
@@ -75,53 +105,169 @@ function Read-FakeLuaValue {
     [double]::Parse($m.Value, $script:Inv)
 }
 
+# ---- plugins ----
+# The name REAPER shows for a JSFX under the configuration's Effects directory ('' when it is not there).
+function Get-FakeJsName([string]$ident) {
+    $file = Join-Path (Join-Path $script:Spec.CfgDir 'Effects') $ident
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return '' }
+    $desc = @([IO.File]::ReadAllLines($file) | Where-Object { $_ -match '^desc:' } | Select-Object -First 1)
+    $desc.Count ? ('JS: ' + ($desc[0] -replace '^desc:', '').Trim()) : ''
+}
+
+# A plugin by the name it is added by: @{ Kind; Name; Bundle; Cid; Ident } or $null when REAPER would not find it.
+function Find-FakePlugin([string]$AddName) {
+    if ($AddName.StartsWith('JS:')) {
+        $ident = $AddName.Substring(3)
+        $name = Get-FakeJsName $ident
+        if (-not $name) { return $null }
+        return [pscustomobject]@{ Kind = 'JS'; Name = $name; Bundle = ''; Cid = ''; Ident = $ident }
+    }
+    $p = $script:Spec.Plugins[$AddName]
+    if (-not $p) { return $null }
+    [pscustomobject]@{ Kind = 'VST'; Name = $AddName; Bundle = $p.Bundle; Cid = $p.Cid; Ident = [IO.Path]::Combine($script:Spec.CfgDir, 'plugins', $p.Bundle, 'Contents', 'x86_64-win', $p.Bundle) + "<1234567890{$($p.Cid)" }
+}
+
+function New-FakeParams([string]$kind) {
+    $p = [ordered]@{}
+    if ($kind -eq 'JS') { $p[$script:DelayParam] = 0.0; $p[$script:ReportParam] = 1.0 }
+    $p
+}
+
+# The state a plugin saves: its parameters as name=value; pairs (always written the same way).
+function ConvertTo-FakeState($Params) {
+    $pairs = -join @($Params.get_Keys() | ForEach-Object { "$_=$(([double]$Params[$_]).ToString('R', $script:Inv));" })
+    'FAKESTATE ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pairs))
+}
+
+function Get-FakeDisplay($fx, [string]$name, [double]$Value) {
+    if ($fx.Kind -eq 'JS' -and $name -ceq $script:DelayParam) { return ($Value * 8192).ToString('0.0', $script:Inv) }
+    if ($fx.Kind -eq 'JS' -and $name -ceq $script:ReportParam) { return ($Value -ge 0.5) ? 'On' : 'Off' }
+    $Value.ToString('0.00', $script:Inv)
+}
+
+function Get-FakeDelay($fx) { ($fx.Kind -eq 'JS' -and $fx.Params.Contains($script:DelayParam)) ? [int][Math]::Round([double]$fx.Params[$script:DelayParam] * 8192) : 0 }
+function Test-FakeReportsPdc($fx) { -not $fx.Params.Contains($script:ReportParam) -or [double]$fx.Params[$script:ReportParam] -ge 0.5 }
+function Get-FakePdc($fx) { (Test-FakeReportsPdc $fx) ? (Get-FakeDelay $fx) : 0 }
+
 # ---- projects ----
-# Tracks of a project: Name, Volume, Isbus, Source (wav path or ''), Fx (Name, Bypassed, Params name -> value).
+# Tracks of a project: Name, Volume, Pan, Mute, Isbus, Sel, MainSend, Recv (Src, Mode, Vol), Source (wav path or ''),
+# Fx (Kind, Name, Ident, Header, Bypassed, Params name -> value).
 function Read-FakeProject([string]$Text) {
     $tracks = [Collections.Generic.List[object]]::new()
     $cur = $null
     $bypassNext = $false
     $fx = $null
+    $fxLevel = 0
     foreach ($raw in ($Text -split '\r?\n')) {
         $s = $raw.Trim()
-        if ($s -eq '<TRACK') { $cur = [pscustomobject]@{ Name = ''; Volume = 1.0; Isbus = '0 0'; Source = ''; Fx = [Collections.Generic.List[object]]::new() }; $tracks.Add($cur); continue }
+        if ($fx) {
+            if ($s.StartsWith('<')) { $fxLevel++ } elseif ($s -eq '>') { $fxLevel--; if ($fxLevel -eq 0) { $fx = $null }; continue }
+            if ($s -match '^FAKESTATE (\S*)$') {
+                $state = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
+                foreach ($pair in ($state -split ';' | Where-Object { $_ })) { $kv = $pair -split '=', 2; $fx.Params[$kv[0]] = [double]::Parse($kv[1], $script:Inv) }
+            }
+            continue
+        }
+        if ($s -eq '<TRACK') {
+            $cur = [pscustomobject]@{ Name = ''; Volume = 1.0; Pan = 0.0; Mute = $false; Isbus = '0 0'; Sel = $false; MainSend = $true; Recv = [Collections.Generic.List[object]]::new(); Source = ''; Fx = [Collections.Generic.List[object]]::new() }
+            $tracks.Add($cur); continue
+        }
         if ($null -eq $cur) { continue }
-        if ($s -match '^NAME "(.*)"$' -and -not $cur.Name) { $cur.Name = $Matches[1] }
-        elseif ($s -match '^VOLPAN (\S+)') { $cur.Volume = [double]::Parse($Matches[1], $script:Inv) }
+        if ($s -match '^NAME (.*)$' -and -not $cur.Name) { $cur.Name = $Matches[1].Trim('"') }
+        elseif ($s -match '^VOLPAN (\S+) (\S+)') { $cur.Volume = [double]::Parse($Matches[1], $script:Inv); $cur.Pan = [double]::Parse($Matches[2], $script:Inv) }
+        elseif ($s -match '^MUTESOLO (\d)') { $cur.Mute = $Matches[1] -ne '0' }
         elseif ($s -match '^ISBUS (\S+ \S+)') { $cur.Isbus = $Matches[1] }
+        elseif ($s -match '^SEL (\d)') { $cur.Sel = $Matches[1] -ne '0' }
+        elseif ($s -match '^MAINSEND (\d)') { $cur.MainSend = $Matches[1] -ne '0' }
+        elseif ($s -match '^AUXRECV (\d+) (\d+) (\S+)') { $cur.Recv.Add([pscustomobject]@{ Src = [int]$Matches[1]; Mode = [int]$Matches[2]; Vol = [double]::Parse($Matches[3], $script:Inv) }) }
         elseif ($s -match '^FILE "(.*)"$') { $cur.Source = $Matches[1] }
         elseif ($s -match '^BYPASS (\d)') { $bypassNext = $Matches[1] -ne '0' }
-        elseif ($s -match '^<VST "([^"]*)"') { $fx = [pscustomobject]@{ Name = $Matches[1]; Bypassed = $bypassNext; Params = [ordered]@{} }; $cur.Fx.Add($fx) }
-        elseif ($s -match '^FAKESTATE (\S*)$' -and $fx) {
-            $state = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
-            foreach ($pair in ($state -split ';' | Where-Object { $_ })) { $kv = $pair -split '=', 2; $fx.Params[$kv[0]] = [double]::Parse($kv[1], $script:Inv) }
+        elseif ($s -match '^<(VST|JS) (.*)$') {
+            $kind = $Matches[1]
+            $tok = @([regex]::Matches($Matches[2], '"[^"]*"|\S+') | ForEach-Object { $_.Value.Trim('"') })
+            $fx = [pscustomobject]@{ Kind = $kind; Name = ''; Ident = ''; Header = $s; Bypassed = $bypassNext; Params = (New-FakeParams $kind) }
+            if ($kind -eq 'JS') { $fx.Ident = $tok[0]; $fx.Name = Get-FakeJsName $tok[0] } else { $fx.Name = $tok[0] }
+            $cur.Fx.Add($fx)
+            $fxLevel = 1
         }
     }
     , $tracks.ToArray()
 }
 
+function Format-FakeFxBlock($fx) { @($fx.Header, (ConvertTo-FakeState $fx.Params), '>') }
+
+# The mix of a project. Returns @{ Master; Stems (track name -> samples); Rate; Channels }.
+function Get-FakeMix([string]$Text) {
+    $tracks = Read-FakeProject $Text
+    $rate = [int][regex]::Match($Text, '(?m)^\s*SAMPLERATE (\d+)').Groups[1].Value
+    $channels = [int][regex]::Match($Text, '(?m)^\s*RENDER_FMT \d+ (\d+)').Groups[1].Value
+    $n = $tracks.Count
+    $parent = [int[]]::new($n)
+    $stack = [Collections.Generic.List[int]]::new()
+    for ($i = 0; $i -lt $n; $i++) {
+        $parent[$i] = $stack.Count ? $stack[$stack.Count - 1] : -1
+        $flag = $tracks[$i].Isbus -split ' '
+        if ($flag[0] -eq '1') { $stack.Add($i) }
+        elseif ($flag[0] -eq '2') { for ($k = 0; $k -lt -[int]$flag[1]; $k++) { $stack.RemoveAt($stack.Count - 1) } }
+    }
+    $sources = @{}
+    $len = 0
+    foreach ($t in $tracks) {
+        if ($t.Source -and -not $sources.ContainsKey($t.Source)) { $w = Read-HarnessWav $t.Source; $sources[$t.Source] = $w.Samples; $len = [Math]::Max($len, $w.Samples.Length) }
+    }
+    $memo = @{}
+    $busy = @{}
+    $get = $null
+    # Taps of track i: pre (its input, before the FX), post (after the FX), out (after volume, pan and mute)
+    $get = {
+        param([int]$i, [string]$tap)
+        if (-not $memo.ContainsKey($i)) {
+            if ($busy.ContainsKey($i)) { throw "routing loop through track $i" }
+            $busy[$i] = $true
+            $t = $tracks[$i]
+            $pre = [double[]]::new($len)
+            if ($t.Source) { [FakeMix]::Add($pre, $sources[$t.Source], 1.0, 1.0, $channels) }
+            for ($j = 0; $j -lt $n; $j++) { if ($parent[$j] -eq $i -and $tracks[$j].MainSend) { [FakeMix]::Add($pre, (& $get $j 'out'), 1.0, 1.0, $channels) } }
+            foreach ($r in $t.Recv) {
+                if ($tracks[$r.Src].Mute) { continue } # mute silences every send of the track, pre-fader and pre-FX too
+                $from = switch ($r.Mode) { 0 { 'out' } 1 { 'pre' } 3 { 'post' } default { throw "send mode $($r.Mode)" } }
+                [FakeMix]::Add($pre, (& $get $r.Src $from), $r.Vol, $r.Vol, $channels)
+            }
+            $post = $pre
+            foreach ($fx in $t.Fx) {
+                if ($fx.Bypassed) { continue }
+                if ($fx.Params.Contains('Trim')) { $post = [FakeMix]::Scale($post, 2 * [double]$fx.Params['Trim']) }
+                if (-not (Test-FakeReportsPdc $fx) -and (Get-FakeDelay $fx)) { $post = [FakeMix]::Delay($post, (Get-FakeDelay $fx), $channels) }
+            }
+            $out = [double[]]::new($len)
+            if (-not $t.Mute) {
+                $gl = $t.Volume * (($channels -eq 2 -and $t.Pan -gt 0) ? (1 - $t.Pan) : 1.0)
+                $gr = $t.Volume * (($channels -eq 2 -and $t.Pan -lt 0) ? (1 + $t.Pan) : 1.0)
+                [FakeMix]::Add($out, $post, $gl, $gr, $channels)
+            }
+            $memo[$i] = @{ pre = $pre; post = $post; out = $out }
+            $busy.Remove($i)
+        }
+        , $memo[$i][$tap]
+    }
+    $master = [double[]]::new($len)
+    $stems = @{}
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($parent[$i] -lt 0 -and $tracks[$i].MainSend) { [FakeMix]::Add($master, (& $get $i 'out'), 1.0, 1.0, $channels) }
+        if ($tracks[$i].Sel) { $stems[$tracks[$i].Name] = & $get $i 'out' }
+    }
+    [pscustomobject]@{ Master = $master; Stems = $stems; Rate = $rate; Channels = $channels }
+}
+
 function Invoke-FakeRender([string]$Project) {
     $projectText = [IO.File]::ReadAllText($Project)
     $dir = [regex]::Match($projectText, '(?m)^\s*RENDER_FILE "(.*)"').Groups[1].Value
-    $name = [regex]::Match($projectText, '(?m)^\s*RENDER_PATTERN "(.*)"').Groups[1].Value
-    $rate = [int][regex]::Match($projectText, '(?m)^\s*SAMPLERATE (\d+)').Groups[1].Value
-    $sum = $null
-    $channels = 2
-    $gains = [Collections.Generic.List[double]]::new() # volumes of the enclosing folders
-    foreach ($t in (Read-FakeProject $projectText)) {
-        $g = $t.Volume
-        foreach ($x in $gains) { $g *= $x }
-        if ($t.Source) {
-            $w = Read-HarnessWav $t.Source
-            $channels = $w.Channels
-            if ($null -eq $sum) { $sum = [double[]]::new($w.Samples.Length) }
-            for ($i = 0; $i -lt $w.Samples.Length; $i++) { $sum[$i] += $g * $w.Samples[$i] }
-        }
-        $flag = $t.Isbus -split ' '
-        if ($flag[0] -eq '1') { $gains.Add($t.Volume) }
-        elseif ($flag[0] -eq '2') { for ($k = 0; $k -lt -[int]$flag[1]; $k++) { $gains.RemoveAt($gains.Count - 1) } }
-    }
-    Write-HarnessWav -Path (Join-Path $dir "$name.wav") -Rate $rate -Channels $channels -Format float32 -Samples $sum
+    $pattern = [regex]::Match($projectText, '(?m)^\s*RENDER_PATTERN "(.*)"').Groups[1].Value
+    $mix = Get-FakeMix $projectText
+    $write = { param([string]$Leaf, [double[]]$Samples) Write-HarnessWav -Path (Join-Path $dir "$Leaf.wav") -Rate $mix.Rate -Channels $mix.Channels -Format float32 -Samples $Samples }
+    if ($projectText -notmatch '(?m)^\s*RENDER_STEMS 1') { & $write $pattern $mix.Master; return }
+    & $write ($pattern.Replace('$track', 'Master')) $mix.Master
+    foreach ($name in $mix.Stems.get_Keys()) { & $write ($pattern.Replace('$track', $name)) $mix.Stems[$name] }
 }
 
 # ---- driver steps ----
@@ -133,10 +279,13 @@ function Add-FakeTracks($Lines, [string]$Prefix, [string]$Project, $Reads) {
     for ($t = 0; $t -lt $tracks.Count; $t++) {
         $Lines.Add("${Prefix}t${t}_name=$($tracks[$t].Name)")
         $Lines.Add("${Prefix}t${t}_fx_count=$($tracks[$t].Fx.Count)")
+        $chain = 0
         for ($f = 0; $f -lt $tracks[$t].Fx.Count; $f++) {
             $x = $tracks[$t].Fx[$f]
             $q = "${Prefix}t${t}_fx${f}_"
-            foreach ($kv in @("name=$($x.Name)", 'pdc=0', 'chain_pdc_actual=0', "bypassed=$($x.Bypassed.ToString().ToLowerInvariant())", 'offline=false')) { $Lines.Add($q + $kv) }
+            $pdc = Get-FakePdc $x
+            if (-not $x.Bypassed) { $chain += $pdc }
+            foreach ($kv in @("name=$($x.Name)", "pdc=$pdc", "chain_pdc_actual=$chain", "bypassed=$($x.Bypassed.ToString().ToLowerInvariant())", 'offline=false')) { $Lines.Add($q + $kv) }
         }
     }
     $k = 0
@@ -144,14 +293,58 @@ function Add-FakeTracks($Lines, [string]$Prefix, [string]$Project, $Reads) {
         $k++
         $q = "${Prefix}t$([int]$r['t'])_fx$([int]$r['f'])_"
         $fx = $tracks[[int]$r['t']].Fx[[int]$r['f']]
-        if ($fx.Params.Contains($r['name'])) { $v = $fx.Params[$r['name']]; $Lines.Add("${q}param$k=$(Format-Fake $v)"); $Lines.Add("${q}display$k=$($v.ToString('0.00', $script:Inv))") }
+        if ($fx.Params.Contains($r['name'])) { $v = $fx.Params[$r['name']]; $Lines.Add("${q}param$k=$(Format-Fake $v)"); $Lines.Add("${q}display$k=$(Get-FakeDisplay $fx $r['name'] $v)") }
         else { $Lines.Add("${q}param$k=missing") }
     }
 }
 
-function Get-FakeIniValue([string]$IniKey) {
+function Get-FakeIniValue([string]$IniKey, [string]$Default = '') {
     $ini = [IO.File]::ReadAllText((Join-Path $script:Spec.CfgDir 'reaper.ini'))
-    [regex]::Match($ini, "(?m)^$IniKey=(.*?)\r?$").Groups[1].Value
+    $m = [regex]::Match($ini, "(?m)^$IniKey=(.*?)\r?$")
+    $m.Success ? $m.Groups[1].Value : $Default
+}
+
+# The learn step: tracks learn-<n> of the job's project (empty, or holding a state block), the plugin added by name
+# to an empty one, parameters set on top; the saved project holds every plugin's state as it saves it.
+function Invoke-FakeLearn($job, $report) {
+    $given = @(($job['project'] -and (Test-Path -LiteralPath $job['project'])) ? (Read-FakeProject ([IO.File]::ReadAllText($job['project']))) : @())
+    $rpp = [Text.StringBuilder]::new("<REAPER_PROJECT 0.1 `"7.0/win64`" 0 0`n")
+    $n = 0
+    foreach ($e in @($job['fx'])) {
+        $n++
+        $key = "fx${n}_"
+        $fx = $null
+        if ($e['preloaded']) {
+            if ($n -le $given.Count -and $given[$n - 1].Fx.Count -eq 1) {
+                $fx = $given[$n - 1].Fx[0]
+                $found = ($fx.Kind -eq 'VST') ? (Find-FakePlugin $fx.Name) : $null
+                if (-not $found) { $fx = $null } else { $fx | Add-Member -NotePropertyName Plugin -NotePropertyValue $found }
+            }
+        } else {
+            $p = Find-FakePlugin $e['name']
+            if ($p) {
+                $header = ($p.Kind -eq 'JS') ? "<JS $($p.Ident) `"`"" : "<VST `"$($p.Name)`" `"$($p.Bundle)`" 0 `"`" 1234567890{$($p.Cid)} `"`""
+                $fx = [pscustomobject]@{ Kind = $p.Kind; Name = $p.Name; Ident = $p.Ident; Header = $header; Bypassed = $false; Params = (New-FakeParams $p.Kind); Plugin = $p }
+            }
+        }
+        $null = $rpp.Append("  <TRACK`n    NAME `"learn-$n`"`n")
+        if (-not $fx) { $report.Add("${key}idx=-1"); $null = $rpp.Append("  >`n"); continue }
+        $ident = ($fx.Kind -eq 'JS') ? $fx.Ident : $fx.Plugin.Ident
+        $k = 0
+        $readBack = foreach ($prm in @($e['params'])) {
+            $k++
+            $fx.Params[$prm['name']] = [double]$prm['value']
+            "${key}p$k=$(Format-Fake $prm['value'])"; "${key}p${k}_display=$(Get-FakeDisplay $fx $prm['name'] ([double]$prm['value']))"
+        }
+        foreach ($kv in @('idx=0', "name=$($fx.Name)", "ident=$ident", "pdc=$(Get-FakePdc $fx)", 'offline=false', 'nparams=4')) { $report.Add($key + $kv) }
+        foreach ($line in @($readBack)) { $report.Add($line) }
+        $null = $rpp.Append("    <FXCHAIN`n      BYPASS 0 0 0`n")
+        foreach ($line in (Format-FakeFxBlock $fx)) { $null = $rpp.Append("      $line`n") }
+        $null = $rpp.Append("    >`n  >`n")
+    }
+    $null = $rpp.Append(">`n")
+    [IO.File]::WriteAllText($job['saveAs'], $rpp.ToString())
+    $report.Add('saved=true')
 }
 
 # Runs one step; returns how the stand-in process should behave: quick, linger (alive long enough to be sampled) or
@@ -163,37 +356,18 @@ function Invoke-FakeStep([string]$JobFile) {
     switch ($job['step']) {
         'learn' {
             $behave = 'linger'
-            $rpp = [Text.StringBuilder]::new("<REAPER_PROJECT 0.1 `"7.0/win64`" 0 0`n")
-            $n = 0
-            foreach ($e in @($job['fx'])) {
-                $n++
-                $key = "fx${n}_"
-                $p = $script:Spec.Plugins[$e['name']]
-                if (-not $p) { $report.Add("${key}idx=-1"); continue }
-                $binary = [IO.Path]::Combine($script:Spec.CfgDir, 'plugins', $p.Bundle, 'Contents', 'x86_64-win', $p.Bundle)
-                foreach ($kv in @('idx=0', "name=$($e['name'])", "ident=$binary<1234567890{$($p.Cid)", 'pdc=0', 'offline=false', 'nparams=4')) { $report.Add($key + $kv) }
-                $state = ''
-                $k = 0
-                foreach ($prm in @($e['params'])) {
-                    $k++
-                    $report.Add("${key}p$k=$(Format-Fake $prm['value'])"); $report.Add("${key}p${k}_display=$(([double]$prm['value']).ToString('0.00', $script:Inv))")
-                    $state += "$($prm['name'])=$(([double]$prm['value']).ToString('R', $script:Inv));"
-                }
-                $null = $rpp.Append("  <TRACK`n    NAME `"learn-$n`"`n    <FXCHAIN`n      BYPASS 0 0 0`n      <VST `"$($e['name'])`" `"$($p.Bundle)`" 0 `"`" 1234567890{$($p.Cid)} `"`"`n")
-                $null = $rpp.Append("        FAKESTATE $([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($state)))`n      >`n    >`n  >`n")
-            }
-            $null = $rpp.Append(">`n")
-            [IO.File]::WriteAllText($job['saveAs'], $rpp.ToString())
-            $report.Add('saved=true')
+            Invoke-FakeLearn $job $report
         }
         'device' {
-            foreach ($kv in @("dev_bsize=$(Get-FakeIniValue 'dummy_blocksize')", "dev_srate=$(Get-FakeIniValue 'dummy_srate')", 'dev_mode=dummy', 'project_srate=0')) { $report.Add($kv) }
+            foreach ($kv in @("dev_bsize=$(Get-FakeIniValue 'dummy_blocksize')", "dev_srate=$(Get-FakeIniValue 'dummy_srate')", 'dev_mode=dummy', 'project_srate=0', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')")) { $report.Add($kv) }
             Add-FakeTracks $report '' $job['project'] $job['reads']
+            if ($job.Contains('saveAs')) { Copy-Item -LiteralPath $job['project'] -Destination $job['saveAs']; $report.Add('saved=true') }
         }
         'savereopen' {
             Add-FakeTracks $report 'before_' $job['project'] $job['reads']
             Copy-Item -LiteralPath $job['project'] -Destination $job['saveAs']
-            Add-FakeTracks $report 'after_' $job['saveAs'] $job['reads']
+            $cycles = $job.Contains('cycles') ? [int]$job['cycles'] : 1
+            for ($i = 1; $i -le $cycles; $i++) { Add-FakeTracks $report "after${i}_" $job['saveAs'] $job['reads'] }
             $report.Add('saved=true')
         }
         'instances' {
@@ -219,4 +393,4 @@ function Invoke-FakeLaunch($psi) {
     [Diagnostics.Process]::Start($psi)
 }
 
-Export-ModuleMember -Function Set-FakeReaper, Get-FakeReaperLauncher, Get-FakeModuleSampler, ConvertFrom-FakeLua
+Export-ModuleMember -Function Set-FakeReaper, Get-FakeReaperLauncher, Get-FakeModuleSampler, ConvertFrom-FakeLua, Get-FakeMix

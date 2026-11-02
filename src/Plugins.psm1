@@ -9,6 +9,9 @@
 #   Install-HarnessPlugins -Plugins <config plugins> -PluginDir <dir>
 #       copies each configured bundle into the private configuration directory (plugins\), replacing an older
 #       copy, and returns one row per plugin (paths, sha256 of the binary, moduleinfo)
+#   Get-HarnessJsfxInfo / Install-HarnessJsfx
+#       the JSFX shipped in jsfx/ (name REAPER shows, how to add it, its path under Effects), copied into the
+#       private configuration directory (Effects\reaper-harness\) for the plugins configured with "jsfx"
 #   Update-HarnessScanCache -Keep <bundle names>
 #       the scan shield, see below
 #   Set-HarnessPluginPath
@@ -60,7 +63,8 @@ function Read-HarnessModuleInfo([Parameter(Mandatory)][string]$Bundle) {
 
 function Get-HarnessSha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 
-# Plugins: the Plugins table of a normalised configuration (id -> @{ Id; Bundle; ExpectPdc }). Returns rows with Id,
+# Plugins: the Plugins table of a normalised configuration (id -> @{ Id; Kind; Bundle; ... }); JSFX are left to
+# Install-HarnessJsfx. Returns rows with Id,
 # Bundle, Source (bundle under PluginDir), Private (bundle in the private plugins directory), Binary (private binary),
 # BinaryLeaf, Sha256 (of the binary, full), Info (moduleinfo).
 function Install-HarnessPlugins {
@@ -69,7 +73,7 @@ function Install-HarnessPlugins {
     $target = Join-Path $cfgDir 'plugins'
     if (-not (Test-HarnessUnder $target $cfgDir)) { throw "the private plugins directory is not inside the configuration directory" }
     $null = New-Item -ItemType Directory -Force -Path $target
-    $rows = foreach ($p in $Plugins.get_Values()) {
+    $rows = foreach ($p in @($Plugins.get_Values() | Where-Object { $_.Kind -ne 'jsfx' })) {
         $src = Join-Path $PluginDir $p.Bundle
         $info = Read-HarnessModuleInfo $src
         $bin = Get-HarnessBundleBinary $src
@@ -84,6 +88,37 @@ function Install-HarnessPlugins {
         $sha = Get-HarnessSha256 $privateBin
         if ($sha -cne (Get-HarnessSha256 $bin)) { Stop-Plugin "$($p.Bundle) changed while it was being copied" }
         [pscustomobject]@{ Id = $p.Id; Bundle = $p.Bundle; Source = $src; Private = $dst; Binary = $privateBin; BinaryLeaf = (Split-Path -Leaf $privateBin); Sha256 = $sha; Info = $info }
+    }
+    , @($rows)
+}
+
+$script:JsfxDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../jsfx'))
+
+# A JSFX shipped with the tool (jsfx/<name>.jsfx): the name REAPER shows ("JS: " and its desc line), the name to add
+# it by, and its path under the Effects directory as fx_ident and the saved block give it.
+function Get-HarnessJsfxInfo([Parameter(Mandatory)][string]$Name) {
+    $file = Join-Path $script:JsfxDir "$Name.jsfx"
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { Stop-Plugin "the JSFX $Name.jsfx is missing from the tool's jsfx directory" }
+    $desc = @([IO.File]::ReadAllLines($file) | Where-Object { $_ -match '^desc:' } | Select-Object -First 1)
+    if (-not $desc.Count) { Stop-Plugin "$Name.jsfx has no desc line" }
+    $rel = "reaper-harness/$Name.jsfx"
+    [pscustomobject]@{ Name = 'JS: ' + ($desc[0] -replace '^desc:', '').Trim(); AddName = "JS:$rel"; Ident = $rel; Source = $file; Sha256 = (Get-HarnessSha256 $file) }
+}
+
+# Copies the JSFX of the plugins configured with "jsfx" into Effects\reaper-harness\ of the private configuration
+# directory. Returns one row per such plugin: Id, Jsfx, Name, AddName, Ident, Sha256.
+function Install-HarnessJsfx {
+    param([Parameter(Mandatory)]$Plugins)
+    $cfgDir = Get-HarnessPinnedCfgDir
+    $target = Join-Path $cfgDir 'Effects\reaper-harness'
+    if (-not (Test-HarnessUnder $target $cfgDir)) { throw 'the private Effects directory is not inside the configuration directory' }
+    $rows = foreach ($p in @($Plugins.get_Values() | Where-Object { $_.Kind -eq 'jsfx' })) {
+        $info = Get-HarnessJsfxInfo $p.Jsfx
+        $null = New-Item -ItemType Directory -Force -Path $target
+        $dst = Join-Path $target "$($p.Jsfx).jsfx"
+        Copy-Item -LiteralPath $info.Source -Destination $dst -Force
+        if ((Get-HarnessSha256 $dst) -cne $info.Sha256) { Stop-Plugin "$($p.Jsfx).jsfx changed while it was being copied" }
+        [pscustomobject]@{ Id = $p.Id; Jsfx = $p.Jsfx; Name = $info.Name; AddName = $info.AddName; Ident = $info.Ident; Sha256 = $info.Sha256 }
     }
     , @($rows)
 }
@@ -252,5 +287,5 @@ function Update-HarnessScanCache {
     [pscustomobject]@{ Dirs = $scanDirs.Count; Scanned = $scan.Items.Count; Added = $r.Added; Replaced = $r.Replaced; Removed = $r.Removed; Unshielded = $scan.Unshielded }
 }
 
-Export-ModuleMember -Function Read-HarnessModuleInfo, Get-HarnessBundleBinary, Install-HarnessPlugins, Get-HarnessCacheKey, ConvertTo-HarnessCacheStamp, Update-HarnessScanCacheText,
+Export-ModuleMember -Function Read-HarnessModuleInfo, Get-HarnessBundleBinary, Install-HarnessPlugins, Get-HarnessJsfxInfo, Install-HarnessJsfx, Get-HarnessCacheKey, ConvertTo-HarnessCacheStamp, Update-HarnessScanCacheText,
     Get-HarnessForeignScanDirs, Get-HarnessScanItems, Update-HarnessScanCache, Get-HarnessSha256, Get-HarnessPluginPathValue, Set-HarnessPluginPath

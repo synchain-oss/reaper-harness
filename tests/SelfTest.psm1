@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:Src = Join-Path $PSScriptRoot '../src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Scenarios', 'Learn', 'Extensions', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $PSScriptRoot 'TempDir.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'FakeReaper.psm1') -ErrorAction Stop
 
@@ -275,6 +275,22 @@ function Get-IniCases {
     $t = Set-HarnessIniText -Text "[REAPER]`nx=1`n" -Section audioconfig -Key mode -Value 4
     & $add 'ini: a missing section is appended, LF style kept' $false ($t -ceq "[REAPER]`nx=1`n[audioconfig]`nmode=4`n")
     & $add 'ini: a mode key in [REAPER] is not taken for the one in [audioconfig]' $false ((Set-HarnessIniText -Text "[REAPER]`nmode=9`n[audioconfig]`n" -Section audioconfig -Key mode -Value 4) -ceq "[REAPER]`nmode=9`n[audioconfig]`nmode=4`n")
+    $two = "[REAPER]`r`nworkrender=16`r`n[audioconfig]`r`nworkrender=99`r`n"
+    & $add 'ini: a key is read from its own section only' $false (
+        (Get-HarnessIniTextValue -Text $two -Section REAPER -Key workrender) -ceq '16' -and (Get-HarnessIniTextValue -Text $two -Section audioconfig -Key workrender) -ceq '99' -and $null -eq (Get-HarnessIniTextValue -Text $two -Section nag -Key workrender))
+    & $add 'host: anticipative FX is bit 0 of workrender; without the key REAPER uses 17; the other bits are kept' $false (
+        (Get-HarnessWorkrender '' $true) -eq 17 -and (Get-HarnessWorkrender $null $false) -eq 16 -and (Get-HarnessWorkrender '16' $true) -eq 17 -and (Get-HarnessWorkrender '7' $false) -eq 6 -and
+        (Get-HarnessWorkrender 'x' $false) -eq 16 -and (Get-HarnessWorkrender '17' $true) -eq 17)
+    $dev = @{ dev_bsize = '2048'; dev_srate = '48000'; cfg_workrender = '16' }
+    & $add 'host: the device step accepts block, rate and anticipative FX as configured (workrender 16 is off, 17 on)' $false (
+        (Test-HarnessHostReadback -Facts $dev -Block 2048 -Sr 48000 -AnticipativeFx $false).Count -eq 0 -and
+        (Test-HarnessHostReadback -Facts @{ dev_bsize = '32'; dev_srate = '44100'; cfg_workrender = '17' } -Block 32 -Sr 44100 -AnticipativeFx $true).Count -eq 0)
+    & $add 'host: anticipative FX read back other than configured is a problem naming both' $true (
+        ((Test-HarnessHostReadback -Facts $dev -Block 2048 -Sr 48000 -AnticipativeFx $true) -join ';') -ceq 'anticipative FX processing reads off, expected on' -and
+        ((Test-HarnessHostReadback -Facts @{ dev_bsize = '2048'; dev_srate = '48000'; cfg_workrender = '17' } -Block 2048 -Sr 48000 -AnticipativeFx $false) -join ';') -ceq 'anticipative FX processing reads on, expected off')
+    & $add 'host: a workrender the driver could not read, a block size or a rate other than configured are problems' $true (
+        ((Test-HarnessHostReadback -Facts @{ dev_bsize = '2048'; dev_srate = '48000'; cfg_workrender = 'unavailable' } -Block 2048 -Sr 48000 -AnticipativeFx $false) -join ';') -ceq "workrender reads 'unavailable'" -and
+        ((Test-HarnessHostReadback -Facts $dev -Block 512 -Sr 44100 -AnticipativeFx $false) -join ';') -ceq 'block size reads 2048, expected 512;sample rate reads 48000, expected 44100')
     $cases
 }
 
@@ -430,6 +446,28 @@ function Get-WavCases([string]$Tmp) {
     & $add 'compare verdict: different rates cannot be compared: FAIL, and the lag is shown as ?' $true ($nc.Status -eq 'FAIL' -and $nc.Detail -like 'identical=no lag=? *cannot be compared*')
     & $add 'compare verdict: a peak above peakMaxDb is FAIL' $true ((Get-HarnessCompareVerdict -Facts (New-Facts @{ PeakB = 1.5 }) -PeakMaxDb 0).Detail -like '*peak 3.52 dBFS above 0.00*')
     & $add 'compare verdict: notSilent with a silent render is FAIL' $true ((Get-HarnessCompareVerdict -Facts (New-Facts @{ PeakB = 0 }) -NotSilent).Detail -like '*silent*')
+    # Channel criteria: key -> @{ Key; Channels; Min; Max }, as the configuration gives them
+    $cc = { param([string]$Key, [double]$Min, [double]$Max) [ordered]@{ $Key = [pscustomobject]@{ Key = $Key; Channels = @($Key -split '/' | ForEach-Object { ConvertTo-ChannelNumber $_ }); Min = $Min; Max = $Max } } }
+    $lv = New-Facts @{ Identical = $false; MaxDiff = 0.05; RmsA = [double[]](0.1, 0.1); RmsB = [double[]](0.05, 0.1) } # A: -20 / -20 dBFS; B: -26.02 / -20
+    $v = Get-HarnessCompareVerdict -Facts $lv -MaxDiffDb 0 -RmsDb (& $cc 'L' -27 -25)
+    & $add 'channel criteria: an RMS within its range is PASS; the RMS of every channel of both files follows the fixed facts' $false ($v.Status -eq 'PASS' -and $v.Detail -cmatch '^identical=no lag=0 .* peak=\S+ rms=-20\.00,-20\.00/-26\.02,-20\.00$')
+    & $add 'channel criteria: an RMS outside its range is FAIL naming the channel' $true ((Get-HarnessCompareVerdict -Facts $lv -MaxDiffDb 0 -RmsDb (& $cc 'R' -27 -25)).Detail -like '*failed: rms R -20.00 dB outside `[-27.00, -25.00`]')
+    & $add 'channel criteria: a ratio of two channels of the render within its range is PASS' $false ((Get-HarnessCompareVerdict -Facts $lv -MaxDiffDb 0 -EnergyRatioDb (& $cc 'L/R' -6.1 -5.9)).Status -eq 'PASS')
+    & $add 'channel criteria: the ratio the other way round is FAIL' $true ((Get-HarnessCompareVerdict -Facts $lv -MaxDiffDb 0 -EnergyRatioDb (& $cc 'R/L' -6.1 -5.9)).Detail -like '*failed: ratio R/L 6.02 dB outside*')
+    & $add 'channel criteria: a change against the reference within its range is PASS' $false ((Get-HarnessCompareVerdict -Facts $lv -MaxDiffDb 0 -RmsChangeDb (& $cc 'L' -6.1 -5.9)).Status -eq 'PASS')
+    & $add 'channel criteria: no change where one is expected is FAIL' $true ((Get-HarnessCompareVerdict -Facts $lv -MaxDiffDb 0 -RmsChangeDb (& $cc 'R' -6.1 -5.9)).Detail -like '*failed: rms change R 0.00 dB outside*')
+    $quiet = New-Facts @{ RmsA = [double[]](0, 0); RmsB = [double[]](0, 0.1); PeakB = 0.1 }
+    & $add 'channel criteria: digital silence counts as -400 dB, so [-400, -400] accepts a silent channel and a level does not' $true (
+        (Get-HarnessCompareVerdict -Facts $quiet -RmsDb (& $cc 'L' -400 -400)).Status -eq 'PASS' -and (Get-HarnessCompareVerdict -Facts $quiet -RmsDb (& $cc 'R' -400 -400)).Status -eq 'FAIL')
+    $silentBoth = New-Facts @{ RmsA = [double[]](0, 0); RmsB = [double[]](0, 0); PeakB = 0 }
+    & $add 'channel criteria: the ratio of two silent channels is undefined: FAIL whatever the range' $true ((Get-HarnessCompareVerdict -Facts $silentBoth -EnergyRatioDb (& $cc 'L/R' -400 24)).Detail -like '*ratio L/R is undefined (both channels are silent)*')
+    & $add 'channel criteria: a channel without finite samples has no RMS: FAIL' $true ((Get-HarnessCompareVerdict -Facts (New-Facts @{ RmsB = [double[]]([double]::NaN, 0.1) }) -RmsDb (& $cc 'L' -400 24)).Detail -like '*rms L is undefined*')
+    & $add 'channel criteria: a channel the render does not have is FAIL' $true ((Get-HarnessCompareVerdict -Facts (New-Facts @{ ChannelsB = 1; RmsB = [double[]](0.1) }) -RmsDb (& $cc 'R' -400 24)).Detail -like '*the render has no channel 2*')
+    $nf = Get-HarnessCompareVerdict -Facts (New-Facts @{ Identical = $false; NanB = 2; InfB = 1; NonFiniteB = 3 }) -MaxDiffDb 0
+    & $add 'compare verdict: NaN and Inf are counted apart after the fixed facts' $true ($nf.Status -eq 'FAIL' -and $nf.Detail -like '* nan=0/2 inf=0/1; failed: *NaN or Inf*')
+    $one = Get-HarnessRenderVerdict -Facts (New-Facts @{ RmsB = [double[]](0.05, 0.1) }) -EnergyRatioDb (& $cc 'L/R' -6.1 -5.9) -PeakMaxDb 0 -NotSilent
+    & $add 'render verdict: one render judged on its own starts with its own facts; criteria within range are PASS' $false ($one.Status -eq 'PASS' -and $one.Detail -cmatch '^frames=96000 channels=2 rate=48000 format=float32 nonfinite=0 peak=-6\.02 rms=-26\.02,-20\.00$')
+    & $add 'render verdict: Inf in a render judged on its own is FAIL and counted' $true ((Get-HarnessRenderVerdict -Facts (New-Facts @{ InfB = 1; NonFiniteB = 1 })).Detail -like '* inf=1; failed: NaN or Inf*')
     # Hand-made files through the C# reader and comparer
     $n = 4800
     $base = [double[]]::new($n * 2)
@@ -488,6 +526,19 @@ function Get-WavCases([string]$Tmp) {
     & $add 'WAV: a missing render is INCOMPLETE' $true ((& $cmp (Join-Path $Tmp 'none.wav')).Status -eq 'INCOMPLETE')
     $silent = & $file 'silent.wav' ([double[]]::new(200))
     & $add 'WAV: one render on its own: silent with notSilent is FAIL; the signal passes' $true ((Test-HarnessWavFile -Path $silent -NotSilent).Status -eq 'FAIL' -and (Test-HarnessWavFile -Path $a -NotSilent).Status -eq 'PASS')
+    # Right channel at half the left one: RMS per channel from the file
+    $lr = [double[]]$base.Clone(); for ($i = 1; $i -lt $lr.Length; $i += 2) { $lr[$i] = 0.5 * $lr[$i - 1] }
+    $lrFile = & $file 'left-right.wav' $lr
+    & $add 'WAV: the RMS of each channel comes from the file: right at half the left is a ratio of 6.02 dB' $true (
+        (Test-HarnessWavFile -Path $lrFile -EnergyRatioDb (& $cc 'L/R' 6.0 6.05)).Status -eq 'PASS' -and (Test-HarnessWavFile -Path $lrFile -EnergyRatioDb (& $cc 'L/R' -0.5 0.5)).Status -eq 'FAIL')
+    & $add 'WAV: a change of level against the reference is measured per channel (B at half A: -6.02 dB)' $true (
+        (& $cmp (& $file 'half2.wav' $half) @{ MaxDiffDb = 0; RmsChangeDb = (& $cc 'L' -6.05 -6.0) }).Status -eq 'PASS' -and (& $cmp (& $file 'half3.wav' $half) @{ MaxDiffDb = 0; RmsChangeDb = (& $cc 'L' -0.5 0.5) }).Status -eq 'FAIL')
+    $inf = [double[]]$base.Clone(); $inf[10] = [double]::PositiveInfinity; $inf[11] = [double]::NaN
+    $inff = Test-HarnessWavFile -Path (& $file 'inf.wav' $inf)
+    & $add 'WAV: a render on its own with Inf and NaN is FAIL, both counted' $true ($inff.Status -eq 'FAIL' -and $inff.Detail -like '*nonfinite=2 * nan=1 inf=1; failed: NaN or Inf*')
+    $infRms = Test-HarnessWavFile -Path (& $file 'inf-rms.wav' $inf) -RmsDb (& $cc 'L' -400 24)
+    & $add 'WAV: the RMS of a channel leaves out its NaN and Inf samples (they only fail the render for being there)' $false (
+        $infRms.Detail -cmatch ' rms=-?\d+\.\d\d,-?\d+\.\d\d nan=1 inf=1; failed: NaN or Inf samples present$')
     # The test signal is deterministic: the same seed gives the same bytes
     $s1 = Join-Path $Tmp 'sig1.wav'; $s2 = Join-Path $Tmp 'sig2.wav'; $s3 = Join-Path $Tmp 'sig3.wav'
     New-HarnessSignalFile -Path $s1 -Seconds 0.2 -Seed 7; New-HarnessSignalFile -Path $s2 -Seconds 0.2 -Seed 7; New-HarnessSignalFile -Path $s3 -Seconds 0.2 -Seed 8
@@ -557,7 +608,7 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     $configFile = Join-Path $RepoRoot 'tests/fixtures/config.json'
     $extensions = Import-HarnessExtensions (Read-HarnessConfigExtensions $configFile)
     $conf = Read-HarnessConfig -Path $configFile -Kinds $extensions.Kinds
-    & $add 'configuration: the fixture configuration is valid; the matrix expands to four scenarios' $false ($conf.Name -eq 'fixture' -and @($conf.Scenarios).Count -eq 12 -and @($conf.Scenarios | Where-Object { $_.id -like 'chain-*-4*' }).Count -eq 4)
+    & $add 'configuration: the fixture configuration is valid; the matrix expands to four scenarios' $false ($conf.Name -eq 'fixture' -and @($conf.Scenarios).Count -eq 20 -and @($conf.Scenarios | Where-Object { $_.id -like 'chain-*-4*' }).Count -eq 4)
     $text = [IO.File]::ReadAllText($configFile)
     $problems = {
         param([scriptblock]$Edit)
@@ -587,6 +638,37 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'an axis both in the matrix and given directly'; E = { param($c) (& $scenario $c 'chain')['sr'] = 48000 }; M = 'both directly and in matrix' }
         @{ L = 'a negative id that clashes with a built-in one'; E = { param($c) $c['negative'][0]['id'] = 'neg-timeout' }; M = 'neg-timeout' }
         @{ L = 'an extension kind with a bad field (its own Validate)'; E = { param($c) (& $scenario $c 'ext-count')['count'] = 99 }; M = 'count' }
+        @{ L = 'a state with both a template and a state file'; E = { param($c) $c['plugins']['gain']['states']['loud']['template'] = 'states/template.rpp' }; M = 'must be { template, track, fx } or { stateFile }' }
+        @{ L = 'a template state without the FX number'; E = { param($c) $c['plugins']['gain']['states']['quiet'].Remove('fx') }; M = "states.quiet: missing 'fx'" }
+        @{ L = 'an FX naming a state its plugin does not have'; E = { param($c) $c['layouts']['states']['tracks'][0]['fx'][0]['state'] = 'nope' }; M = "has no state 'nope'" }
+        @{ L = 'states on a JSFX'; E = { param($c) $c['plugins']['delay']['states'] = [ordered]@{ x = [ordered]@{ stateFile = 'states/loud.RfxChain' } } }; M = 'states are only for VST3 plugins' }
+        @{ L = 'a plugin with both a bundle and a JSFX'; E = { param($c) $c['plugins']['delay']['bundle'] = 'Other.vst3' }; M = 'needs exactly one of bundle' }
+        @{ L = 'a plugin with neither a bundle nor a JSFX'; E = { param($c) $c['plugins']['bus'].Remove('bundle') }; M = 'needs exactly one of bundle' }
+        @{ L = 'an unknown JSFX'; E = { param($c) $c['plugins']['delay']['jsfx'] = 'other-delay' }; M = 'plugins.delay.jsfx' }
+        @{ L = 'a send to a track that is not in the layout'; E = { param($c) $c['layouts']['routing']['tracks'][0]['sends'][0]['to'] = 'Nowhere' }; M = "sends to 'Nowhere'" }
+        @{ L = 'a track sending to itself'; E = { param($c) $c['layouts']['routing']['tracks'][0]['sends'][0]['to'] = 'Drums' }; M = 'sends to itself' }
+        @{ L = 'a loop of sends'; E = { param($c) $c['layouts']['routing']['tracks'][2]['sends'] = @([ordered]@{ to = 'Drums' }) }; M = 'the routing has a loop: Drums -> Verb -> Drums' }
+        @{ L = 'a loop through a folder (the folder sends to its child, the child feeds the folder)'; E = { param($c) $c['layouts']['bus']['tracks'][0]['sends'] = @([ordered]@{ to = 'Vox 1' }) }; M = 'the routing has a loop: Bus -> Vox 1 -> Bus' }
+        @{ L = 'an unknown send mode'; E = { param($c) $c['layouts']['routing']['tracks'][0]['sends'][0]['mode'] = 'side' }; M = 'sends[0].mode' }
+        @{ L = 'a pan out of range'; E = { param($c) $c['layouts']['routing']['tracks'][0]['pan'] = 2 }; M = 'tracks[0].pan' }
+        @{ L = 'a signal on a track that carries none'; E = { param($c) $c['layouts']['routing']['tracks'][2]['signal'] = [ordered]@{ seed = 3 } }; M = 'source is false' }
+        @{ L = 'a stem that is not a track of the layout'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = 'Ghost' }; M = "'Ghost' is not a track of layout 'states'" }
+        @{ L = 'a stem whose track name cannot name a file (not ASCII)'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = 'V' + [char]0xF6 + 'x' }; M = 'cannot name a stem file' }
+        @{ L = 'a stem whose track name ends in a dot'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = 'Quiet.' }; M = 'cannot name a stem file' }
+        @{ L = 'a stem named Master (the name of the master file)'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = 'master' }; M = 'a track named Master cannot be a stem' }
+        @{ L = 'a stem listed twice, differing only by case'; E = { param($c) (& $scenario $c 'routing')['stems'] += 'drums' }; M = "'drums' is listed twice" }
+        @{ L = 'a stem compared with the reference when the scenario compares with none'; E = { param($c) (& $scenario $c 'routing-alone')['stems'] = @([ordered]@{ track = 'Cue'; compare = 'reference' }) }; M = 'compare reference needs a reference' }
+        @{ L = 'a stem the compared layout does not have'; E = { param($c) (& $scenario $c 'states')['compare'] = [ordered]@{ layout = 'chain' } }; M = "the layout compared with ('chain') has no track 'Quiet'" }
+        @{ L = 'maxDiffDb when the render is compared with none'; E = { param($c) (& $scenario $c 'routing-alone')['maxDiffDb'] = -120 }; M = 'maxDiffDb needs a reference' }
+        @{ L = 'rmsChangeDb when the render is compared with none'; E = { param($c) (& $scenario $c 'routing-alone')['rmsChangeDb'] = [ordered]@{ L = @(0, 1) } }; M = 'rmsChangeDb needs a reference' }
+        @{ L = 'a channel criterion on R of a mono render'; E = { param($c) (& $scenario $c 'states')['mono'] = $true }; M = 'rmsChangeDb.R: the render has 1 channel' }
+        @{ L = 'a channel criterion on channel 3 of a stereo render'; E = { param($c) (& $scenario $c 'states')['rmsChangeDb']['3'] = @(0, 1) }; M = 'rmsChangeDb.3: the render has 2 channels' }
+        @{ L = 'a ratio of a channel with itself'; E = { param($c) (& $scenario $c 'routing')['energyRatioDb'] = [ordered]@{ 'L/1' = @(0, 1) } }; M = 'a ratio needs two different channels' }
+        @{ L = 'a range whose min is above its max'; E = { param($c) (& $scenario $c 'routing')['energyRatioDb']['L/R'] = @(7, 5) }; M = 'min 7 is above max 5' }
+        @{ L = 'a range of one number'; E = { param($c) (& $scenario $c 'routing')['energyRatioDb']['L/R'] = @(5) }; M = 'needs at least 2 items' }
+        @{ L = 'a range of three numbers'; E = { param($c) (& $scenario $c 'routing')['energyRatioDb']['L/R'] = @(1, 2, 3) }; M = 'has more than 2 items' }
+        @{ L = 'savereopen with 0 cycles'; E = { param($c) (& $scenario $c 'states-reopen')['cycles'] = 0 }; M = 'cycles' }
+        @{ L = 'an unknown host setting'; E = { param($c) (& $scenario $c 'pdc')['host']['lowLatency'] = $true }; M = "unknown key 'lowLatency'" }
     )
     foreach ($mu in $mutations) {
         $found = & $problems $mu.E
@@ -614,7 +696,30 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'JSON: keys named Count, Keys and Values are written back as they were read' $false ((ConvertTo-HarnessJsonText -Value (ConvertFrom-HarnessJson $jsonText)) -ceq $jsonText)
     # Selection
     $picked = Select-HarnessScenarios -Config $conf
-    & $add 'selection: without -Only every scenario and negative case (own and built-in) is picked' $false ($picked.Positive.Count -eq 12 -and $picked.Negative.Count -eq 9)
+    & $add 'selection: without -Only every scenario and negative case (own and built-in) is picked' $false ($picked.Positive.Count -eq 20 -and $picked.Negative.Count -eq 11)
+    # Defaults and the parts of the extended layouts
+    $rt = @($conf.Layouts['routing'].Tracks)
+    & $add 'configuration: a send is post-fader at volume 1 unless given; master send is on unless turned off; pan and mute as given' $false (
+        $rt[0].Sends[0].Mode -ceq 'post' -and $rt[0].Sends[0].Volume -eq 0.5 -and $rt[0].Sends[1].Mode -ceq 'pre' -and $rt[0].Sends[1].Volume -eq 1 -and $rt[0].Pan -eq -0.5 -and
+        $rt[1].Mute -and $rt[1].MasterSend -and -not $rt[3].MasterSend -and $rt[2].Pan -eq 0 -and -not $rt[2].Mute)
+    & $add 'configuration: a track signal takes the top-level fields it does not give; a track without one has none of its own' $false (
+        $rt[0].Signal.Seed -eq 11 -and $rt[0].Signal.NoiseDb -eq -24 -and $rt[0].Signal.SineHz -eq 440 -and $rt[1].Signal.SineHz -eq 1000 -and $rt[1].Signal.SineDb -eq -20 -and $null -eq $rt[2].Signal)
+    $routing = @($conf.Scenarios | Where-Object id -eq 'routing')[0]
+    $alone = @($conf.Scenarios | Where-Object id -eq 'routing-alone')[0]
+    & $add 'configuration: a stem takes maxDiffDb, lag, peakMaxDb and notSilent of its scenario, never its channel criteria' $false (
+        $routing.stems[0].Criteria.maxDiffDb -eq 0 -and $null -eq $routing.stems[0].Criteria.rmsChangeDb -and $null -eq $routing.stems[0].Criteria.energyRatioDb -and
+        $null -ne $routing.stems[2].Criteria.energyRatioDb -and $null -eq $routing.stems[2].Criteria.rmsChangeDb -and $routing.stems[0].Compare -ceq 'reference' -and $routing.stems[3].Compare -ceq 'none' -and
+        $alone.stems[0].Compare -ceq 'none' -and $alone.stems[0].Criteria.notSilent)
+    $pdcDev = @($conf.Scenarios | Where-Object id -eq 'pdc-device')[0]
+    & $add 'configuration: anticipative FX is on unless a scenario turns it off; savereopen cycles default to 1' $false (
+        $routing.host.AnticipativeFx -and -not $pdcDev.host.AnticipativeFx -and (@($conf.Scenarios | Where-Object id -eq 'bus-reopen')[0]).cycles -eq 1 -and (@($conf.Scenarios | Where-Object id -eq 'states-reopen')[0]).cycles -eq 3)
+    $pl = $conf.Plugins
+    & $add 'configuration: a JSFX plugin has its kind and parameters; states keep their source' $false (
+        $pl['delay'].Kind -ceq 'jsfx' -and $pl['delay'].Jsfx -ceq 'harness-pdc-delay' -and $pl['gain'].Kind -ceq 'vst3' -and $pl['gain'].States['quiet'].Template -ceq 'states/template.rpp' -and
+        $pl['gain'].States['quiet'].Track -ceq 'Lead' -and $pl['gain'].States['quiet'].Fx -eq 1 -and $pl['gain'].States['loud'].StateFile -ceq 'states/loud.RfxChain')
+    $loopTracks = @([pscustomobject]@{ Name = 'A'; Sends = @([pscustomobject]@{ To = 'B' }); Parent = ''; MasterSend = $true }, [pscustomobject]@{ Name = 'B'; Sends = @(); Parent = ''; MasterSend = $true })
+    & $add 'routing: a send without a way back is no loop; a parent that the child does not feed (master send off) is no loop either' $false (
+        (Find-RoutingCycle $loopTracks) -ceq '' -and (Find-RoutingCycle @([pscustomobject]@{ Name = 'F'; Sends = @([pscustomobject]@{ To = 'C' }); Parent = ''; MasterSend = $true }, [pscustomobject]@{ Name = 'C'; Sends = @(); Parent = 'F'; MasterSend = $false })) -ceq '')
     $one = Select-HarnessScenarios -Config $conf -Only '^chain-offline-48000$' -NoNegative
     & $add 'selection: -Only picks one scenario; -NoNegative leaves the negative cases out' $false ($one.Positive.Count -eq 1 -and $one.Negative.Count -eq 0)
     & $add 'selection: -Only picking nothing is a usage error' $true (Test-Usage { Select-HarnessScenarios -Config $conf -Only '^no-such-scenario$' } '*picked no scenario*')
@@ -629,13 +734,14 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'schema: schema/config.schema.json is what run.ps1 -WriteSchema generates now (regenerate it after changing Config.psm1)' $false ($schemaText -ceq (ConvertTo-HarnessJsonSchema))
     $agree = { param([string]$Json, [bool]$Accepted) $schemaOk = try { Test-Json -Json $Json -Schema $schemaText -ErrorAction Stop } catch { $false }; $schemaOk -eq $Accepted }
     & $add 'schema: Test-Json accepts the fixture configuration, like the validator' $false (& $agree $text $true)
-    $structural = @($mutations | Where-Object { $_.L -in 'an unknown key at the top', 'an unknown key in a scenario', 'schema 2', 'a string where a number belongs', 'a sample rate out of range', 'a scenario id that breaks the pattern', 'an unknown expected outcome', 'a negative case without expectDetail' })
+    $structural = @($mutations | Where-Object { $_.L -in 'an unknown key at the top', 'an unknown key in a scenario', 'schema 2', 'a string where a number belongs', 'a sample rate out of range', 'a scenario id that breaks the pattern', 'an unknown expected outcome', 'a negative case without expectDetail',
+            'a state with both a template and a state file', 'a template state without the FX number', 'an unknown JSFX', 'an unknown send mode', 'a pan out of range', 'a range of one number', 'a range of three numbers', 'savereopen with 0 cycles', 'an unknown host setting' })
     $disagree = @(foreach ($mu in $structural) {
             $raw = ConvertFrom-HarnessJson $text
             & $mu.E $raw
             if (-not (& $agree (ConvertTo-HarnessJsonText -Value $raw) $false)) { $mu.L }
         })
-    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 8 -and $disagree.Count -eq 0)
+    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 17 -and $disagree.Count -eq 0)
     $cases
 }
 
@@ -657,6 +763,30 @@ function Get-ProjectCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'project: the learned block lines are written as they are' $false ([regex]::Matches($text, '(?m)^      STATE$').Count -eq 3)
     & $add 'project: -NoFx writes no FXCHAIN (the dry reference)' $false ((New-HarnessProjectText -Layout $bus -SourceWav 'S' -RenderDir 'D' -RenderName 'N' -NoFx) -notmatch 'FXCHAIN')
     & $add 'project: a plugin without a learned block is an error, never a hand-written block' $true ($(try { $null = New-HarnessProjectText -Layout $bus -Blocks @{} -SourceWav 'S' -RenderDir 'D' -RenderName 'N'; $false } catch { $_.Exception.Message -like '*no learned block*' }))
+    $rl = $conf.Layouts['routing']
+    $rb = @{}
+    foreach ($t2 in $rl.Tracks) { foreach ($fx in $t2.Fx) { $rb[$fx.Variant] = @('<VST "x"', 'S', '>') } }
+    $rt = New-HarnessProjectText -Layout $rl -Blocks $rb -SourceWav 'S.wav' -Sources @{ Drums = 'D.wav' } -RenderDir 'D' -RenderName 'N' -Stems @('Drums', 'Cue')
+    $part = { param($name) [regex]::Match($rt, "(?s)  <TRACK\n    NAME `"$name`"\n.*?\n  >\n").Value }
+    & $add 'project: pan, mute and the master send are written per track' $false (
+        (& $part 'Drums') -match 'VOLPAN 1 -0.5 -1 -1 1' -and (& $part 'Keys') -match 'MUTESOLO 1 0 0' -and (& $part 'Drums') -match 'MUTESOLO 0 0 0' -and (& $part 'Cue') -match 'MAINSEND 0 0' -and (& $part 'Verb') -match 'MAINSEND 1 0')
+    & $add 'project: a send is a receive of the receiving track: source track index, mode (0 post-fader, 3 pre-fader) and volume' $false (
+        (& $part 'Verb') -match "AUXRECV 0 0 0.5 0 0 0 0 0 0 -1:U 0 -1 ''" -and (& $part 'Verb') -match 'AUXRECV 1 0 1 0 ' -and (& $part 'Cue') -match 'AUXRECV 0 3 1 0 ' -and (& $part 'Drums') -notmatch 'AUXRECV' -and [regex]::Matches($rt, 'AUXRECV').Count -eq 3)
+    $pfx = [pscustomobject]@{ Tracks = @(
+            [pscustomobject]@{ Name = 'A'; Source = $true; Folder = $false; Depth = 0; Volume = 1.0; Pan = 0.0; Mute = $false; MasterSend = $true; Sends = @([pscustomobject]@{ To = 'B'; Mode = 'prefx'; Volume = 0.25 }); Fx = @() }
+            [pscustomobject]@{ Name = 'B'; Source = $false; Folder = $false; Depth = 0; Volume = 1.0; Pan = 0.0; Mute = $false; MasterSend = $true; Sends = @(); Fx = @() }) }
+    & $add 'project: a pre-FX send is mode 1' $false ((New-HarnessProjectText -Layout $pfx -SourceWav 'S' -RenderDir 'D' -RenderName 'N') -match 'AUXRECV 0 1 0.25 0 ')
+    & $add 'project: a track with a signal of its own gets that file; the other source tracks the shared one' $false ((& $part 'Drums') -match 'FILE "D.wav"' -and (& $part 'Keys') -match 'FILE "S.wav"' -and (& $part 'Verb') -notmatch 'FILE')
+    & $add 'project: with stems each file is named after its track, REAPER renders master and stems, only the stem tracks are selected' $false (
+        $rt -match 'RENDER_PATTERN "N-\$track"' -and $rt -match 'RENDER_STEMS 1' -and (@([regex]::Matches($rt, 'SEL (\d)') | ForEach-Object { $_.Groups[1].Value }) -join '') -ceq '1001')
+    & $add 'project: without stems one file named as asked, no stem render, no track selected' $false ($text -match 'RENDER_PATTERN "N"' -and $text -notmatch 'RENDER_STEMS' -and $text -notmatch 'SEL 1')
+    $lp = New-HarnessLearnProjectText -Variants @([pscustomobject]@{ Key = 'gain|'; State = '' }, [pscustomobject]@{ Key = 'gain@quiet|'; State = 'quiet' }) -States @{ 'gain@quiet|' = @('<VST "q"', 'Q', '>') }
+    & $add 'learn project: an empty track per variant, the state block already on the track of a named state' $false ($lp -match '(?s)NAME "learn-1"\n    NCHAN 2\n  >\n  <TRACK\n    NAME "learn-2"\n    NCHAN 2\n    <FXCHAIN\n      BYPASS 0 0 0\n      <VST "q"\n      Q\n      >\n    >')
+    & $add 'learn project: a named state without its block is an error' $true ($(try { $null = New-HarnessLearnProjectText -Variants @([pscustomobject]@{ Key = 'k'; State = 's' }); $false } catch { $true }))
+    $jsb = Get-HarnessFxBlocks "<REAPER_PROJECT`n  <TRACK`n    NAME t`n    <FXCHAIN`n      BYPASS 1 0 0`n      <JS `"reaper-harness/a b.jsfx`" `"`"`n        0 -`n      >`n    >`n  >`n>`n"
+    & $add 'saved project: a JS block is found with its path under Effects (quoted when it holds a space); an unquoted track name is read too' $false (
+        @($jsb['t']).Count -eq 1 -and @($jsb['t'])[0].Kind -ceq 'JS' -and @($jsb['t'])[0].File -ceq 'reaper-harness/a b.jsfx' -and @($jsb['t'])[0].Bypass)
+    & $add 'tokens: REAPER quotes a string with ", '' or ` (one the text does not hold)' $false (((ConvertFrom-HarnessRppTokens "VST 'a `"b`"' ``c'd`` `"`" e") -join '|') -ceq 'VST|a "b"|c''d||e')
     & $add 'project: a double quote in a name or path is refused' $true ($(try { $null = New-HarnessProjectText -Layout $bus -SourceWav 'a"b' -RenderDir 'D' -RenderName 'N' -NoFx; $false } catch { $true }))
     $saved = "<REAPER_PROJECT 0.1`n  <TRACK`n    NAME `"learn-1`"`n    <FXCHAIN`n      BYPASS 1 0 0`n      <VST `"VST3: Fixture Gain (Fixture Audio)`" `"Fixture Gain.vst3`" 0 `"`" 1234567890{5a1b2c3d4e5f60718293a4b5c6d7e8f9} `"`"`n        AAAA`n        <NESTED`n          x`n        >`n      >`n    >`n  >`n  <TRACK`n    NAME `"learn-2`"`n  >`n>`n"
     $fb = Get-HarnessFxBlocks $saved
@@ -669,6 +799,17 @@ function Get-ProjectCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'Lua job: backslashes, quotes and line breaks are escaped; keys sorted; numbers invariant' $false ($luaText -ceq "return {[`"flag`"]=true,[`"list`"]={1,`"x`"},[`"n`"]=0.5,[`"none`"]=nil,[`"p`"]=`"a\\b\`"c\nd`"}`n")
     $back = ConvertFrom-FakeLua $luaText
     & $add "Lua job: the stand-in's reader gets back what was written" $false ($back['p'] -ceq "a\b`"c`nd" -and $back['n'] -eq 0.5 -and $back['list'][1] -ceq 'x' -and $back['flag'] -eq $true)
+    $sigDir = Join-Path $Tmp 'signals'
+    $null = New-Item -ItemType Directory -Force -Path $sigDir
+    $sigCtx = [pscustomobject]@{ Signal = [pscustomobject]@{ Seconds = 0.1; Seed = [uint32]1; NoiseDb = -20.0; SineHz = 0.0; SineDb = -20.0 }; Signals = @{}; Work = $sigDir; Files = [Collections.Generic.List[string]]::new() }
+    $spec = { param([uint32]$Seed, [double]$Hz) [pscustomobject]@{ Seed = $Seed; NoiseDb = -20.0; SineHz = $Hz; SineDb = -20.0 } }
+    $top = Get-HarnessSignal $sigCtx 48000 2
+    $own = Get-HarnessSignal $sigCtx 48000 2 -Spec (& $spec 11 0)
+    $sine = Get-HarnessSignal $sigCtx 48000 2 -Spec (& $spec 11 1000)
+    $again = Get-HarnessSignal $sigCtx 48000 2 -Spec (& $spec 11 0)
+    $sha = { param($f) (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash }
+    & $add 'signals: a track signal of its own gets a file of its own; the same settings give the same file, whichever track asks' $false (
+        $again -ceq $own -and @($top, $own, $sine | Select-Object -Unique).Count -eq 3 -and @($top, $own, $sine | ForEach-Object { & $sha $_ } | Select-Object -Unique).Count -eq 3)
     $cases
 }
 
@@ -677,6 +818,14 @@ function Get-PluginCases([string]$Tmp, [string]$RepoRoot) {
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
     $fixtures = Join-Path $RepoRoot 'tests/fixtures/plugins'
     $gain = Read-HarnessModuleInfo (Join-Path $fixtures 'Fixture Gain.vst3')
+    $js = Get-HarnessJsfxInfo 'harness-pdc-delay'
+    & $add 'JSFX: the shipped PDC delay is shown as JS: <desc>, added as JS:reaper-harness/<file>, hashed' $false (
+        $js.Name -ceq 'JS: reaper-harness PDC delay' -and $js.AddName -ceq 'JS:reaper-harness/harness-pdc-delay.jsfx' -and $js.Ident -ceq 'reaper-harness/harness-pdc-delay.jsfx' -and $js.Sha256 -cmatch '^[0-9a-f]{64}$')
+    & $add 'JSFX: one that is not shipped is a plugin error' $true ($(try { $null = Get-HarnessJsfxInfo 'nope'; $false } catch { $_.Exception.Message -like 'PLUGIN:*nope.jsfx*' }))
+    $jsText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'jsfx/harness-pdc-delay.jsfx'))
+    & $add 'JSFX: the delay reports itself as PDC on both channels only while "Report delay as PDC" is on' $false (
+        $jsText -match '(?m)^slider1:0<0,8192,1>Delay \(samples\)$' -and $jsText -match '(?m)^slider2:1<0,1,1\{Off,On\}>Report delay as PDC$' -and $jsText -match 'pdc_delay = slider2 >= 0\.5 \? delay : 0;' -and
+        $jsText -match 'pdc_bot_ch = 0;' -and $jsText -match 'pdc_top_ch = 2;')
     & $add 'moduleinfo: the Audio Module Class gives name, vendor and class ID (JSON with trailing commas, as the SDK writes it)' $false ($gain.Name -ceq 'Fixture Gain' -and $gain.Vendor -ceq 'Fixture Audio' -and $gain.Cid -ceq '5A1B2C3D4E5F60718293A4B5C6D7E8F9')
     & $add 'REAPER name: "VST3: <Name> (<Vendor>)"' $false ((Get-HarnessReaperName $gain) -ceq 'VST3: Fixture Gain (Fixture Audio)')
     $plugins = Join-Path $Tmp 'pre-plugins'
@@ -741,7 +890,9 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
     $conf = Read-HarnessConfig -Path $configFile -Kinds (Import-HarnessExtensions (Read-HarnessConfigExtensions $configFile)).Kinds
     $variants = Get-HarnessLearnVariants -Config $conf -Scenarios @($conf.Scenarios)
     $keys = @($variants | ForEach-Object { $_.Key })
-    & $add "learning: one default variant per plugin first, then each distinct parameter set once ($($keys -join ', '))" $false ($keys[0] -ceq 'gain|' -and $keys[1] -ceq 'bus|' -and $keys.Count -eq 4 -and @($keys | Select-Object -Unique).Count -eq 4)
+    & $add "learning: one default variant per plugin first, then each distinct parameter set and named state once ($($keys -join ', '))" $false (
+        ($keys[0..2] -join ',') -ceq 'gain|,bus|,delay|' -and $keys.Count -eq 10 -and @($keys | Select-Object -Unique).Count -eq 10 -and 'gain@quiet|' -cin $keys -and 'gain@loud|' -cin $keys -and
+        @($variants | Where-Object { $_.Key -ceq 'gain@loud|' })[0].State -ceq 'loud' -and 'delay|Delay (samples)=0.0078125' -cin $keys)
     $fi = Split-HarnessFxIdent 'C:\x\plugins\A.vst3\Contents\x86_64-win\A.vst3<1234567890{5a1b2c3d4e5f60718293a4b5c6d7e8f9'
     & $add 'fx_ident: path and upper-case class ID (REAPER writes no closing brace); a closing brace or negative uid is fine too; anything else gives nothing' $false (
         $fi.Path -ceq 'C:\x\plugins\A.vst3\Contents\x86_64-win\A.vst3' -and $fi.Cid -ceq '5A1B2C3D4E5F60718293A4B5C6D7E8F9' -and (Split-HarnessFxIdent 'p<-5{5A1B2C3D4E5F60718293A4B5C6D7E8F9}').Path -ceq 'p' -and
@@ -750,12 +901,19 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
         $null -eq (Test-HarnessParamValue '0.500000400' '' @{ Normalized = 0.5; Display = $null }) -and (Test-HarnessParamValue '0.500002' '' @{ Normalized = 0.5; Display = $null }) -like 'reads*' -and
         $null -eq (Test-HarnessParamValue '0.3' '0.25' @{ Normalized = 0.25; Display = '0.25' }) -and (Test-HarnessParamValue '0.25' '0.3' @{ Normalized = 0.25; Display = '0.25' }) -like 'shows*' -and
         (Test-HarnessParamValue 'missing' '' @{ Normalized = 0.5; Display = $null }) -eq 'no such parameter')
+    $reopen = @{ before_t0_fx0_param1 = '0.5'; after1_t0_fx0_param1 = '0.5'; after2_t0_fx0_param1 = '0.5'; after3_t0_fx0_param1 = '0.5'; before_tracks = '1'; after1_tracks = '1'; after2_tracks = '1'; after3_tracks = '1' }
+    & $add 'savereopen: the same values after each of 3 reopens are no problem' $false ((Test-HarnessReopenFacts -Facts $reopen -Cycles 3).Count -eq 0)
+    $changed = $reopen.Clone(); $changed['after2_t0_fx0_param1'] = '0.6'
+    $missing = $reopen.Clone(); $missing.Remove('after3_tracks')
+    & $add 'savereopen: a value changed on the second of 3 reopens, or missing after the third, is a problem naming the reopen' $true (
+        ((Test-HarnessReopenFacts -Facts $changed -Cycles 3) -join ';') -ceq "t0_fx0_param1 changed on reopen 2 of 3: '0.5' -> '0.6'" -and
+        ((Test-HarnessReopenFacts -Facts $missing -Cycles 3) -join ';') -ceq "tracks changed on reopen 3 of 3: '1' -> ''" -and (Test-HarnessReopenFacts -Facts $changed -Cycles 1).Count -eq 0)
     # A report as the driver writes it, and a saved project, for two variants
     $installed = @{
         gain = [pscustomobject]@{ Binary = 'P:\plugins\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3'; Info = [pscustomobject]@{ Name = 'Fixture Gain'; Vendor = 'Fixture Audio'; Cid = '5A1B2C3D4E5F60718293A4B5C6D7E8F9' } }
         bus  = [pscustomobject]@{ Binary = 'P:\plugins\Fixture Bus.vst3\Contents\x86_64-win\Fixture Bus.vst3'; Info = [pscustomobject]@{ Name = 'Fixture Bus'; Vendor = 'Fixture Audio'; Cid = '0123456789ABCDEF0123456789ABCDEF' } }
     }
-    $vs = @([pscustomobject]@{ Key = 'gain|g'; Plugin = 'gain'; Params = [ordered]@{ Gain = [pscustomobject]@{ Normalized = 0.5; Display = $null } } }, [pscustomobject]@{ Key = 'bus|'; Plugin = 'bus'; Params = [ordered]@{} })
+    $vs = @([pscustomobject]@{ Key = 'gain|g'; Plugin = 'gain'; State = ''; Params = [ordered]@{ Gain = [pscustomobject]@{ Normalized = 0.5; Display = $null } } }, [pscustomobject]@{ Key = 'bus|'; Plugin = 'bus'; State = ''; Params = [ordered]@{} })
     $report = {
         @{
             fx1_idx = '0'; fx1_name = 'VST3: Fixture Gain (Fixture Audio)'; fx1_offline = 'false'; fx1_ident = "$($installed.gain.Binary)<1{5A1B2C3D4E5F60718293A4B5C6D7E8F9"; fx1_p1 = '0.500000000'; fx1_p1_display = '0.50'
@@ -784,6 +942,113 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'learn report: a saved block with another class ID is a failure' $true (@((& $check (& $report) (& $savedOf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')).Fail -match 'saved block has class ID').Count -eq 1)
     & $add 'learn report: two blocks on a learn track is a failure (which one would be the plugin?)' $true (@((& $check (& $report) (& $savedOf '5A1B2C3D4E5F60718293A4B5C6D7E8F9' 2)).Fail -match 'has 2 plugin blocks').Count -eq 1)
     & $add 'learn report: no saved project at all is a failure for every variant' $true ((& $check (& $report) $null).Fail.Count -eq 2)
+    # A named state: REAPER loads it from the block on its track; with nothing set on top it must come back as given
+    $stBlock = @('<VST "VST3: Fixture Gain (Fixture Audio)" "Fixture Gain.vst3" 0 "" 1234567890{5A1B2C3D4E5F60718293A4B5C6D7E8F9} ""', 'FAKESTATE QUlFRA==', '>')
+    $stTable = [ordered]@{ 'gain@quiet' = [pscustomobject]@{ Plugin = 'gain'; State = 'quiet'; Lines = $stBlock; Sha = '0123456789ab' } }
+    $sv = @([pscustomobject]@{ Key = 'gain@quiet|'; Plugin = 'gain'; State = 'quiet'; Params = [ordered]@{} })
+    $sReport = @{ fx1_idx = '0'; fx1_name = 'VST3: Fixture Gain (Fixture Audio)'; fx1_offline = 'false'; fx1_ident = "$($installed.gain.Binary)<1{5A1B2C3D4E5F60718293A4B5C6D7E8F9" }
+    $sSaved = { param([string]$body) Get-HarnessFxBlocks ("<REAPER_PROJECT`n  <TRACK`n    NAME `"learn-1`"`n    <FXCHAIN`n      BYPASS 0 0 0`n      $($stBlock[0])`n        $body`n      >`n    >`n  >`n>`n") }
+    $sc = { param($rep, $saved) Test-HarnessLearnReport -Variants $sv -Installed $installed -States $stTable -Report $rep -Saved $saved -SameFile $same }
+    $okS = & $sc $sReport (& $sSaved 'FAKESTATE QUlFRA==')
+    & $add 'learn report: a named state that comes back as given is learned as a variant of its own' $false ($okS.Fail.Count -eq 0 -and $okS.Blocks.ContainsKey('gain@quiet|'))
+    & $add 'learn report: a named state the plugin saves back changed is a failure (it does not hold the state as given)' $true (@((& $sc $sReport (& $sSaved 'FAKESTATE b3RoZXI=')).Fail -match 'saved its state back changed').Count -eq 1)
+    $r2 = $sReport.Clone(); $r2.fx1_idx = '-1'
+    & $add 'learn report: a named state whose block did not load is a failure saying so' $true (@((& $sc $r2 (& $sSaved 'FAKESTATE QUlFRA==')).Fail -match 'state quiet did not load from its state block').Count -eq 1)
+    # The JSFX shipped with the tool: checked by the name REAPER shows and its path under Effects
+    $jsfx = @{ delay = [pscustomobject]@{ Name = 'JS: reaper-harness PDC delay'; AddName = 'JS:reaper-harness/harness-pdc-delay.jsfx'; Ident = 'reaper-harness/harness-pdc-delay.jsfx' } }
+    $jv = @([pscustomobject]@{ Key = 'delay|'; Plugin = 'delay'; State = ''; Params = [ordered]@{} })
+    $jReport = @{ fx1_idx = '0'; fx1_name = 'JS: reaper-harness PDC delay'; fx1_offline = 'false'; fx1_ident = 'reaper-harness/harness-pdc-delay.jsfx' }
+    $jSaved = { param([string]$Header = '<JS reaper-harness/harness-pdc-delay.jsfx ""') Get-HarnessFxBlocks ("<REAPER_PROJECT`n  <TRACK`n    NAME `"learn-1`"`n    <FXCHAIN`n      BYPASS 0 0 0`n      $Header`n        0 1 - -`n      >`n    >`n  >`n>`n") }
+    $jc = { param($rep, $saved) Test-HarnessLearnReport -Variants $jv -Installed $installed -Jsfx $jsfx -Report $rep -Saved $saved -SameFile $same }
+    $okJ = & $jc $jReport (& $jSaved)
+    & $add 'learn report: the JSFX is learned by the name REAPER shows and its path; it is added as JS:<path>' $false (
+        $okJ.Fail.Count -eq 0 -and $okJ.Blocks['delay|'][0] -like '<JS reaper-harness/*' -and $okJ.AddNames['delay'] -ceq 'JS:reaper-harness/harness-pdc-delay.jsfx' -and $okJ.Names['delay'] -ceq 'JS: reaper-harness PDC delay')
+    $r3 = $jReport.Clone(); $r3.fx1_ident = 'other/harness-pdc-delay.jsfx'
+    & $add 'learn report: a JSFX of that name from another path is a failure' $true (@((& $jc $r3 (& $jSaved)).Fail -match "has fx_ident 'other/").Count -eq 1)
+    & $add 'learn report: a saved JS block of another effect is a failure' $true (@((& $jc $jReport (& $jSaved '<JS other/harness-pdc-delay.jsfx ""')).Fail -match 'not the JS block').Count -eq 1)
+    # The state proof: what REAPER saves back with the project open, against the blocks it was given
+    $spLayout = $conf.Layouts['states']
+    $spBlocks = @{ 'gain@quiet|' = @('<VST "q"', 'Q', '>'); 'gain@loud|' = @('<VST "l"', 'L', '>') }
+    $spStates = [ordered]@{ 'gain@quiet' = [pscustomobject]@{ Sha = 'aaaaaaaaaaaa' }; 'gain@loud' = [pscustomobject]@{ Sha = 'bbbbbbbbbbbb' } }
+    $spSaved = {
+        param($q = 'Q', $l = 'L')
+        $one = { param($name, $rename, $body) "  <TRACK`n    NAME `"$name`"`n    <FXCHAIN`n      BYPASS 0 0 0`n      <VST `"VST3: x`" x 0 `"$rename`" 1{0123456789ABCDEF0123456789ABCDEF} `"`"`n        $body`n      >`n    >`n  >`n" }
+        Get-HarnessFxBlocks ("<REAPER_PROJECT`n" + (& $one 'Quiet' 'renamed' $q) + (& $one 'Loud' '' $l) + ">`n")
+    }
+    $sp = Test-HarnessStateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (& $spSaved)
+    & $add 'state proof: blocks saved back as loaded (the header line aside) prove both states, named with their hashes' $false ($sp.Problems.Count -eq 0 -and ($sp.Proven -join ',') -ceq 'gain quiet aaaaaaaaaaaa,gain loud bbbbbbbbbbbb')
+    & $add 'state proof: a block saved back changed is a problem naming the track' $true (@((Test-HarnessStateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (& $spSaved 'Q' 'X')).Problems -match "^track 'Loud' FX 1 .*differs").Count -eq 1)
+    & $add 'state proof: state FX missing from the saved project are problems' $true (@((Test-HarnessStateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (Get-HarnessFxBlocks "<REAPER_PROJECT`n>`n")).Problems -match 'not in the saved project').Count -eq 2)
+    $cases
+}
+
+# ---------------------------------------------------------------- plugin states
+function Get-StateCases([string]$Tmp, [string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $cid = '5A1B2C3D4E5F60718293A4B5C6D7E8F9'
+    $hdr = { param($rename = '""', $name = 'VST3: Fixture Gain (Fixture Audio)', $c = $cid) "<VST `"$name`" `"Fixture Gain.vst3`" 0 $rename 1234567890{$c} `"`"" }
+    $vst = { param($body, $h = (& $hdr)) "      BYPASS 0 0 0`n      $h`n        $body`n      >`n      FLOATPOS 0 0 0 0`n      FXID {X}`n" }
+    $js = "      BYPASS 0 0 0`n      <JS loudness_meter `"`"`n        0 0 -`n      >`n"
+    $track = { param([string]$NameLine, [string]$Chain, [string]$Extra = '') "  <TRACK {G}`n    $NameLine`n    VOLPAN 1 0 -1 -1 1`n$Extra    <FXCHAIN`n      SHOW 0`n$Chain    >`n  >`n" }
+    $proj = { param([string[]]$Parts) "<REAPER_PROJECT 0.1 `"7.82/win64`" 1`n  RIPPLE 0`n" + ($Parts -join '') + ">`n" }
+    $pick = { param($text, $name, $n) Get-HarnessTemplateFxBlock -Text $text -Track $name -Fx $n }
+    # Templates: the n-th FX of the one track of that name
+    $t1 = & $proj @((& $track 'NAME Lead' ($js + (& $vst 'B2'))), (& $track 'NAME "Lead vocal"' (& $vst 'LV')))
+    $b = & $pick $t1 'Lead' 2
+    & $add 'template: FX 2 of the track is taken (FX are counted like REAPER counts them, a JSFX included); an unquoted name is matched' $false ($b.Problem -eq '' -and $b.Lines.Count -eq 3 -and $b.Lines[0] -ceq (& $hdr) -and $b.Lines[1] -ceq 'B2')
+    & $add 'template: a quoted track name with a space is matched exactly' $false ((& $pick $t1 'Lead vocal' 1).Lines[1] -ceq 'LV')
+    & $add 'template: an FX that is not a VST3 plugin is a problem' $true ((& $pick $t1 'Lead' 1).Problem -ceq "FX 1 of track 'Lead' is a JS block, not a VST3 plugin")
+    & $add 'template: an FX number beyond the chain is a problem' $true ((& $pick $t1 'Lead' 3).Problem -ceq "track 'Lead' has 2 FX, not 3")
+    & $add 'template: a track name matches whole, case and all' $true ((& $pick $t1 'lead' 1).Problem -ceq "has no track named 'lead'")
+    $t2 = & $proj @((& $track 'NAME Lead' (& $vst 'A')), (& $track 'NAME Lead' (& $vst 'B')))
+    & $add 'template: two tracks of that name make the state ambiguous: a problem' $true ((& $pick $t2 'Lead' 1).Problem -ceq "has 2 tracks named 'Lead'; the state is ambiguous")
+    $t3 = & $proj @((& $track 'NAME Other' (& $vst 'O') "    <ITEM`n      NAME Lead`n      <SOURCE WAVE`n        FILE `"x.wav`"`n      >`n    >`n"))
+    & $add 'template: the name of an item on another track is not a track name' $true ((& $pick $t3 'Lead' 1).Problem -ceq "has no track named 'Lead'")
+    $t4 = & $proj @((& $track 'NAME Lead' ("      BYPASS 0 0 0`n      <CONTAINER Container `"`"`n" + (& $vst 'INSIDE') + "      >`n" + (& $vst 'AFTER'))))
+    & $add 'template: a container counts as one FX; the plugin after it is FX 2, not one inside it' $false ((& $pick $t4 'Lead' 2).Lines[1] -ceq 'AFTER' -and (& $pick $t4 'Lead' 1).Problem -like '*is a CONTAINER block*')
+    # State files: exactly one plugin block at the top level (FX chain files have BYPASS, FLOATPOS, FXID, WAK around it)
+    $chainFile = "BYPASS 0 0 0`n$(& $hdr)`n  S`n>`nFLOATPOS 0 0 0 0`nFXID {X}`nWAK 0 0`n"
+    $sf = Get-HarnessStateFileBlock $chainFile
+    & $add 'state file: an FX chain file with one plugin gives its block' $false ($sf.Problem -eq '' -and ($sf.Lines -join '|') -ceq "$(& $hdr)|S|>")
+    & $add 'state file: two plugin blocks are a problem' $true ((Get-HarnessStateFileBlock ($chainFile + $chainFile)).Problem -like 'holds 2 plugin blocks at its top level, expected 1*')
+    & $add 'state file: the plugin data alone, without its block, is refused' $true ((Get-HarnessStateFileBlock "AAAAQUJDRA==`nRUZHSA==`n").Problem -like 'holds 0 plugin blocks*')
+    & $add 'state file: a JSFX block is not a VST3 state' $true ((Get-HarnessStateFileBlock "<JS a.jsfx `"`"`n  0`n>`n").Problem -ceq 'holds a JS block, not a VST3 plugin')
+    & $add 'state file: a block that is not closed is a problem' $true ((Get-HarnessStateFileBlock "$(& $hdr)`n  S`n").Problem -ceq 'has a block that is not closed')
+    & $add 'state file: a closing line without a block is a problem' $true ((Get-HarnessStateFileBlock ">`n$chainFile").Problem -ceq 'has a ">" without a block')
+    # The block header: a custom FX name is emptied (it would change the name REAPER shows); the rest stays
+    $h1 = Read-HarnessStateHeader @((& $hdr '"Loud one"'), 'S', '>')
+    & $add 'state header: a custom FX name is emptied; name, class ID and the rest of the block are kept' $false ($h1.Problem -eq '' -and $h1.Lines[0] -ceq (& $hdr) -and $h1.Lines[1] -ceq 'S' -and $h1.Name -ceq 'VST3: Fixture Gain (Fixture Audio)' -and $h1.Cid -ceq $cid)
+    & $add 'state header: a custom name holding a double quote (REAPER quotes it with '') is emptied too' $false ((Read-HarnessStateHeader @((& $hdr "'say `"hi`"'"), 'S', '>')).Lines[0] -ceq (& $hdr))
+    & $add 'state header: a block without a custom name is kept as it is' $false ((Read-HarnessStateHeader @((& $hdr), 'S', '>')).Lines[0] -ceq (& $hdr))
+    & $add 'state header: a VST2 block is not a VST3 state' $true ((Read-HarnessStateHeader @((& $hdr '""' 'VST: Old (Vendor)'), 'S', '>')).Problem -like '*not a VST3 plugin block*')
+    $info = [pscustomobject]@{ Name = 'Fixture Gain'; Vendor = 'Fixture Audio'; Cid = $cid }
+    & $add 'state header: the block of the plugin described by moduleinfo matches' $false ((Test-HarnessStateHeader -State $h1 -Info $info) -eq '')
+    & $add 'state header: the block of another plugin (name) does not match' $true ((Test-HarnessStateHeader -State $h1 -Info ([pscustomobject]@{ Name = 'Fixture Bus'; Vendor = 'Fixture Audio'; Cid = $cid })) -like "the block is of 'VST3: Fixture Gain (Fixture Audio)', the plugin is 'VST3: Fixture Bus (Fixture Audio)'")
+    & $add 'state header: a block with another class ID does not match' $true ((Test-HarnessStateHeader -State $h1 -Info ([pscustomobject]@{ Name = 'Fixture Gain'; Vendor = 'Fixture Audio'; Cid = '0123456789ABCDEF0123456789ABCDEF' })) -like '*class ID*')
+    $sha = Get-HarnessBlockSha @('a', 'b')
+    & $add 'state hash: sha256 of the block lines; any change of a line changes it' $false ($sha -cmatch '^[0-9a-f]{64}$' -and $sha -ceq (Get-HarnessBlockSha @('a', 'b')) -and $sha -cne (Get-HarnessBlockSha @('a', 'c')))
+    # The states of the fixture configuration
+    $configFile = Join-Path $RepoRoot 'tests/fixtures/config.json'
+    $kinds = (Import-HarnessExtensions (Read-HarnessConfigExtensions $configFile)).Kinds
+    $read = { param([scriptblock]$Edit = { param($c) }) $c = Read-HarnessConfig -Path $configFile -Kinds $kinds; & $Edit $c; Read-HarnessStates -Config $c }
+    $st = & $read
+    & $add 'states: the fixture template block (track Lead, FX 1) and the state file block (custom name emptied) are read, each with a 12-digit hash' $false (
+        (@($st.get_Keys()) -join ',') -ceq 'gain@quiet,gain@loud' -and $st['gain@quiet'].Lines[1] -ceq 'FAKESTATE VHJpbT0wLjI1Ow==' -and $st['gain@loud'].Lines[0] -ceq (& $hdr) -and
+        $st['gain@loud'].Lines[1] -ceq 'FAKESTATE VHJpbT0xOw==' -and $st['gain@quiet'].Sha -cmatch '^[0-9a-f]{12}$' -and $st['gain@quiet'].Sha -cne $st['gain@loud'].Sha -and $st['gain@loud'].Cid -ceq $cid)
+    $msg = { param([scriptblock]$Edit) try { $null = & $read $Edit; '' } catch { $_.Exception.Message } }
+    $out = & $msg { param($c) $c.Plugins['gain'].States['quiet'].Template = '../config.json' }
+    & $add "states: a path outside the configuration's directory is a usage error ($out)" $true ($out -like 'USAGE: states: *plugins.gain.states.quiet*')
+    $out = & $msg { param($c) $c.Plugins['gain'].States['loud'].StateFile = 'states/none.RfxChain' }
+    & $add "states: a missing file is a usage error ($out)" $true ($out -like 'USAGE: states: *plugins.gain.states.loud*')
+    $out = & $msg { param($c) $c.Plugins['gain'].States['quiet'].Track = 'Nobody'; $c.Plugins['gain'].States['loud'].StateFile = 'states/template.rpp' }
+    & $add "states: every problem is listed at once; a problem names file, track and FX number, never the content ($out)" $true (
+        $out -like "USAGE: states: 2 problem(s): *template.rpp has no track named 'Nobody'*template.rpp holds 0 plugin blocks*" -and $out -notmatch 'FAKESTATE|Lead backup')
+    $gainInfo = Read-HarnessModuleInfo (Join-Path $RepoRoot 'tests/fixtures/plugins/Fixture Gain.vst3')
+    $busInfo = Read-HarnessModuleInfo (Join-Path $RepoRoot 'tests/fixtures/plugins/Fixture Bus.vst3')
+    & $add 'states: blocks of the plugin they are configured for pass the identity check' $false ($(try { Assert-HarnessStateIdentity -States $st -Infos ([ordered]@{ gain = $gainInfo; bus = $busInfo }); $true } catch { $false }))
+    & $add 'states: a block of another plugin is a usage error naming the state' $true (Test-Usage { Assert-HarnessStateIdentity -States $st -Infos ([ordered]@{ gain = $busInfo }) } '*plugins.gain.states.quiet: the block is of*plugins.gain.states.loud*')
+    & $add 'states: a plugin the preflight could not read is left to the preflight' $false ($(try { Assert-HarnessStateIdentity -States $st -Infos ([ordered]@{ bus = $busInfo }); $true } catch { $false }))
     $cases
 }
 
@@ -869,6 +1134,9 @@ function Get-WiringCases([string]$RepoRoot) {
     $suite = & $callsIn (Join-Path $RepoRoot 'src/Suite.psm1') 'Invoke-HarnessSuite'
     & $add 'wiring: Invoke-HarnessSuite judges negative rows through Invoke-HarnessNegativeRow (outcome and reason), never runs guards or compares outcomes itself' $false ('Invoke-HarnessNegativeRow' -in $suite.Name -and 'Invoke-HarnessGuardNegative' -notin $suite.Name -and 'Get-HarnessNegativeVerdict' -notin $suite.Name)
     & $add 'wiring: Invoke-HarnessSuite pins the configuration directory before anything else, and runs the preflight before installing plugins' $false ($suite[0].Name -eq 'Initialize-HarnessCfg' -and (& $at $suite 'Get-HarnessPreflight')[0] -lt (& $at $suite 'Install-HarnessPlugins')[0])
+    & $add 'wiring: Invoke-HarnessSuite reads the states with the configuration and checks them against moduleinfo after the preflight, before installing anything' $false (
+        (& $at $suite 'Read-HarnessStates')[0] -lt (& $at $suite 'Get-HarnessPreflight')[0] -and (& $at $suite 'Get-HarnessPreflight')[0] -lt (& $at $suite 'Assert-HarnessStateIdentity')[0] -and
+        (& $at $suite 'Assert-HarnessStateIdentity')[0] -lt (& $at $suite 'Install-HarnessPlugins')[0] -and (& $at $suite 'Assert-HarnessStateIdentity')[0] -lt (& $at $suite 'Install-HarnessJsfx')[0])
     & $add 'wiring: Invoke-HarnessSuite lists the default resource directory before and after every round' $false (@(& $at $suite 'Get-HarnessDefaultCfgSnapshot').Count -eq 2 -and 'Compare-HarnessDefaultCfgSnapshot' -in $suite.Name)
     $launch = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessLaunch'
     & $add 'wiring: every launch takes the GUI locks before starting REAPER and checks the skip marker again while holding them' $false (
@@ -921,7 +1189,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-WiringCases $RepoRoot },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-WiringCases $RepoRoot },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {

@@ -224,6 +224,25 @@ function Set-HarnessIniText {
     ($lines -join $eol) + $eol
 }
 
+# The value of one key in ini text (pure function), or $null when the section or the key is not there.
+function Get-HarnessIniTextValue {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Section, [Parameter(Mandatory)][string]$Key)
+    $in = $false
+    foreach ($line in ($Text -split '\r?\n')) {
+        $s = $line.Trim()
+        if ($s.StartsWith('[')) { $in = $s -ieq "[$Section]"; continue }
+        if ($in -and $line -imatch ('^' + [regex]::Escape($Key) + '=(.*)$')) { return $Matches[1] }
+    }
+    $null
+}
+
+# One key of the private ini, or $null.
+function Get-HarnessIniValue {
+    param([Parameter(Mandatory)][string]$Section, [Parameter(Mandatory)][string]$Key)
+    $null = Get-HarnessCfgArgument
+    Get-HarnessIniTextValue -Text ([Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($script:HarnessPinnedCfgIni))) -Section $Section -Key $Key
+}
+
 # Changes one key of the private ini. Read and written as Latin-1 so bytes round-trip; only written when the text
 # actually changed. Returns whether it changed.
 function Set-HarnessIniValue {
@@ -359,5 +378,5 @@ function Test-HarnessScriptLint {
 }
 
 Export-ModuleMember -Function Get-HarnessSentinel, Get-HarnessFileIdentity, Resolve-HarnessRealPath, Test-HarnessUnder, Assert-HarnessCfgDir, New-HarnessCfgDir, Initialize-HarnessCfg,
-    Get-HarnessCfgArgument, Get-HarnessPinnedCfgDir, Set-HarnessIniText, Set-HarnessIniValue, Get-HarnessDefaultCfgDir, Get-HarnessDefaultCfgSnapshot, Compare-HarnessDefaultCfgSnapshot,
+    Get-HarnessCfgArgument, Get-HarnessPinnedCfgDir, Set-HarnessIniText, Set-HarnessIniValue, Get-HarnessIniTextValue, Get-HarnessIniValue, Get-HarnessDefaultCfgDir, Get-HarnessDefaultCfgSnapshot, Compare-HarnessDefaultCfgSnapshot,
     Find-HarnessVariableCaseCollisions, Find-HarnessControlChars, Test-HarnessScriptLint

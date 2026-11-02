@@ -27,6 +27,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'src/Guard.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'src/Config.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'src/Extensions.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'src/States.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'src/Scenarios.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'src/Suite.psm1') -ErrorAction Stop
 
@@ -40,8 +41,9 @@ try {
     if ($Config) {
         $ext = Import-HarnessExtensions (Read-HarnessConfigExtensions $Config)
         $conf = Read-HarnessConfig -Path $Config -Kinds $ext.Kinds
-        Write-Host ("[OK] configuration '{0}': {1} plugins, {2} layouts, {3} scenarios, {4} negative cases of its own, {5} extension kinds" -f $conf.Name, $conf.Plugins.Count, $conf.Layouts.Count,
-            @($conf.Scenarios).Count, @($conf.Negative).Count, $ext.Kinds.Count)
+        $states = Read-HarnessStates -Config $conf
+        Write-Host ("[OK] configuration '{0}': {1} plugins, {2} layouts, {3} scenarios, {4} negative cases of its own, {5} extension kinds, {6} plugin states" -f $conf.Name, $conf.Plugins.Count, $conf.Layouts.Count,
+            @($conf.Scenarios).Count, @($conf.Negative).Count, $ext.Kinds.Count, $states.get_Count())
         if (-not $CfgDir) { exit 0 }
     }
     $null = Assert-HarnessCfgDir $CfgDir # a bad path is refused; a missing sentinel is refused too
@@ -51,7 +53,10 @@ try {
         $pre = Get-HarnessPreflight -ReaperExe $ReaperExe -PluginDir $PluginDir -Config $conf -SkipMarkers $SkipMarker -ExtensionPreflight $ext.Preflight
         foreach ($r in $pre.Reasons) { $problems.Add((Hide-HarnessPaths $r)) }
         if (-not $pre.Reasons.Count) {
-            Write-Host "[OK] REAPER $($pre.ReaperVersion); $($pre.Plugins.Count) plugin bundles readable; no other REAPER running; no skip marker"
+            $infos = [ordered]@{}
+            foreach ($id in $pre.Plugins.get_Keys()) { $infos[$id] = $pre.Plugins[$id].Info }
+            Assert-HarnessStateIdentity -States $states -Infos $infos
+            Write-Host "[OK] REAPER $($pre.ReaperVersion); $($pre.Plugins.Count) plugin bundles readable; every plugin state belongs to its plugin; no other REAPER running; no skip marker"
         }
     } else {
         Write-Host '(no -Config and -PluginDir given: only the configuration directory was checked)'

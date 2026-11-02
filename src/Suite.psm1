@@ -24,6 +24,7 @@ Import-Module (Join-Path $PSScriptRoot 'Plugins.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Learn.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Extensions.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'States.psm1') -ErrorAction Stop
 
 $script:LabelPattern = '^[0-9A-Za-z._-]{1,40}$'
 
@@ -39,7 +40,10 @@ function Get-HarnessPreflight {
     if (-not (Test-Path -LiteralPath $PluginDir -PathType Container)) { $why.Add('the plugin directory (-PluginDir) does not exist') }
     else {
         $names = @{}
-        foreach ($p in $Config.Plugins.get_Values()) {
+        foreach ($p in @($Config.Plugins.get_Values() | Where-Object { $_.Kind -eq 'jsfx' })) {
+            try { $null = Get-HarnessJsfxInfo $p.Jsfx } catch { $why.Add("plugin $($p.Id): $($_.Exception.Message -replace '^PLUGIN: ', '')") }
+        }
+        foreach ($p in @($Config.Plugins.get_Values() | Where-Object { $_.Kind -ne 'jsfx' })) {
             $bundle = Join-Path $PluginDir $p.Bundle
             if (-not (Test-Path -LiteralPath $bundle -PathType Container)) { $why.Add("plugin $($p.Id): bundle $($p.Bundle) not found in the plugin directory"); continue }
             try { $info = Read-HarnessModuleInfo $bundle } catch { $why.Add("plugin $($p.Id): $($_.Exception.Message -replace '^PLUGIN: ', '')"); continue }
@@ -209,6 +213,7 @@ function Invoke-HarnessSuite {
     $locks = Get-HarnessGuiLockSet -Extra $ExtraGuiLock
     $ext = Import-HarnessExtensions (Read-HarnessConfigExtensions $Config)
     $conf = Read-HarnessConfig -Path $Config -Kinds $ext.Kinds
+    $states = Read-HarnessStates -Config $conf # a template or state file that does not hold the block: usage error
     $picked = Select-HarnessScenarios -Config $conf -Only $Only -NoNegative:$NoNegative # nothing picked: usage error, nothing started
     $pre = Get-HarnessPreflight -ReaperExe $ReaperExe -PluginDir $PluginDir -Config $conf -SkipMarkers $SkipMarker -ExtensionPreflight $ext.Preflight
     $Shas = [ordered]@{}
@@ -217,14 +222,19 @@ function Invoke-HarnessSuite {
         schema = 1; tool = 'reaper-harness'; config = $conf.Name; buildLabel = ($BuildLabel ? $BuildLabel : (Get-HarnessDefaultLabel $Shas))
         startedUtc = [DateTime]::UtcNow.ToString('o'); reaper = $pre.ReaperVersion; verdict = 'SKIPPED'; launches = 0
         skipReasons = @($pre.Reasons | ForEach-Object { Hide-HarnessPaths $_ }); locks = $locks; extensions = @($ext.Modules)
-        plugins = @(); pluginPath = $null; scanShield = $null; runs = @()
+        plugins = @(); states = @(); pluginPath = $null; scanShield = $null; runs = @()
     }
     if ($pre.Reasons.Count) { return [pscustomobject]$result }
+    $infos = [ordered]@{}
+    foreach ($id in $pre.Plugins.get_Keys()) { $infos[$id] = $pre.Plugins[$id].Info }
+    Assert-HarnessStateIdentity -States $states -Infos $infos # a block of another plugin: usage error, nothing started
 
     $installed = Install-HarnessPlugins -Plugins $conf.Plugins -PluginDir $PluginDir
+    $jsfx = Install-HarnessJsfx -Plugins $conf.Plugins
     $result.plugins = @($installed | ForEach-Object {
             [ordered]@{ id = $_.Id; bundle = $_.Bundle; name = (Get-HarnessReaperName $_.Info); version = $_.Info.Version; classId = $_.Info.Cid; sha256 = $_.Sha256.Substring(0, 12) }
-        })
+        }) + @($jsfx | ForEach-Object { [ordered]@{ id = $_.Id; jsfx = $_.Jsfx; name = $_.Name; sha256 = $_.Sha256.Substring(0, 12) } })
+    $result.states = @($states.get_Values() | ForEach-Object { [ordered]@{ plugin = $_.Plugin; state = $_.State; sha256 = $_.Sha } })
     $null = Set-HarnessPluginPath
     $result.pluginPath = 'system VST3 directories first, the private plugins directory last'
     $shield = Update-HarnessScanCache -Keep @($installed | ForEach-Object { $_.Bundle })
@@ -241,7 +251,8 @@ function Invoke-HarnessSuite {
         $work = Join-Path $ResultDir "work/$stamp-run$k"
         $null = New-Item -ItemType Directory -Force -Path $work
         $before = Get-HarnessDefaultCfgSnapshot
-        $ctx = New-HarnessContext -ReaperExe $ReaperExe -WorkDir $work -Driver $driver -Config $conf -Installed $installed -Locks $locks -SkipMarkers $SkipMarker -LuaExtensions $ext.Lua -Kinds $ext.Kinds
+        $ctx = New-HarnessContext -ReaperExe $ReaperExe -WorkDir $work -Driver $driver -Config $conf -Installed $installed -Jsfx $jsfx -States $states -Locks $locks -SkipMarkers $SkipMarker `
+            -LuaExtensions $ext.Lua -Kinds $ext.Kinds
         if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
         if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
         $sw = [Diagnostics.Stopwatch]::StartNew()

@@ -91,6 +91,27 @@ Called once before anything is installed or started, with the normalised configu
 is a reason, and any reason makes the whole suite SKIPPED (exit code 3) with zero launches. A preflight that
 throws is a reason too. Use it for things your kinds need that may be missing on a machine.
 
+Two checks that belong in a preflight of your own, not in the harness, because only your project knows what to
+look for:
+
+- **Another host with your plugin open.** Plugins that talk to each other through shared memory or a named pipe
+  can see instances in a DAW the user has open. Probe for the names your plugin creates, read-only, and close
+  them again at once; return a reason when one exists, so the suite is SKIPPED instead of mixing with a live
+  session.
+- **Your plugin's own diagnostic logs.** Note the size of each log file in the preflight and read what was added
+  in a scenario of a kind of your own, listed after the others (there is no hook after the run). Only read the
+  user's data directories, never write to them.
+
+```powershell
+Preflight = {
+    param($Config)
+    foreach ($name in 'Local\MyPlugin-group-1', 'Local\MyPlugin-group-2') {
+        try { $m = [IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting($name, [IO.MemoryMappedFiles.MemoryMappedFileRights]::Read); $m.Dispose(); "another host has $name open" }
+        catch [IO.FileNotFoundException] { }
+    }
+}
+```
+
 ## Lua files
 
 ```lua

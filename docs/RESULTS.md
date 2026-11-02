@@ -22,7 +22,8 @@ hashes are cut to their first 12 hex digits.
 | `skipReasons` | string[] | why the suite did not run (empty otherwise) |
 | `locks` | string[] | the GUI lock set, in the order taken |
 | `extensions` | string[] | registered extension names |
-| `plugins` | object[] | `id`, `bundle`, `name` (as REAPER shows it), `version`, `classId`, `sha256` (12 hex digits of the binary's hash) |
+| `plugins` | object[] | VST3: `id`, `bundle`, `name` (as REAPER shows it), `version`, `classId`, `sha256` (12 hex digits of the binary's hash); JSFX: `id`, `jsfx`, `name`, `sha256` (of the file) |
+| `states` | object[] | the named states of the configuration: `plugin`, `state`, `sha256` (12 hex digits of the hash of the block); never the block itself |
 | `pluginPath` | string | how `vstpath64` was written |
 | `scanShield` | object | `directories`, `files` (scanned outside the private directory), `added`, `replaced`, `removed`, `unshielded` |
 | `runs` | object[] | one per round |
@@ -50,8 +51,8 @@ hashes are cut to their first 12 hex digits.
 | `kind` | string | |
 | `status` | string | `PASS`, `FAIL` or `INCOMPLETE` |
 | `seconds` | number | |
-| `detail` | string | one line; for renders the comparer line (`identical= lag= maxdiff= head= frames= channels= rate= format= nonfinite= peak=`) |
-| `facts` | object | some kinds only; `learn`: `variants`, `modules` (`Proven`, `Foreign` or `Unseen`), `binaries` (file name → `Private` / `Foreign` / `Unseen`) |
+| `detail` | string | one line; for renders the comparer line (`identical= lag= maxdiff= head= frames= channels= rate= format= nonfinite= peak=`, then `rms=` and `nan= inf=` when they apply), then ` \| stem <track>: <its line>` per stem; `device` and `savereopen` end with `states saved back unchanged: <plugin> <state> <sha256>, ...` when the layout has states |
+| `facts` | object | some kinds only; `learn`: `variants`, `modules` (`Proven`, `Foreign` or `Unseen`), `binaries` (file name → `Private` / `Foreign` / `Unseen`), `states` (the states learned: `plugin`, `state`, `sha256`) |
 
 Negative rows also have `negative` (true), `builtin`, `expected` (the expected outcome) and `observed`; their
 `status` is PASS only when the observed outcome and the reason both match the case.
@@ -64,7 +65,9 @@ Negative rows also have `negative` (true), `builtin`, `expected` (the expected o
   "startedUtc": "2026-11-01T09:12:44.1234567Z", "reaper": "7.82", "verdict": "PASS", "launches": 31,
   "skipReasons": [], "locks": ["Local\\ReaperHarness-gui"], "extensions": [],
   "plugins": [ { "id": "gain", "bundle": "My Gain.vst3", "name": "VST3: My Gain (Me)", "version": "1.2.0",
-                 "classId": "5A1B2C3D4E5F60718293A4B5C6D7E8F9", "sha256": "3f2a9c41b0de" } ],
+                 "classId": "5A1B2C3D4E5F60718293A4B5C6D7E8F9", "sha256": "3f2a9c41b0de" },
+               { "id": "delay", "jsfx": "harness-pdc-delay", "name": "JS: reaper-harness PDC delay", "sha256": "9c0e5d27a1f4" } ],
+  "states": [ { "plugin": "gain", "state": "quiet", "sha256": "60b1e4d2c7a9" } ],
   "pluginPath": "system VST3 directories first, the private plugins directory last",
   "scanShield": { "directories": 2, "files": 214, "added": 0, "replaced": 0, "removed": 1, "unshielded": 0 },
   "runs": [ {
