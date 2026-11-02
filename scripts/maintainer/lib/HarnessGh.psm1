@@ -55,6 +55,22 @@ function Get-HarnessBotCheck { $script:BotCheck }
 function Get-HarnessPrAgentCheck { $script:PrAgentCheck }
 function Get-HarnessRequiredChecks { @($script:RequiredChecks) }
 
+# ---- exact comparison -----------------------------------------------------------------------
+
+<#
+  Two texts are the same only when every character is. -ceq, -cne, -cin and -ccontains follow the rules of the culture, and those ignore
+  zero-width and control characters: "feature/v1" with a zero-width space behind it reads as equal to "feature/v1".
+#>
+function Test-HarnessSameText {
+    param([AllowNull()][AllowEmptyString()][string]$Left, [AllowNull()][AllowEmptyString()][string]$Right)
+    [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+}
+
+function Test-HarnessTextIn {
+    param([AllowNull()][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$List)
+    @($List | Where-Object { Test-HarnessSameText $Text $_ }).Count -gt 0
+}
+
 # ---- local settings -------------------------------------------------------------------------
 
 function Get-HarnessSetting {
@@ -242,17 +258,17 @@ function Get-HarnessSameAuthors {
 }
 
 <#
-  The body file of a comment or a PR: strict UTF-8, invalid bytes are an error instead of replacement characters that would then
+  The body file of a comment or a PR, or the summary of a squash: strict UTF-8, invalid bytes are an error instead of replacement characters that would then
   be posted; a relative path means the current PowerShell location, not the process directory .NET would use. A byte order mark
   is not part of the text, a body of only blanks is refused.
 #>
 function Read-HarnessBodyFile {
-    param([string]$Path)
-    if (-not $Path) { throw '-BodyFile (UTF-8 text) is required' }
+    param([string]$Path, [string]$Parameter = '-BodyFile')
+    if (-not $Path) { throw "$Parameter (UTF-8 text) is required" }
     $full = [IO.Path]::GetFullPath($Path, (Get-Location -PSProvider FileSystem).ProviderPath)
-    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "-BodyFile (UTF-8 text) does not exist: $Path" }
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "$Parameter (UTF-8 text) does not exist: $Path" }
     try { $bodyText = [Text.UTF8Encoding]::new($false, $true).GetString([IO.File]::ReadAllBytes($full)) }
-    catch [System.Text.DecoderFallbackException] { throw "-BodyFile is not valid UTF-8: $Path" }
+    catch [System.Text.DecoderFallbackException] { throw "$Parameter is not valid UTF-8: $Path" }
     $bodyText = $bodyText.TrimStart([char]0xFEFF)
     if (-not $bodyText.Trim()) { throw 'The body is empty' }
     $bodyText
@@ -293,13 +309,19 @@ function Get-HarnessNeedleArgs {
     $needleArgs
 }
 
-<# A commit or squash message under the same-repository rules of check-commits.mjs. Returns the problems (empty = fine). #>
-function Get-MessageErrors {
+<# A commit or squash message under the same-repository rules of check-commits.mjs: .errors, and .text, the message the rules read (without invisible characters). #>
+function Get-HarnessMessageCheck {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [switch]$Merge, [switch]$ExactlyOne)
     $flags = @(Get-HarnessNeedleArgs)
     if ($Merge) { $flags += '--merge' }
     if ($ExactlyOne) { $flags += '--exactly-one' }
-    @((Invoke-HarnessMaint -Command 'message' -Content $Message -Extra $flags).errors)
+    Invoke-HarnessMaint -Command 'message' -Content $Message -Extra $flags
+}
+
+<# The problems of a message under those rules (empty = fine). #>
+function Get-MessageErrors {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [switch]$Merge, [switch]$ExactlyOne)
+    @((Get-HarnessMessageCheck -Message $Message -Merge:$Merge -ExactlyOne:$ExactlyOne).errors)
 }
 
 <# A PR title and body under checkPrText of check-commits.mjs (title format, sign-off on the last line, privacy rules). #>

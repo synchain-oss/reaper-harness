@@ -96,6 +96,12 @@ function Test-ModuleRules {
 
         # ---- external commands, API reads, GraphQL -------------------------------------------
         $modFailed = Get-ThrownMessage { Invoke-HarnessExternal gh @('api', 'boom') }
+        $modHidden = [string][char]0x200B
+        Add-HarnessCase $modCases 'same text: the same characters' $false (-not (Test-HarnessSameText 'feature/v1' 'feature/v1'))
+        Add-HarnessCase $modCases 'same text: a zero-width space makes it another text' $true (-not (Test-HarnessSameText "feature/v1$modHidden" 'feature/v1'))
+        Add-HarnessCase $modCases 'same text: another letter case makes it another text' $true (-not (Test-HarnessSameText 'Feature/v1' 'feature/v1'))
+        Add-HarnessCase $modCases 'same text: a zero-width space keeps a text out of a list' $true (-not (Test-HarnessTextIn "重要$modHidden" @('红旗', '重要')))
+        Add-HarnessCase $modCases 'same text: in the list' $false (-not (Test-HarnessTextIn '重要' @('红旗', '重要')))
         Add-HarnessCase $modCases 'external: a non-zero exit code is an error naming the command, the code and the whole stderr' $true ($modFailed -ceq "gh api boom failed (exit code 2): boom`nsecond line")
         Add-HarnessCase $modCases 'external: an option does not push the endpoint out of the name of a command' $true ((Get-ThrownMessage { Invoke-HarnessExternal gh @('api', '--paginate', '--slurp', 'pagedboom') }) -cmatch '^gh api pagedboom failed \(exit code 2\)')
         Add-HarnessCase $modCases 'external: a command is named by its first three words that are not options' $true ((Get-ThrownMessage { Invoke-HarnessExternal gh @('api', '-X', 'PUT', 'wordsboom', 'more') }) -cmatch '^gh api PUT wordsboom failed \(exit code 2\)')
@@ -191,6 +197,7 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'public text: a personal needle of the needle file is a finding' $true (((Test-PublicText "text $(Get-HarnessFakeNeedle)").Findings -join ';') -match 'privacy check failed \(exit 1\)')
         Add-HarnessCase $modCases 'public text: a local path is a finding' $true (((Test-PublicText ('see C:' + '\Users\someone\x')).Findings -join ';') -match 'privacy check failed \(exit 1\)')
         Add-HarnessCase $modCases 'public text: an AI attribution trailer is a finding even when the privacy tool is clean' $true (-not (Test-PublicText "text`n$modAi").Ok)
+        Add-HarnessCase $modCases 'public text: an AI attribution trailer split by an invisible character is a finding all the same' $true (-not (Test-PublicText "text`n$($modAi.Substring(0, 3))$([char]0x200B)$($modAi.Substring(3))").Ok)
         Add-HarnessCase $modCases 'public text: Assert-PublicText stops with the label' $true ((Get-ThrownMessage { Assert-PublicText "text`n$modAi" 'my label' }) -match '^my label failed the public-text check, not sent')
 
         # ---- commit messages and PR texts: the rules are those of scripts/check-commits.mjs, answers are matched by their reason

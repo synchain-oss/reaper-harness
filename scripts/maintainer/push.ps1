@@ -61,8 +61,8 @@ function Get-CommitProblems {
     param([Parameter(Mandatory)]$Commit)
     $want = "$Maintainer <$MaintainerEmail>"
     $problems = [System.Collections.Generic.List[string]]::new()
-    if ($Commit.Author -cne $want) { $problems.Add("author is not $want") }
-    if ($Commit.Committer -cne $want) { $problems.Add("committer is not $want") }
+    if (-not (Test-HarnessSameText $Commit.Author $want)) { $problems.Add("author is not $want") }
+    if (-not (Test-HarnessSameText $Commit.Committer $want)) { $problems.Add("committer is not $want") }
     foreach ($e in @(Get-MessageErrors $Commit.Message -Merge:($Commit.Parents -gt 1))) { $problems.Add($e) }
     $problems.ToArray()
 }
@@ -242,6 +242,11 @@ function Invoke-SelfTest {
         & $commitCase 'author is someone else' (& $makeCommit -author 'Someone|someone@example.com') $true
         & $commitCase 'author has the right name but another email' (& $makeCommit -author "$me|other@example.com") $true
         & $commitCase 'committer is someone else' (& $makeCommit -committer 'Someone|someone@example.com') $true
+        $zeroWidth = [string][char]0x200B
+        & $commitCase 'author name with a zero-width space behind it' (& $makeCommit -author "$me$zeroWidth|noreply@synchain.ca") $true
+        & $commitCase 'author email with a zero-width space behind it' (& $makeCommit -author "$me|noreply@synchain.ca$zeroWidth") $true
+        & $commitCase 'committer name with a zero-width space behind it' (& $makeCommit -committer "$me$zeroWidth|noreply@synchain.ca") $true
+        & $commitCase 'committer email with a zero-width space behind it' (& $makeCommit -committer "$me|noreply@synchain.ca$zeroWidth") $true
         & $commitCase 'no Signed-off-by' (& $makeCommit -message "feat(example): add it`n`nBody.") $true
         & $commitCase 'Signed-off-by of someone else' (& $makeCommit -message "feat(example): add it`n`nSigned-off-by: Someone <someone@example.com>") $true
         & $commitCase 'AI attribution trailer' (& $makeCommit -message "$goodMsg`nCo-Authored-By: A Name <a@example.com>") $true

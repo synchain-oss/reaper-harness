@@ -11,9 +11,11 @@
 #   -After -Pr <n> -Worktree <path>
 #       read back the squash commit on origin/feature/v1 and compare before anything is deleted: the remote tip and the local
 #       tip (where they exist) must be the head of the PR that was merged, the worktree must have no changes and no untracked
-#       files, and the branch must not be checked out anywhere but at that path. Any mismatch or failed command throws and nothing
-#       is deleted. Then delete the remote sub-branch, remove exactly that worktree (not recursively, nothing derived from it) and the
-#       local branch; the last line says what was there and what was not, and names the ignored files that went with the worktree
+#       files, must not be locked and must not hold the current directory (git could not remove it), and the branch must not be
+#       checked out anywhere but at that path. Any mismatch or failed command throws and nothing is deleted. Then delete the remote
+#       sub-branch, remove exactly that worktree (not recursively, nothing derived from it) and the local branch; the last line says
+#       what was there and what was not, and names the ignored files that went with the worktree. A run again after one that stopped
+#       halfway finishes the rest: git may have unregistered the worktree and left a directory with no file in it, only empty directories
 #   -SelfTest
 #       run offline on the recorded responses in fixtures/, with a counter-example for every criterion
 # The criteria are read from the checkout this script runs from, so that checkout must sit exactly on the freshly fetched
@@ -40,11 +42,12 @@
 # The bot summary is create-only: updated_at different from created_at is red; when the run log holds the review bot's
 # posted record (comment id and body sha256) the summary must match it, otherwise the check degrades to updated_at only and
 # says so in Warnings.
-# Disposition tables are read default-deny. In the level column only 建议, 总结 and 信息 are not severe; any other value is. A severe row
-# counts as handled only when its disposition starts with 已修, 修复 or 采纳 (markdown marks removed), holds no refusal word, does not go on
+# Disposition tables are read the way markdown renders them: HTML comments do not count, a line indented by 4 columns is no table row,
+# code fences follow CommonMark and a header row is one only with a delimiter row right below it. They are read default-deny. In the
+# level column only 建议, 总结 and 信息 are not severe; any other value is. A severe row counts as handled only when its disposition starts with 已修, 修复 or 采纳 (markdown marks removed), holds no refusal word, does not go on
 # to say the fix is not done, and has a commit hash in that column or right of it; anything else, other words, an empty cell, a row
 # inside a code fence and a table without a disposition column included, needs a user waiver. A commit hash stands on its own (not
-# part of a longer word or of a link other than /commit/) and has a letter and a digit: only letters read as a word, only digits as an
+# part of a longer word, of a file name or of a link other than /commit/) and has a letter and a digit: only letters read as a word, only digits as an
 # id, so such a hash is written longer. Only the form is checked, not that the commit exists. Every 【红旗】 and 【重要】 finding of a bot
 # summary needs a row of that level, with its own location and summary, in the disposition comments that reference the summary's
 # run: a shortfall is a failure that says how many rows are missing.
@@ -268,36 +271,101 @@ function Clear-MdCell {
     (($Value ?? '') -replace '[*_`]', '').Trim()
 }
 
+<# The columns a markdown line is indented by; a tab goes to the next stop of 4. #>
+function Get-MdIndent {
+    param([AllowEmptyString()][string]$MdLine)
+    $width = 0
+    foreach ($character in $MdLine.ToCharArray()) {
+        if ($character -eq [char]32) { $width++ } elseif ($character -eq [char]9) { $width += 4 - ($width % 4) } else { break }
+    }
+    $width
+}
+
+<# How many cells a table line has; a pipe at either end opens or closes a cell and is no cell of its own. #>
+function Get-MdCellCount {
+    param([AllowEmptyString()][string]$MdLine)
+    (($MdLine.Trim() -replace '\\\|', '' -replace '^\|', '' -replace '\|$', '') -split '\|').Count
+}
+
+<# The delimiter row of a table: indented by less than 4 columns, with a pipe, and every cell only hyphens with an optional colon at either end. #>
+function Test-MdDelimiterRow {
+    param([AllowEmptyString()][string]$MdLine)
+    (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+}
+
 <#
-  Data rows of the disposition tables: the first row of a table is the header, the columns level / location / summary /
-  disposition are recognised by the name a header cell starts with (the vocabulary of the disposition table is Chinese:
-  级别 位置 摘要 处置; a note after the name, as in "处置（采纳 / 不改 / 挂账）", is fine), never by position: extra columns and their
-  order do not matter. When no header is recognised the row is scanned cell by cell (Cols is $null). Text between tables
-  clears the header state, the next table is recognised again. A row inside a code fence is marked Fenced: it renders as a sample, not
-  as a table, so it can show a problem but cannot show that anything was handled.
+  Data rows of the disposition tables, read the way markdown renders them, so that what a reader of the comment cannot see cannot
+  count. An HTML comment is not there: a block that starts with one lasts up to the line with its end (or to the end of the text without
+  one), an inline one is cut out of its line and, inside a paragraph, can reach over lines up to the next blank line; in a table every row
+  stands alone. A line indented by 4 columns is no table row, and it ends the table. A code fence follows CommonMark: indented by less
+  than 4 columns, at least 3 of one mark; only the same mark at least as long with nothing behind it closes it, an open one reaches to the
+  end of the text; the info string of a backtick fence holds no backtick. A row inside a fence is marked Fenced: it renders as a sample,
+  not as a table, so it can show a problem but cannot show that anything was handled.
+  A header row is one only with a delimiter row of as many cells right below it. The columns level / location / summary / disposition are
+  recognised by the name a header cell starts with (the vocabulary of the disposition table is Chinese: 级别 位置 摘要 处置; a note after
+  the name, as in "处置（采纳 / 不改 / 挂账）", is fine), never by position: extra columns and their order do not matter. Without a
+  recognised header a row is scanned cell by cell (Cols is $null). Text between tables clears the header state, the next table is
+  recognised again. The agent marker on the first line is read on its own (Get-AgentMarker), here it is one more comment.
 #>
 function Get-DispositionRows {
     param([AllowEmptyString()][string]$Body)
     $rows = [System.Collections.Generic.List[object]]::new()
+    $lines = @(($Body ?? '') -split "`r?`n")
     $cols = $null
-    $fenceMark = ''
-    foreach ($line in (($Body ?? '') -split "`r?`n")) {
-        # only the kind of mark that opened a fence closes it
-        if ($line -match '^\s*(```|~~~)') { if (-not $fenceMark) { $fenceMark = $Matches[1] } elseif ($fenceMark -ceq $Matches[1]) { $fenceMark = '' }; $cols = $null; continue }
-        if ($line -notmatch '^\s*\|') { $cols = $null; continue }
-        $cells = @((($line -replace '\\\|', '') -split '\|') | ForEach-Object { Clear-MdCell $_ })
+    $inTable = $false
+    $fence = $null
+    $inComment = $false
+    for ($at = 0; $at -lt $lines.Count; $at++) {
+        $line = $lines[$at]
+        $visible = $line
+        $delimiterBelow = $at + 1 -lt $lines.Count -and (Test-MdDelimiterRow $lines[$at + 1])
+        if ($fence) {
+            $closing = [regex]::Match($line, '^ {0,3}(`+|~+)[ \t]*$')
+            if ($closing.Success -and $closing.Groups[1].Value[0] -eq $fence.Mark -and $closing.Groups[1].Length -ge $fence.Length) { $fence = $null; $cols = $null; $inTable = $false; continue }
+            if ($line -notmatch '^\s*\|') { $cols = $null; $inTable = $false; continue }
+        } else {
+            if ($inComment) {
+                if ($line.Contains('-->')) { $inComment = $false }
+                continue
+            }
+            if ((Get-MdIndent $line) -ge 4) { $cols = $null; $inTable = $false; continue }
+            $opening = [regex]::Match($line, '^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$')
+            if ($opening.Success) {
+                $run = if ($opening.Groups[1].Success) { $opening.Groups[1].Value } else { $opening.Groups[2].Value }
+                $fence = [pscustomobject]@{ Mark = $run[0]; Length = $run.Length }
+                $cols = $null; $inTable = $false
+                continue
+            }
+            if ($line -match '^ {0,3}<!--') {
+                $inComment = -not $line.Contains('-->')
+                $cols = $null; $inTable = $false
+                continue
+            }
+            $visible = [regex]::Replace($line, '<!--.*?-->', '')
+            $commentAt = $visible.IndexOf('<!--')
+            if ($commentAt -ge 0 -and -not $inTable -and -not $delimiterBelow) {
+                for ($later = $at + 1; $later -lt $lines.Count -and $lines[$later].Trim(); $later++) {
+                    if ($lines[$later].Contains('-->')) { $inComment = $true; $visible = $visible.Substring(0, $commentAt); break }
+                }
+            }
+            if ($visible -notmatch '^\s*\|') { $cols = $null; $inTable = $false; continue }
+        }
+        $cells = @((($visible -replace '\\\|', '') -split '\|') | ForEach-Object { Clear-MdCell $_ })
         if (-not @($cells | Where-Object { $_ }).Count) { continue }
         if (@($cells | Where-Object { $_ -and $_ -notmatch '^:?-{2,}:?$' }).Count -eq 0) { continue }
-        if ($null -eq $cols) {
+        $isHeader = -not $inTable -and $delimiterBelow -and (Get-MdCellCount $visible) -eq (Get-MdCellCount $lines[$at + 1])
+        if ($isHeader) {
+            $inTable = $true
             $map = @{}
             for ($i = 0; $i -lt $cells.Count; $i++) {
                 foreach ($name in '级别', '位置', '摘要', '处置') {
                     if ($cells[$i] -match "^$name" -and -not $map.ContainsKey($name)) { $map[$name] = $i }
                 }
             }
-            if ($map.Count) { $cols = $map; continue }
+            if ($map.Count) { $cols = $map; $at++; continue }
         }
-        $rows.Add([pscustomobject]@{ Line = $line.Trim(); Cells = @($cells); Cols = $cols; Fenced = [bool]$fenceMark })
+        $rows.Add([pscustomobject]@{ Line = $visible.Trim(); Cells = @($cells); Cols = $cols; Fenced = [bool]$fence })
+        if ($isHeader) { $at++ }
     }
     $rows.ToArray()
 }
@@ -305,7 +373,8 @@ function Get-DispositionRows {
 <#
   The level of a disposition row; the deferred findings and the per-run count share it. With a level column its value decides,
   brackets or not: 红旗 and 重要 are those levels, only 建议 总结 信息 are not severe, every other value (another language, 高, an empty
-  cell) comes back as other and is read as severe. Without a level column the cells are scanned for 【红旗】 and 【重要】.
+  cell) comes back as other and is read as severe. Without a level column the cells are scanned for 【红旗】 and 【重要】, or a cell that is
+  only that word.
   Returns 红旗, 重要, other or none.
 #>
 function Get-DispositionLevel {
@@ -313,12 +382,12 @@ function Get-DispositionLevel {
     if ($TableRow.Cols -and $TableRow.Cols.ContainsKey('级别')) {
         $at = $TableRow.Cols['级别']
         $levelText = if ($at -lt $TableRow.Cells.Count) { $TableRow.Cells[$at] -replace '[【】\s]', '' } else { '' }
-        if ($levelText -cin '红旗', '重要') { return $levelText }
-        if ($levelText -cin '建议', '总结', '信息') { return 'none' }
+        if (Test-HarnessTextIn $levelText @('红旗', '重要')) { return $levelText }
+        if (Test-HarnessTextIn $levelText @('建议', '总结', '信息')) { return 'none' }
         return 'other'
     }
     foreach ($levelName in '红旗', '重要') {
-        if (@($TableRow.Cells | Where-Object { $_ -match "【$levelName】" }).Count) { return $levelName }
+        if (@($TableRow.Cells | Where-Object { $_ -match "【$levelName】" -or (Test-HarnessSameText $_ $levelName) }).Count) { return $levelName }
     }
     'none'
 }
@@ -342,7 +411,8 @@ function Get-DispositionKey {
   further on such words describe the fix) and has a commit hash; other words, an empty cell, a fenced row and a table without a
   disposition column are not handled. A later "fixed" with a commit hash no longer needs a waiver, a later "deferred" is listed again.
   The commit proof is looked for only in the disposition column and the columns right of it, in the form the header of this script
-  describes: a word (feedback, effaced) or a comment or run id (only digits) is no proof.
+  describes: a word (feedback, effaced), a comment or run id (only digits) or a file name (abc1234.ps1) is no proof; a full stop that ends
+  the sentence (abc1234.) changes nothing.
 #>
 function Get-DeferredSevere {
     param([object[]]$Items)
@@ -355,7 +425,7 @@ function Get-DeferredSevere {
             if ((Get-DispositionLevel $row) -ceq 'none') { continue }
             $at = if ($row.Cols -and $row.Cols.ContainsKey('处置') -and $row.Cols['处置'] -lt $row.Cells.Count) { $row.Cols['处置'] } else { -1 }
             $decision = if ($at -ge 0) { $row.Cells[$at] } else { '' }
-            $proof = $at -ge 0 -and @($row.Cells | Select-Object -Skip $at | Where-Object { $_ -cmatch '(?:(?<![0-9A-Za-z/.#-])|(?<=/commits?/))(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}(?![0-9A-Za-z/-])' }).Count -gt 0
+            $proof = $at -ge 0 -and @($row.Cells | Select-Object -Skip $at | Where-Object { $_ -cmatch '(?:(?<![0-9A-Za-z/.#-])|(?<=/commits?/))(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}(?![0-9A-Za-z/-]|\.[0-9A-Za-z])' }).Count -gt 0
             $refused = $decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略'
             $unfinished = $decision -match '^(?:已修|修复|采纳)(?:[\s，,：:、；;]*(?:不了|不修|不做|待定|但不|与否|一半|[？?]|开\s*issue)|[\s，,：:、；;]+(?:后续|跟进)|中(?:$|[\s，,：:、；;。.])|计划)'
             $handled = -not $row.Fenced -and $decision -match '^(?:已修|修复|采纳)' -and -not $refused -and -not $unfinished -and $proof
@@ -444,7 +514,7 @@ function Get-MergeVerdict {
     # 1. the PR itself: open, not a draft, base feature/v1, head a feat/ sub-branch of this repository, mergeable
     if ($pull.state -ne 'open' -or [bool](Get-HarnessProp $pull 'merged')) { $fail.Add('The PR is not open') }
     if ([bool]$pull.draft) { $fail.Add('The PR is a draft') }
-    if ($pull.base.ref -cne 'feature/v1') { $fail.Add("base must be feature/v1: $($pull.base.ref)") }
+    if (-not (Test-HarnessSameText $pull.base.ref 'feature/v1')) { $fail.Add("base must be feature/v1: $($pull.base.ref)") }
     if ($pull.head.ref -cnotmatch '^feat/[a-z0-9][a-z0-9-]*$') { $fail.Add("head must be feat/<slug>: $($pull.head.ref)") }
     if ($pull.head.repo.full_name -ne (Get-HarnessRepo)) { $fail.Add('head is not a branch of this repository') }
     if ($Facts.PrRef -ne $sha) { $fail.Add('The PR head fetched locally differs from the API (a push just now?)') }
@@ -491,7 +561,7 @@ function Get-MergeVerdict {
         if (-not $bot.runId) { $fail.Add('The bot summary has no run link') }
         elseif (-not $run) { $fail.Add("The run $($bot.runId) the bot summary refers to cannot be fetched") }
         else {
-            if ($run.path -ne (Get-HarnessReviewWorkflow)) { $fail.Add("The run the bot summary refers to is not the review workflow: $($run.path)") }
+            if (-not (Test-HarnessSameText $run.path (Get-HarnessReviewWorkflow))) { $fail.Add("The run the bot summary refers to is not the review workflow: $($run.path)") }
             if ($run.conclusion -ne 'success') { $fail.Add("The bot run concluded $($run.conclusion)") }
             if ($run.event -ne 'pull_request' -or $run.head_sha -ne $sha) { $fail.Add('The bot run did not review the current head') }
             $botJob = @($Facts.Jobs | Where-Object { $_.name -eq (Get-HarnessBotCheck) }) | Select-Object -First 1
@@ -614,9 +684,14 @@ function New-MergeMessage {
     $title = "$($PrData.title) (#$($PrData.number))"
     $full = "$title`n`n$text`n`n$(Get-HarnessSignoff)"
     # the script adds the only sign-off, so a trailer of the summary shows up as a second one (or as an AI attribution)
-    $problems = @(Get-MessageErrors $full -ExactlyOne)
+    $checked = Get-HarnessMessageCheck $full -ExactlyOne
+    $problems = @($checked.errors)
     if ($problems.Count) { throw "The squash message failed the message rules (the summary paragraph carries no trailers, the script adds the sign-off): $($problems -join '; ')" }
-    @{ Title = $title; Body = "$text`n`n$(Get-HarnessSignoff)" }
+    # what goes out is what the rules read: the message without invisible characters, for good in the history of the line
+    $sentParts = $checked.text -split "`n`n", 2
+    $sentBody = $sentParts[1].Trim()
+    if (Test-HarnessSameText $sentBody (Get-HarnessSignoff)) { throw 'The summary paragraph is empty' }
+    @{ Title = $sentParts[0]; Body = $sentBody }
 }
 
 <# What a squash commit on the feature line must look like (same-repo tier): author, committer, one sign-off, subject ending in (#n), public text. #>
@@ -627,8 +702,8 @@ function Get-SquashProblems {
     )
     $problems = [System.Collections.Generic.List[string]]::new()
     # GitHub writes the web-flow squash as the account's numbered noreply address; the allow list of scripts/check-commits.mjs is the only copy
-    if ($AuthorName -cne (Get-HarnessMaintainer) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) { $problems.Add("author is $AuthorName <$AuthorEmail>, not the maintainer") }
-    if ($AllowedCommitters -notcontains $CommitterEmail.ToLowerInvariant()) { $problems.Add("committer email $CommitterEmail is not allowed") }
+    if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer)) -or -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) { $problems.Add("author is $AuthorName <$AuthorEmail>, not the maintainer") }
+    if (-not (Test-HarnessTextIn $CommitterEmail.ToLowerInvariant() $AllowedCommitters)) { $problems.Add("committer email $CommitterEmail is not allowed") }
     if ((($Message -replace "`r`n", "`n") -split "`n")[0] -notmatch "\(#$Number\)$") { $problems.Add("the subject does not end with (#$Number)") }
     # a message the tools refuse to read (a control character) is one more problem: after a merge the report must still name the commit
     try {
@@ -645,7 +720,7 @@ function Invoke-MergeUnlocked {
     $slug = Get-HarnessRepo
     # the squash message is built and checked first (it runs Node); after the check only API reads and the merge request remain
     $pull = Get-HarnessApi "repos/$slug/pulls/$Number"
-    $msg = New-MergeMessage -PrData $pull -Summary ([IO.File]::ReadAllText($SummaryFile, [Text.UTF8Encoding]::new($false)))
+    $msg = New-MergeMessage -PrData $pull -Summary (Read-HarnessBodyFile -Path $SummaryFile -Parameter '-SummaryFile')
     $verdict = Invoke-MergeCheck -Number $Number -RecordsPath $RecordsPath
     if ($verdict.Code -ne 'ready') {
         Write-Output (ConvertTo-HarnessJsonText $verdict)
@@ -653,8 +728,8 @@ function Invoke-MergeUnlocked {
     }
     $now = Get-HarnessApi "repos/$slug/pulls/$Number"
     if ($now.head.sha -ne $verdict.Head -or $pull.head.sha -ne $verdict.Head) { throw 'The PR head moved after the check; check again' }
-    if ($now.base.ref -cne 'feature/v1' -or $now.state -cne 'open') { throw "The PR changed after the check (base $($now.base.ref), state $($now.state)); check again" }
-    if ([string]$now.title -cne [string]$pull.title) { throw 'The PR title changed after the squash message was built; check again' }
+    if (-not (Test-HarnessSameText $now.base.ref 'feature/v1') -or -not (Test-HarnessSameText $now.state 'open')) { throw "The PR changed after the check (base $($now.base.ref), state $($now.state)); check again" }
+    if (-not (Test-HarnessSameText $now.title $pull.title)) { throw 'The PR title changed after the squash message was built; check again' }
     foreach ($x in @($verdict.ReliedOn)) { Write-Output "User record relied on ($($x.Kind), verbatim, from $($x.File)): $(ConvertTo-HarnessJsonText $x.Record)" }
     # sha pins the checked head: a push in between makes GitHub refuse the merge (the approval records are valid for this head only too)
     $request = @{ merge_method = 'squash'; sha = $verdict.Head; commit_title = $msg.Title; commit_message = $msg.Body }
@@ -665,7 +740,7 @@ function Invoke-MergeUnlocked {
     $expected = ("$($msg.Title)`n`n$($msg.Body)").TrimEnd()
     $problems = [System.Collections.Generic.List[string]]::new()
     $actual = (([string]$commit.commit.message) -replace "`r`n", "`n").TrimEnd()
-    if ($actual -cne $expected) { $problems.Add('title or body of the merge commit differ from what was sent') }
+    if (-not (Test-HarnessSameText $actual $expected)) { $problems.Add('title or body of the merge commit differ from what was sent') }
     foreach ($p in @(Get-SquashProblems -Number ([string]$Number) -AuthorName ([string]$commit.commit.author.name) -AuthorEmail ([string]$commit.commit.author.email) `
                 -CommitterEmail ([string]$commit.commit.committer.email) -Message $actual)) { $problems.Add($p) }
     if ($problems.Count) { throw "#$Number was merged as $($res.sha), but the read-back found problems (nothing is retried): $($problems -join '; ')" }
@@ -674,26 +749,74 @@ function Invoke-MergeUnlocked {
 
 # ---- after the merge ------------------------------------------------------------------------
 
-<#
-  git worktree remove deletes the directory with everything untracked in it, so before it runs the path is checked: absolute
-  and local, not itself a link, its final path a worktree registered in this repository, not the main checkout, not a drive
-  root or the home directory, and its .git is a file (the worktree marker). Anything else throws and nothing is touched.
-#>
-function Assert-WorktreeDir {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$MainRoot, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$KnownTrees)
+<# The final path of a directory; the path itself when it is gone. #>
+function Get-RealDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    $id = Get-PathIdentity $Path
+    ($id ? $id.Final : [IO.Path]::GetFullPath($Path)).TrimEnd('\', '/')
+}
+
+<# A directory -After may remove at all: absolute and local, not itself a link, not the main checkout, not a drive root or the home directory. Anything else throws and nothing is touched. #>
+function Assert-RemovablePath {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$MainRoot)
     $refuse = { param($why) throw "Refusing to remove ${Path}: $why" }
     if (-not [IO.Path]::IsPathFullyQualified($Path) -or $Path -match '^[\\/]{2}') { & $refuse 'it is not an absolute local path' }
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { & $refuse 'it is not an existing directory' }
     if ([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) { & $refuse 'it is a link (junction or symlink), not a worktree directory' }
-    $real = { param($p) $id = Get-PathIdentity $p; ($id ? $id.Final : [IO.Path]::GetFullPath($p)).TrimEnd('\', '/') }
-    $final = & $real $Path
-    if ($final -ieq (& $real $MainRoot)) { & $refuse 'it is the main checkout of this repository' }
+    $final = Get-RealDirectory $Path
+    if ($final -ieq (Get-RealDirectory $MainRoot)) { & $refuse 'it is the main checkout of this repository' }
     if ([IO.Path]::GetPathRoot($final).TrimEnd('\', '/') -ieq $final) { & $refuse 'it is a drive root' }
     $homeDir = [Environment]::GetFolderPath('UserProfile')
-    if ($homeDir -and $final -ieq (& $real $homeDir)) { & $refuse 'it is the home directory' }
-    $known = @($KnownTrees | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { & $real $_ })
-    if ($known -inotcontains $final) { & $refuse 'it is not a worktree registered in this repository (git worktree list)' }
+    if ($homeDir -and $final -ieq (Get-RealDirectory $homeDir)) { & $refuse 'it is the home directory' }
+}
+
+<#
+  git worktree remove deletes the directory with everything untracked in it, so before it runs the path has to be a directory -After may
+  remove, its final path a worktree registered in this repository and its .git a file (the worktree marker).
+#>
+function Assert-WorktreeDir {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$MainRoot, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$KnownTrees)
+    Assert-RemovablePath -Path $Path -MainRoot $MainRoot
+    $refuse = { param($why) throw "Refusing to remove ${Path}: $why" }
+    $known = @($KnownTrees | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-RealDirectory $_ })
+    if ($known -inotcontains (Get-RealDirectory $Path)) { & $refuse 'it is not a worktree registered in this repository (git worktree list); what an earlier run left behind is only taken along when it holds no file' }
     if (-not (Test-Path -LiteralPath (Join-Path $Path '.git') -PathType Leaf)) { & $refuse 'its .git is not a file, it does not look like a worktree' }
+}
+
+<#
+  What git leaves when it removed the registration and could not remove the directory (another process had it open): a directory that is
+  not registered and holds no file and no link, only empty directories. Then there is nothing in it to look at and nothing to lose.
+#>
+function Test-WorktreeLeftover {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$MainRoot, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$KnownTrees)
+    Assert-RemovablePath -Path $Path -MainRoot $MainRoot
+    if (@($KnownTrees | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-RealDirectory $_ }) -icontains (Get-RealDirectory $Path)) { return $false }
+    @(Get-ChildItem -LiteralPath $Path -Force -Recurse | Where-Object { -not $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 1).Count -eq 0
+}
+
+<# Removes that leftover, deepest directory first and never recursively: a file that appeared in the meantime makes it fail and stays. #>
+function Remove-WorktreeLeftover {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        foreach ($directory in @(Get-ChildItem -LiteralPath $Path -Force -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending)) { [IO.Directory]::Delete($directory.FullName) }
+        [IO.Directory]::Delete($Path)
+    } catch { throw "$Path could not be removed (is it still in use?), nothing else is cleaned up: $($_.Exception.Message)" }
+}
+
+<# Why git worktree remove would fail on this worktree: a lock, or the current directory of this process inside it (Windows keeps that open). Returns the reason, or $null. #>
+function Get-WorktreeRemovalBlock {
+    param([Parameter(Mandatory)][string]$Path)
+    $final = Get-RealDirectory $Path
+    $blocks = (Invoke-HarnessGit @('worktree', 'list', '--porcelain')).Out -split "`r?`n`r?`n"
+    foreach ($block in $blocks) {
+        $listed = [regex]::Match($block, '(?m)^worktree (.+?)\r?$')
+        if ($listed.Success -and (Get-RealDirectory $listed.Groups[1].Value) -ieq $final -and $block -cmatch '(?m)^locked(?: .*)?\r?$') { return 'it is locked (git worktree unlock clears that)' }
+    }
+    foreach ($current in @((Get-Location -PSProvider FileSystem).ProviderPath, [Environment]::CurrentDirectory)) {
+        $here = Get-RealDirectory $current
+        if ($here -ieq $final -or $here.StartsWith($final + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { return "the current directory $current is inside it (change to another directory first)" }
+    }
+    $null
 }
 
 <# Where a branch is checked out, by git worktree list --porcelain: the paths, registered ones whose directory is gone included. #>
@@ -724,7 +847,8 @@ function Invoke-AfterUnlocked {
     # the worktree must be on this very sub-branch, so a wrong path cannot remove another work area
     $registered = @(Get-RegisteredWorktrees)
     $present = Test-Path -LiteralPath $WorktreePath
-    if ($present) {
+    $leftover = $present -and (Test-WorktreeLeftover -Path $WorktreePath -MainRoot (Get-HarnessRepoRoot) -KnownTrees $registered)
+    if ($present -and -not $leftover) {
         Assert-WorktreeDir -Path $WorktreePath -MainRoot (Get-HarnessRepoRoot) -KnownTrees $registered
         $current = (Invoke-HarnessGit @('symbolic-ref', '--quiet', '--short', 'HEAD') -Repo $WorktreePath -AllowFail).Out.Trim()
         if ($current -ne $branch) { throw "$WorktreePath is on branch '$current', not on $branch of #${Number}: wrong path, nothing is cleaned up" }
@@ -749,28 +873,34 @@ function Invoke-AfterUnlocked {
     if ($localTip -and $localTip -cne $mergedHead) { throw "The local $branch is at $localTip, not at the head $mergedHead of #${Number} that was merged: nothing is cleaned up" }
     # git keeps a branch to one worktree. Checked out anywhere but here its changes are never looked at, and in either of these cases
     # git branch -D refuses after the remote branch is already gone
-    $real = { param($p) $id = Get-PathIdentity $p; ($id ? $id.Final : [IO.Path]::GetFullPath($p)).TrimEnd('\', '/') }
     foreach ($checkout in @(Get-BranchCheckouts $branchRef)) {
         if (-not (Test-Path -LiteralPath $checkout)) { throw "$branch is registered as checked out at $checkout, whose directory is gone (git worktree prune clears that): nothing is cleaned up" }
-        if ((& $real $checkout) -ine (& $real $WorktreePath)) { throw "$branch is checked out at $checkout, not at ${WorktreePath}: nothing is cleaned up" }
+        if ((Get-RealDirectory $checkout) -ine (Get-RealDirectory $WorktreePath)) { throw "$branch is checked out at $checkout, not at ${WorktreePath}: nothing is cleaned up" }
     }
     $ignoredPaths = @()
     if ($present) {
+        # both would make git worktree remove fail with the remote branch already gone
+        $blocked = Get-WorktreeRemovalBlock $WorktreePath
+        if ($blocked) { throw "$WorktreePath cannot be removed, nothing is cleaned up: $blocked" }
+    }
+    if ($present -and -not $leftover) {
         $statusLines = @(((Invoke-HarnessGit @('status', '--porcelain', '--untracked-files=normal', '--ignored') -Repo $WorktreePath).Out -split "`r?`n") | Where-Object { $_ })
         $untidy = @($statusLines | Where-Object { $_ -cnotmatch '^!! ' })
         if ($untidy.Count) { throw "$WorktreePath has changes or untracked files, nothing is cleaned up: $($untidy -join '; ')" }
         # git worktree remove takes ignored files along, so they are at least named
         $ignoredPaths = @($statusLines | ForEach-Object { $_.Substring(3) })
     }
+    # what an earlier run left goes first: when it is still held open nothing else has changed
+    if ($leftover) { Remove-WorktreeLeftover $WorktreePath }
     # delete the remote sub-branch (the pre-push hook lets feat/* deletions through), then remove the worktree and the local branch under the git lock
     if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
     Invoke-HarnessGitLocked {
         # the plain remove: no --force, git itself still refuses a worktree that changed in the meantime
-        if ($present) { Invoke-HarnessGit @('worktree', 'remove', $WorktreePath) | Out-Null }
+        if ($present -and -not $leftover) { Invoke-HarnessGit @('worktree', 'remove', $WorktreePath) | Out-Null }
         if ($localTip) { Invoke-HarnessGit @('branch', '-D', $branch) | Out-Null }
     } | Out-Null
     $what = { param($there, $doneWord) if ($there) { $doneWord } else { 'was already gone' } }
-    "#$Number merged as $($sha.Substring(0, 7)) '$($pull.title)'; read-back passed, remote sub-branch $(& $what $remoteTip 'deleted'), worktree $(& $what $present 'removed'), local branch $(& $what $localTip 'removed')$(if ($ignoredPaths.Count) { "; ignored files removed with the worktree: $(@($ignoredPaths | Select-Object -First 20) -join ', ')$(if ($ignoredPaths.Count -gt 20) { ', ...' })" })"
+    "#$Number merged as $($sha.Substring(0, 7)) '$($pull.title)'; read-back passed, remote sub-branch $(& $what $remoteTip 'deleted'), worktree $(if ($leftover) { 'was already unregistered, its empty directory removed' } else { & $what $present 'removed' }), local branch $(& $what $localTip 'removed')$(if ($ignoredPaths.Count) { "; ignored files removed with the worktree: $(@($ignoredPaths | Select-Object -First 20) -join ', ')$(if ($ignoredPaths.Count -gt 20) { ', ...' })" })"
 }
 
 <# -Merge and -After hold the merge lock for their whole run: one merge at a time on this machine. #>
@@ -1048,6 +1178,8 @@ function Invoke-SelfTest {
             Add-HarnessCase $cases $label ($expect -ne 'ready') ($(if ($expect -eq 'ready') { $r.Code -ne 'ready' } else { $r.Code -eq $expect -and (& $also $r) }))
         }
         $failure = { param($word) { param($r) @($r.Failures | Where-Object { $_ -match $word }).Count -eq 1 }.GetNewClosure() }
+        # reads as equal to nothing at all under -ceq and -ccontains; the comparisons of the criteria must not read it so
+        $zeroWidth = [string][char]0x200B
         $vu = & $copy
         $vu.Posted = $null
         $vu = Get-MergeVerdict $vu
@@ -1073,6 +1205,7 @@ function Invoke-SelfTest {
         if ($IsWindows) { Add-HarnessCase $cases 'hooks path: Windows compares the spelling without regard to case' $false (-not (& $hooksOf 'Scripts/Hooks')) }
         & $bad 'base is dev' { param($f) $f.Pull.base.ref = 'dev' } 'not-ready' (& $failure 'base must be feature/v1')
         & $bad 'base is a feature/** other than feature/v1' { param($f) $f.Pull.base.ref = 'feature/v2' } 'not-ready' (& $failure 'base must be feature/v1')
+        & $bad 'base is feature/v1 with a zero-width space behind it' { param($f) $f.Pull.base.ref = "feature/v1$zeroWidth" } 'not-ready' (& $failure 'base must be feature/v1')
         & $bad 'head is not a feat/ branch' { param($f) $f.Pull.head.ref = 'fix/x' } 'not-ready' (& $failure 'head must be feat/')
         & $bad 'head branch with uppercase letters' { param($f) $f.Pull.head.ref = 'feat/Example' } 'not-ready' (& $failure 'head must be feat/')
         & $bad 'draft' { param($f) $f.Pull.draft = $true } 'not-ready' (& $failure 'draft')
@@ -1092,6 +1225,7 @@ function Invoke-SelfTest {
         & $bad 'the summary has no run link' { param($f) $f.State.summary.runId = $null } 'not-ready' (& $failure 'no run link')
         & $bad 'the run cannot be fetched' { param($f) $f.Run = $null } 'not-ready' (& $failure 'cannot be fetched')
         & $bad 'the run link points at another workflow' { param($f) $f.Run.path = '.github/workflows/compliance.yml' } 'not-ready' (& $failure 'not the review workflow')
+        & $bad 'the run link points at the workflow path with a zero-width space in it' { param($f) $f.Run.path = "$($f.Run.path)$zeroWidth" } 'not-ready' (& $failure 'not the review workflow')
         & $bad 'the run reviewed another head' { param($f) $f.Run.head_sha = 'd' * 40 } 'not-ready' (& $failure 'did not review the current head')
         & $bad 'the run was not a pull_request event' { param($f) $f.Run.event = 'workflow_dispatch' } 'not-ready' (& $failure 'did not review the current head')
         & $bad 'the run did not succeed' { param($f) $f.Run.conclusion = 'failure' } 'not-ready' (& $failure 'concluded failure')
@@ -1216,6 +1350,7 @@ function Invoke-SelfTest {
             & $bad "an important finding with the decision '$word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "$word abc1234") } 'needs-user'
         }
         & $bad 'the decision column is empty' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '') } 'needs-user'
+        & $bad 'a suggestion level with a zero-width space behind it is read as severe' { param($f) & $addRow $f 1 (& $row "【建议$zeroWidth】" 'a.mjs:1' 'x' '不改') } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
         & $bad '"adopt" with a commit is handled' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '采纳 abc1234') } 'ready'
         & $bad '"fixed" with a commit is handled' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '修复 abc1234') } 'ready'
         foreach ($word in '修复不了', '修复中', '修复待定', '修复计划', '采纳不修', '采纳不做', '采纳但不修', '采纳但不做', '采纳，跟进中', '采纳，后续再做', '已修一半，其余下个 PR', '采纳：开 issue 跟进', '已修？否', '采纳与否待定', '采纳，但不在本 PR 改') {
@@ -1226,17 +1361,17 @@ function Invoke-SelfTest {
             & $bad "a handled word followed by a description of the fix: '$word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "$word abc1234") } 'ready'
         }
         # what proves a commit: the real shapes of it, and the words, ids and links that only look like one
-        foreach ($word in 'feedback', 'FEEDBACK', 'ABC1234', 'effaced', 'defaced', 'abc1234xyz', 'xyzabc1234', 'https://example.invalid/issues/1abcdef', 'not-a-hash-abc1234', 'abc1234-note', 'v1.abc1234', '#abc1234', 'abc1234/x', '1234567', 'abcdefa', 'abc123', ('abc1234' + ('0' * 34))) {
+        foreach ($word in 'feedback', 'FEEDBACK', 'ABC1234', 'effaced', 'defaced', 'abc1234xyz', 'xyzabc1234', 'https://example.invalid/issues/1abcdef', 'not-a-hash-abc1234', 'abc1234-note', 'v1.abc1234', '#abc1234', 'abc1234/x', '1234567', 'abcdefa', 'abc123', ('abc1234' + ('0' * 34)), 'abc1234.ps1', '见 abc1234.md', '<!-- abc1234 -->') {
             & $bad "no commit in the words: '已修 $word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "已修 $word") } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
         }
         foreach ($word in 'feedback 已收到', 'PR_kwDOabcdef1 的讨论') {
             & $bad "no commit in the column on the right: '$word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "采纳 | $word") } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
         }
-        foreach ($word in '`abc1234`', '（abc1234）', '：abc1234，补了用例', 'abc1234.', 'abc1234、def5678', 'abc1234..def5678', '提交abc1234修复', 'https://github.com/o/r/commit/abc1234', 'https://github.com/o/r/pull/7/commits/abc1234def', ('abc1234' + ('0' * 33))) {
+        foreach ($word in '`abc1234`', '（abc1234）', '：abc1234，补了用例', 'abc1234.', 'abc1234。', 'abc1234. 后续', 'abc1234、def5678', 'abc1234..def5678', '提交abc1234修复', 'https://github.com/o/r/commit/abc1234', 'https://github.com/o/r/pull/7/commits/abc1234def', ('abc1234' + ('0' * 33))) {
             & $bad "a commit in the shape it is written: '已修 $word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "已修 $word") } 'ready'
         }
         & $bad 'a commit in the column on the right' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '采纳 | abc1234') } 'ready'
-        & $bad 'a commit of only digits is not read as one, and the message says so' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '已修 3187773') } 'needs-user' { param($r) @($r.Needs | Where-Object { $_.Kind -eq 'deferred' -and $_.Reason -match 'only digits or only letters' }).Count -eq 1 }
+        & $bad 'a commit of only digits is not read as one, and the message says so' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '已修 1234567') } 'needs-user' { param($r) @($r.Needs | Where-Object { $_.Kind -eq 'deferred' -and $_.Reason -match 'only digits or only letters' }).Count -eq 1 }
         & $bad 'a word that is neither on the handled list nor a refusal is not handled' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '已处理 abc1234') } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
         foreach ($word in '待修复', '计划修复', '已采纳', '已改', '将修复', '部分修复', 'fixed', '见下') {
             & $bad "a severe row whose decision does not start with a handled word: '$word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "$word abc1234") } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
@@ -1271,11 +1406,16 @@ function Invoke-SelfTest {
         & $bad 'three important findings, one row' { param($f) & $withFindings $f @('重要', '重要', '重要'); & $addRow $f 1 (& $fixedRow) } 'not-ready' (& $failure 'hold 1 【重要】 row\(s\) with their own location and summary, the bot summary lists 3: 2 missing')
         & $bad 'two findings, the same finding written twice: the other one has no row' { param($f) & $withFindings $f @('重要', '重要'); & $addRow $f 1 (& $row '【重要】' 'a.ps1:1' 'A' '挂账'); & $addRow $f 1 (& $row '【重要】' 'a.ps1:1' 'A' '已修 abc1234') } 'not-ready' (& $failure 'hold 1 【重要】 row\(s\) .* 1 missing')
         & $bad 'two findings, the same row in two comments of that run: the other one has no row' { param($f) & $withFindings $f @('重要', '重要'); & $addRow $f 1 (& $fixedRow); & $addRow $f 3 (& $fixedRow) } 'not-ready' (& $failure 'hold 1 【重要】 row\(s\) .* 1 missing')
+        & $bad 'two findings, one row each in two comments of that run: enough' { param($f) & $withFindings $f @('重要', '重要'); & $addRow $f 1 (& $row '【重要】' 'a.ps1:1' 'A' '已修 abc1234'); & $addRow $f 3 (& $row '【重要】' 'b.ps1:2' 'B' '已修 abc1234') } 'ready'
         & $bad 'one finding, the same row again in a later comment of that run: enough' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 (& $fixedRow); & $addRow $f 3 (& $fixedRow) } 'ready'
         & $bad 'two findings at one location, each with its summary: enough' { param($f) & $withFindings $f @('重要', '重要'); & $addRow $f 1 (& $fixedRow '【重要】' 'A'); & $addRow $f 1 (& $fixedRow '【重要】' 'B') } 'ready'
         & $bad 'two findings with one summary at two locations: enough' { param($f) & $withFindings $f @('重要', '重要'); & $addRow $f 1 (& $row '【重要】' 'a.ps1:1' 'A' '已修 abc1234'); & $addRow $f 1 (& $row '【重要】' 'b.ps1:2' 'A' '已修 abc1234') } 'ready'
         & $bad 'two findings whose summaries differ only by letter case: enough' { param($f) & $withFindings $f @('重要', '重要'); & $addRow $f 1 (& $row '【重要】' 'a.ps1:1' 'Abc' '已修 abc1234'); & $addRow $f 1 (& $row '【重要】' 'a.ps1:1' 'abc' '已修 abc1234') } 'ready'
         & $bad 'a row in a code fence does not count for a finding' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 "``````text`n$(& $fixedRow)`n``````" } 'not-ready' (& $failure 'hold 0 【重要】 row')
+        & $bad 'a row in an HTML comment does not count for a finding' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 "<!--`n$(& $fixedRow)`n-->" } 'not-ready' (& $failure 'hold 0 【重要】 row')
+        & $bad 'a row in a one-line HTML comment does not count for a finding' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 "<!-- $(& $fixedRow) -->" } 'not-ready' (& $failure 'hold 0 【重要】 row')
+        & $bad 'a row indented by 4 columns does not count for a finding' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 "    $(& $fixedRow)" } 'not-ready' (& $failure 'hold 0 【重要】 row')
+        & $bad 'a level with a zero-width space behind it does not count for that finding' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 (& $fixedRow "重要$zeroWidth") } 'not-ready' (& $failure 'hold 0 【重要】 row')
         & $bad 'a row after a closed code fence counts' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 "``````text`nsample`n``````"; & $addRow $f 1 "| 级别 | 位置 | 摘要 | 处置 |`n|---|---|---|---|`n$(& $fixedRow)" } 'ready'
         & $bad 'one important finding, one row: enough' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 (& $fixedRow) } 'ready'
         & $bad 'the level without brackets counts as that level' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 (& $fixedRow '重要') } 'ready'
@@ -1299,6 +1439,13 @@ function Invoke-SelfTest {
         $tableText = { param($rows) "| 级别 | 位置 | 摘要 | 处置 |`n|---|---|---|---|`n" + (@($rows) -join "`n") }
         $dispItem = { param($round, $text, $noteKind = 'disposition', $itemKind = 'agent') [pscustomobject]@{ Kind = $itemKind; Source = 'issue'; Body = "<!-- harness-agent v1 role=impl kind=$noteKind round=$round head=3f9c2e1 -->`n$text" } }
         $deferredCount = { param($itemList) @(Get-DeferredSevere -Items @($itemList)).Count }
+        # every refusal word on its own, behind a word that would count as handled and with a commit; 未修复 reads as 未修 anyway
+        foreach ($word in '不改', '不采纳', '挂账', '暂不', '维持', '未采纳', '不修复', '未修复', '未改', '未修', '搁置', '驳回', '不处理', '延后', '暂缓', '忽略') {
+            foreach ($handledWord in '已修', '采纳') {
+                Add-HarnessCase $cases "deferred findings: the refusal '$word' behind '$handledWord', before the commit" $true ((& $deferredCount (& $dispItem 1 (& $tableText (& $row '【重要】' 'a.mjs:1' 'x' "$handledWord $word abc1234")))) -eq 1)
+                Add-HarnessCase $cases "deferred findings: the refusal '$word' behind '$handledWord', after the commit" $true ((& $deferredCount (& $dispItem 1 (& $tableText (& $row '【重要】' 'a.mjs:1' 'x' "$handledWord abc1234，$word")))) -eq 1)
+            }
+        }
         $deferredRow = & $row '【重要】' 'abcdef1' 'x' '挂账'
         $headerless = "| 【重要】 | thing one | 不改 |`n| 【重要】 | thing two | 已修 abc1234 |"
         Add-HarnessCase $cases 'deferred findings: rows without a header are different findings, and without a disposition column none of them is handled' $true ((& $deferredCount (& $dispItem 1 $headerless)) -eq 2)
@@ -1329,7 +1476,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'deferred findings: a tilde fence is a fence too' $true ((& $deferredCount (& $dispItem 1 "~~~`n$(& $tableText (& $row '【重要】' 'a.mjs:1' 'x' '已修 abc1234'))`n~~~")) -eq 1)
         Add-HarnessCase $cases 'deferred findings: the other mark inside a code fence does not close it' $true ((& $deferredCount (& $dispItem 1 (& $fence "~~~`n$(& $tableText (& $row '【重要】' 'a.mjs:1' 'x' '已修 abc1234'))"))) -eq 1)
         Add-HarnessCase $cases 'deferred findings: a fixed row after a closed code fence is handled' $false ((& $deferredCount (& $dispItem 1 "$(& $fence 'sample')`n$(& $tableText (& $row '【重要】' 'a.mjs:1' 'x' '已修 abc1234'))")) -ne 0)
-        Add-HarnessCase $cases 'disposition rows: a fence does not carry the header of the table before it' $true (@(Get-DispositionRows "| 级别 | 位置 | 摘要 | 处置 |`n| 【重要】 | a:1 | x | 不改 |`n``````t`n| 【重要】 | b:2 | y | 不改 |`n``````" | Where-Object { $null -eq $_.Cols }).Count -eq 1)
+        Add-HarnessCase $cases 'disposition rows: a fence does not carry the header of the table before it' $true (@(Get-DispositionRows "| 级别 | 位置 | 摘要 | 处置 |`n|---|---|---|---|`n| 【重要】 | a:1 | x | 不改 |`n``````t`n| 【重要】 | b:2 | y | 不改 |`n``````" | Where-Object { $null -eq $_.Cols }).Count -eq 1)
         $headerlessRows = @{ Items = @((& $dispItem 1 "| 【重要】 | thing one | 不改 |`n| 【重要】 | thing two | 不改 |" )) }
         $headerlessRows.Items[0].Body = $headerlessRows.Items[0].Body -replace 'head=3f9c2e1', 'head=3f9c2e1 bot-run=77'
         $countFor = { param($wanted, $itemList) @(Get-DispositionShortfalls -Summaries @([pscustomobject]@{ runId = '77'; items = @(1..$wanted | ForEach-Object { [pscustomobject]@{ level = '重要'; text = 'f' } }) }) -Items $itemList) }
@@ -1390,7 +1537,103 @@ function Invoke-SelfTest {
 
         # disposition table recognition
         Add-HarnessCase $cases 'disposition rows: the header is recognised by column name' $true ((@(Get-DispositionRows "| 级别 | 位置 | 摘要 | 处置 |`n|---|---|---|---|`n| 【重要】 | a:1 | x | 不改 |")).Count -eq 1)
-        Add-HarnessCase $cases 'disposition rows: text between tables resets the header' $true ((@(Get-DispositionRows "| 级别 | 位置 | 摘要 | 处置 |`n| 【重要】 | a:1 | x | 不改 |`ntext`n| 【重要】 | b:2 | y | 不改 |") | Where-Object { $null -eq $_.Cols }).Count -eq 1)
+        Add-HarnessCase $cases 'disposition rows: text between tables resets the header' $true (@(Get-DispositionRows "| 级别 | 位置 | 摘要 | 处置 |`n|---|---|---|---|`n| 【重要】 | a:1 | x | 不改 |`ntext`n| 【重要】 | b:2 | y | 不改 |" | Where-Object { $null -eq $_.Cols }).Count -eq 1)
+
+        # read the way markdown renders it: what a reader of the comment cannot see does not count, what a reader sees does
+        $heading = "| 级别 | 位置 | 摘要 | 处置 |`n|---|---|---|---|`n"
+        $plainRow = '| 【重要】 | a:1 | x | 不改 |'
+        $rowCount = { param($label, $text, $count) Add-HarnessCase $cases "disposition rows: $label" $true (@(Get-DispositionRows $text).Count -eq $count) }
+        & $rowCount 'an HTML comment block around a table is not there' "<!--`n$heading$plainRow`n-->" 0
+        & $rowCount 'an HTML comment block with blank lines in it is not there' "<!--`n`n$heading$plainRow`n`n-->" 0
+        & $rowCount 'a one-line HTML comment around a row is not there' "<!-- $plainRow -->" 0
+        & $rowCount 'a comment block indented by 3 columns is not there either' "   <!--`n$heading$plainRow`n-->" 0
+        & $rowCount 'a row after a one-line comment counts' "<!-- note -->`n$heading$plainRow" 1
+        & $rowCount 'a row after a comment block counts' "<!--`nnote`n-->`n$heading$plainRow" 1
+        & $rowCount 'a comment after a row takes nothing away' "$heading$plainRow`n<!-- note -->" 1
+        & $rowCount 'a comment that is never closed reaches to the end of the text' "<!--`n$heading$plainRow" 0
+        & $rowCount 'a row on the closing line of a comment block is not there' "<!--`nnote`n--> $plainRow" 0
+        & $rowCount 'a comment opened in a line of text reaches over the next lines' "text <!-- hidden`n$heading$plainRow`n--> more" 0
+        & $rowCount 'a comment opened in a line of text with no end before the blank line is plain text' "text <!-- hidden`n`n$heading$plainRow`n--> more" 1
+        & $rowCount 'a comment opened in a table row and not closed on that line is plain text' "$heading| 【重要】 | a:1 | x | 不改 <!-- note |`n| 【重要】 | b:2 | y | 不改 --> |" 2
+        & $rowCount 'a comment opened in a header row and not closed on that line is plain text' "| 级别 | 位置 | 摘要 | 处置 <!-- note |`n|---|---|---|---|`n$plainRow`n--> more" 1
+        $cutCell = @(Get-DispositionRows "$heading| 【重要】 | a:1 | x | 不改 <!-- 已修 abc1234 | abc1234 --> |")
+        Add-HarnessCase $cases 'disposition rows: an inline comment is cut out of its row, with the pipes in it' $true ($cutCell.Count -eq 1 -and $cutCell[0].Cells.Count -eq 6 -and $cutCell[0].Cells[$cutCell[0].Cols['处置']] -ceq '不改' -and $cutCell[0].Line -notmatch 'abc1234')
+        $twoComments = @(Get-DispositionRows "$heading| 【重要】 | a:1 | x <!-- p --> | 不改 <!-- q --> |")
+        Add-HarnessCase $cases 'disposition rows: two inline comments in one row keep what is between them' $true ($twoComments.Count -eq 1 -and $twoComments[0].Cells[$twoComments[0].Cols['摘要']] -ceq 'x' -and $twoComments[0].Cells[$twoComments[0].Cols['处置']] -ceq '不改')
+        $cutAtComment = @(Get-DispositionRows "| 【重要】 | a <!-- hidden`nmore --> | b |")
+        Add-HarnessCase $cases 'disposition rows: a comment opened in a row outside a table takes the rest of the line' $true ($cutAtComment.Count -eq 1 -and $cutAtComment[0].Cells[2] -ceq 'a' -and $cutAtComment[0].Line -notmatch 'hidden')
+        & $rowCount 'a row indented by 4 spaces is no table row' "    $plainRow" 0
+        & $rowCount 'a row indented by a tab is no table row' "`t$plainRow" 0
+        & $rowCount 'a row indented by a space and a tab is no table row' " `t$plainRow" 0
+        & $rowCount 'a row indented by 3 spaces is a table row' "   $plainRow" 1
+        $endedByIndent = @(Get-DispositionRows "$heading$plainRow`n    | 【重要】 | b:2 | y | 不改 |`n| 【重要】 | c:3 | z | 不改 |")
+        Add-HarnessCase $cases 'disposition rows: a line indented by 4 columns ends the table' $true ($endedByIndent.Count -eq 2 -and $null -ne $endedByIndent[0].Cols -and $null -eq $endedByIndent[1].Cols)
+        # code fences as CommonMark has them. Single quotes keep the backticks as they are
+        $mark3 = '```'
+        $mark4 = '````'
+        $mark5 = '`````'
+        $fencedRows = {
+            param($label, $text, $count)
+            $seen = @(Get-DispositionRows $text)
+            Add-HarnessCase $cases "code fence: $label" $true ($seen.Count -eq 1 -and @($seen | Where-Object Fenced).Count -eq $count)
+        }
+        & $fencedRows 'a line with an info string does not close it' "$mark3 t`n$mark3 no-close`n$plainRow`n$mark3" 1
+        & $fencedRows 'fewer marks do not close it' "$mark4`n$mark3`n$plainRow`n$mark4" 1
+        & $fencedRows 'as many marks close it' "$mark4`nx`n$mark4`n$plainRow" 0
+        & $fencedRows 'more marks close it' "$mark3`nx`n$mark5`n$plainRow" 0
+        & $fencedRows 'trailing spaces do not stop it from closing' "$mark3`nx`n$mark3   `n$plainRow" 0
+        & $fencedRows 'one that is never closed reaches to the end of the text' "$mark3 t`n$plainRow" 1
+        & $fencedRows 'a tilde fence takes any info string' "~~~ a ~~~ ``b`n$plainRow`n~~~" 1
+        & $fencedRows 'a tilde line with an info string does not close it' "~~~`n~~~ no-close`n$plainRow" 1
+        & $fencedRows 'a backtick in the info string: no fence' "$mark3 a``b`n$plainRow" 0
+        & $fencedRows 'two marks: no fence' "````t`n$plainRow" 0
+        & $fencedRows 'indented by 4 columns: no fence' "    $mark3`n$plainRow" 0
+        & $fencedRows 'indented by 3 columns: a fence' "   $mark3`n$plainRow" 1
+        & $fencedRows 'a closing line indented by 4 columns does not close it' "$mark3`n    $mark3`n$plainRow" 1
+        & $fencedRows 'a closing line indented by 3 columns closes it' "$mark3`n   $mark3`n$plainRow" 0
+        & $fencedRows 'a comment mark in a fence is text: the fence still closes' "$mark3`n<!-- x`n$mark3`n$plainRow" 0
+        & $fencedRows 'a fence mark in a comment is text: no fence opens' "<!--`n$mark3`n-->`n$plainRow" 0
+        & $fencedRows 'a row indented by 4 columns in a fence is a sample all the same' "$mark3`n    $plainRow`n$mark3" 1
+        # a header row only with a delimiter row right below it
+        Add-HarnessCase $cases 'deferred findings: a row whose text starts like a column name is no header without a delimiter row' $true ((& $deferredCount (& $dispItem 1 '| 【重要】 | 处置错了 | 挂账 |')) -eq 1)
+        & $rowCount 'a row that looks like a header, and the next one: two rows' "| 【重要】 | 位置不对 | 挂账 |`n| 【重要】 | b:2 | 不改 |" 2
+        Add-HarnessCase $cases 'deferred findings: a cell that is only the level word, no header, no brackets' $true ((& $deferredCount (& $dispItem 1 '| 重要 | a.ps1:1 | 级别判错 | 挂账 |')) -eq 1)
+        Add-HarnessCase $cases 'deferred findings: a cell that is only the other level word' $true ((& $deferredCount (& $dispItem 1 '| 红旗 | a.ps1:1 | 位置不对 | 挂账 |')) -eq 1)
+        $headerCase = {
+            param($label, $text, $isHeader)
+            $seen = @(Get-DispositionRows $text)
+            Add-HarnessCase $cases "table header: $label" $true ($(if ($isHeader) { $seen.Count -eq 1 -and $null -ne $seen[0].Cols } else { @($seen | Where-Object { $null -ne $_.Cols }).Count -eq 0 }))
+        }
+        & $rowCount 'a first row without known column names is a row, the delimiter row under it is not' "| x | y |`n| - | - |`n| 【重要】 | 不改 |" 2
+        & $headerCase 'an escaped pipe in a header cell is no cell boundary' "| 级别 \| x | 处置 |`n|---|---|`n| 【重要】 | 不改 |" $true
+        & $headerCase 'a delimiter row of single hyphens' "| 级别 | 处置 |`n| - | - |`n| 【重要】 | 不改 |" $true
+        & $headerCase 'a delimiter row with colons' "| 级别 | 处置 |`n|:--|:-:|`n| 【重要】 | 不改 |" $true
+        & $headerCase 'a delimiter row without outer pipes' "| 级别 | 处置 |`n--|--`n| 【重要】 | 不改 |" $true
+        & $headerCase 'a delimiter row indented by 3 columns' "| 级别 | 处置 |`n   |---|---|`n| 【重要】 | 不改 |" $true
+        & $headerCase 'a delimiter row of another number of cells' "| 级别 | 位置 | 摘要 | 处置 |`n|---|---|`n| 【重要】 | a | x | 不改 |" $false
+        & $headerCase 'a blank line before the delimiter row' "| 级别 | 处置 |`n`n|---|---|`n| 【重要】 | 不改 |" $false
+        & $headerCase 'a delimiter row without a pipe' "| 级别 |`n---`n| 【重要】 |" $false
+        & $headerCase 'a delimiter row indented by 4 columns' "| 级别 | 处置 |`n    |---|---|`n| 【重要】 | 不改 |" $false
+        & $headerCase 'a delimiter row with something else in a cell' "| 级别 | 处置 |`n|---|-a-|`n| 【重要】 | 不改 |" $false
+        & $headerCase 'a second header in the same table' "| x | y |`n|---|---|`n| 级别 | 处置 |`n|---|---|`n| 【重要】 | 不改 |" $false
+        # what ends a table, and that the next table has its own header
+        $otherRow = '| 【重要】 | b:2 | y | 不改 |'
+        $headersOf = {
+            param($label, $text, $expected)
+            Add-HarnessCase $cases "table state: $label" $true ((@(Get-DispositionRows $text | ForEach-Object { $null -ne $_.Cols }) -join ',') -ceq $expected)
+        }
+        & $headersOf 'a comment ends the table' "$heading$plainRow`n<!-- x -->`n$otherRow" 'True,False'
+        & $headersOf 'a table after a comment has its own header' "$heading$plainRow`n<!-- x -->`n$heading$plainRow" 'True,True'
+        & $headersOf 'a table after a fence has its own header' "$heading$plainRow`n$mark3`nx`n$mark3`n$heading$plainRow" 'True,True'
+        & $headersOf 'the header of a table in a fence ends with the fence' "$mark3`n$heading$plainRow`n$mark3`n$otherRow" 'True,False'
+        & $headersOf 'a table in a fence after a table has its own header' "$heading$plainRow`n$mark3`n$heading$plainRow`n$mark3" 'True,True'
+        & $headersOf 'a table after a fence with a table in it has its own header' "$mark3`n$heading$plainRow`n$mark3`n$heading$plainRow" 'True,True'
+        & $headersOf 'text in a fence ends the table in it' "$mark3`n$heading$plainRow`nx`n$otherRow`n$mark3" 'True,False'
+        & $headersOf 'a second table in a fence has its own header' "$mark3`n$heading$plainRow`nx`n$heading$plainRow`n$mark3" 'True,True'
+        & $headersOf 'a table after text has its own header' "$heading$plainRow`ntext`n$heading$plainRow" 'True,True'
+        & $headersOf 'a table after an indented line has its own header' "$heading$plainRow`n    x`n$heading$plainRow" 'True,True'
+        Add-HarnessCase $cases 'deferred findings: a table in an HTML comment shows nothing as handled' $true ((& $deferredCount @((& $dispItem 1 (& $tableText $deferredRow)), (& $dispItem 3 "<!--`n$(& $tableText (& $row '【重要】' 'a.mjs:1' 'x' '已修 abc1234'))`n-->"))) -eq 1)
+        Add-HarnessCase $cases 'deferred findings: the agent marker in the first line is read on its own' $true ((Get-AgentMarker (& $dispItem 1 "<!-- note -->`n$plainRow").Body).Kind -ceq 'disposition')
 
         # the tables people really post: extra columns, a note after the column name; columns are found by name, not by position
         $wideHeader = "| # | 来源 | 级别 | 位置 | 摘要 | 依据 | 处置（采纳 / 不改 / 挂账） | commit 或理由 / issue |`n|---|---|---|---|---|---|---|---|`n"
@@ -1418,14 +1661,23 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'squash message: the summary is empty' $true (Test-Throws { New-MergeMessage -PrData $pull -Summary '  ' })
         Add-HarnessCase $cases 'squash message: a local path in the summary' $true (Test-Throws { New-MergeMessage -PrData $pull -Summary ('see C:' + '\Users\someone\x') })
         $escape = [string][char]27
-        Add-HarnessCase $cases 'squash message: a local path split by an escape character is refused, the rules must not read around it' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ('see C:' + $escape + '\Users\someone\x') }) -match 'invisible character U\+001B')
+        Add-HarnessCase $cases 'squash message: a local path split by an escape character is refused, the rules must not read around it' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ('see C:' + $escape + '\Users\someone\x') }) -match 'control character U\+001B')
         $needleText = Get-HarnessFakeNeedle
-        Add-HarnessCase $cases 'squash message: a personal needle split by an escape character is refused' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ($needleText.Substring(0, 5) + $escape + $needleText.Substring(5)) }) -match 'invisible character U\+001B')
-        Add-HarnessCase $cases 'squash message: an escape character in the PR title is refused' $true ((Get-ThrownMessage { $titled = Copy-HarnessObject $pull; $titled.title = "feat(x): a$($escape)b"; New-MergeMessage -PrData $titled -Summary 'x' }) -match 'invisible character U\+001B')
-        # characters nobody sees: the rule that would catch the path must not be read around, and the commit message is public for good
-        foreach ($hidden in @(@{ Name = 'zero-width space'; Text = [string][char]0x200B; Code = '200B' }, @{ Name = 'soft hyphen'; Text = [string][char]0x00AD; Code = '00AD' }, @{ Name = 'direction override'; Text = [string][char]0x202E; Code = '202E' }, @{ Name = 'word joiner'; Text = [string][char]0x2060; Code = '2060' }, @{ Name = 'C1 control character'; Text = [string][char]0x0085; Code = '0085' }, @{ Name = 'CR without LF'; Text = "`r"; Code = '000D' })) {
-            Add-HarnessCase $cases "squash message: a local path split by a $($hidden.Name) is refused" $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ('see C:' + '\Us' + $hidden.Text + 'ers\someone\x') }) -match "U\+$($hidden.Code)")
+        Add-HarnessCase $cases 'squash message: a personal needle split by an escape character is refused' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ($needleText.Substring(0, 5) + $escape + $needleText.Substring(5)) }) -match 'control character U\+001B')
+        Add-HarnessCase $cases 'squash message: an escape character in the PR title is refused' $true ((Get-ThrownMessage { $titled = Copy-HarnessObject $pull; $titled.title = "feat(x): a$($escape)b"; New-MergeMessage -PrData $titled -Summary 'x' }) -match 'control character U\+001B')
+        # characters nobody sees: the rule that would catch the path reads the text without them
+        foreach ($hidden in @(@{ Name = 'zero-width space'; Code = 0x200B }, @{ Name = 'soft hyphen'; Code = 0x00AD }, @{ Name = 'direction override'; Code = 0x202E }, @{ Name = 'word joiner'; Code = 0x2060 }, @{ Name = 'combining grapheme joiner'; Code = 0x034F }, @{ Name = 'variation selector'; Code = 0xFE0F }, @{ Name = 'Hangul filler'; Code = 0x3164 }, @{ Name = 'Mongolian variation selector'; Code = 0x180B }, @{ Name = 'halfwidth Hangul filler'; Code = 0xFFA0 }, @{ Name = 'line separator'; Code = 0x2028 }, @{ Name = 'paragraph separator'; Code = 0x2029 })) {
+            Add-HarnessCase $cases "squash message: a local path split by a $($hidden.Name) is found" $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ('see C:' + '\Us' + [string][char]$hidden.Code + 'ers\someone\x') }) -match '\[win-user-path\]')
         }
+        foreach ($control in @(@{ Name = 'C1 control character'; Text = [string][char]0x0085; Code = '0085' }, @{ Name = 'CR without LF'; Text = "`r"; Code = '000D' })) {
+            Add-HarnessCase $cases "squash message: a local path split by a $($control.Name) is refused" $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ('see C:' + '\Us' + $control.Text + 'ers\someone\x') }) -match "control character U\+$($control.Code)")
+        }
+        # what goes out is what the rules read, the history of the line keeps it for good
+        Add-HarnessCase $cases 'squash message: an invisible character of the summary is not sent' $true (Test-HarnessSameText (New-MergeMessage -PrData $pull -Summary "Ad$($zeroWidth)ds it.").Body "Adds it.`n`n$(Get-HarnessSignoff)")
+        $hiddenTitled = Copy-HarnessObject $pull
+        $hiddenTitled.title = "feat(x): a$($zeroWidth)b"
+        Add-HarnessCase $cases 'squash message: an invisible character of the PR title is not sent' $true (Test-HarnessSameText (New-MergeMessage -PrData $hiddenTitled -Summary 'x').Title 'feat(x): ab (#7)')
+        Add-HarnessCase $cases 'squash message: a summary of nothing but invisible characters is empty' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary "$zeroWidth$zeroWidth" }) -match 'The summary paragraph is empty')
         $crlfMessage = New-MergeMessage -PrData $pull -Summary "Line one.`r`nLine two.`r`n"
         Add-HarnessCase $cases 'squash message: CRLF in the summary becomes LF' $false ($crlfMessage.Body -cnotmatch "^Line one\.`nLine two\.`n`nSigned-off-by: ")
         $squashOk = "feat(example): add the example module (#7)`n`nAdds it.`n`n$(Get-HarnessSignoff)"
@@ -1437,7 +1689,10 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'squash commit: the author email is compared without regard to case' $false ((& $squashFor $squashOk $squashAuthor.ToLowerInvariant()) -ne '')
         Add-HarnessCase $cases 'squash commit: another author email' $true ((& $squashFor $squashOk 'someone@example.com') -match 'author is DLsnows <someone@example\.com>')
         Add-HarnessCase $cases 'squash commit: the right email under another name' $true ((& $squashFor $squashOk $squashAuthor 'someone-else') -match 'author is someone-else')
-        Add-HarnessCase $cases 'squash commit: a control character in the merged message is one more problem, not a crash' $true ((& $squashFor "feat(example): add (#7)`n`nAd$([char]27)ds it.`n`n$(Get-HarnessSignoff)") -match 'could not be checked: .*control or invisible character')
+        Add-HarnessCase $cases 'squash commit: the author name with a zero-width space behind it' $true ((& $squashFor $squashOk $squashAuthor "DLsnows$zeroWidth") -match 'author is DLsnows')
+        Add-HarnessCase $cases 'squash commit: the author email with a zero-width space behind it' $true ((& $squashFor $squashOk "$squashAuthor$zeroWidth") -match 'author is DLsnows')
+        Add-HarnessCase $cases 'squash commit: the committer email with a zero-width space behind it' $true ((@(Get-SquashProblems -Number '7' -AuthorName 'DLsnows' -AuthorEmail $squashAuthor -CommitterEmail "noreply@github.com$zeroWidth" -Message $squashOk) -join ' | ') -match 'committer email')
+        Add-HarnessCase $cases 'squash commit: a control character in the merged message is one more problem, not a crash' $true ((& $squashFor "feat(example): add (#7)`n`nAd$([char]27)ds it.`n`n$(Get-HarnessSignoff)") -match 'control character U\+001B')
         Add-HarnessCase $cases 'squash commit: a local path in the merged message is found by the public-text check' $true ((& $squashFor ("feat(example): add the example module (#7)`n`nsee C:" + '\Users\someone\x' + "`n`n$(Get-HarnessSignoff)")) -match 'failed the public-text check')
         $badTitle = Copy-HarnessObject $pull
         $badTitle.title = 'Add the example module'
@@ -1458,6 +1713,7 @@ function Invoke-SelfTest {
                 $text = "$(Get-HarnessProp $sent 'commit_title')`n`n$(Get-HarnessProp $sent 'commit_message')"
                 if ($readback.Mode -eq 'title') { $text = $text -replace '^[^\n]+', 'something else (#7)' }
                 if ($readback.Mode -eq 'body') { $text = $text -replace 'Adds the example module\.', 'Adds something else.' }
+                if ($readback.Mode -eq 'hidden') { $text = $text -replace 'Adds the example module\.', "Adds the example module.$zeroWidth" }
                 @{ sha = 'f' * 40; commit = @{ message = $text; author = @{ name = $readback.Author; email = $readback.AuthorEmail }; committer = @{ name = 'GitHub'; email = $readback.CommitterEmail } } }
             })
         Set-HarnessFake (New-HarnessFake -Routes $routes -Log $log)
@@ -1478,8 +1734,23 @@ function Invoke-SelfTest {
         $crlfSummary = Join-Path $tmp 'crlf.txt'
         [IO.File]::WriteAllText($crlfSummary, "Line one.`r`nLine two.`r`n", [Text.UTF8Encoding]::new($false))
         Add-HarnessCase $cases '-Merge: a summary file with CRLF passes the read-back' $false ([bool](& $messageOf { Invoke-Merge -Number 7 -SummaryFile $crlfSummary -RecordsPath $recordsFile }))
+        $hiddenSummary = Join-Path $tmp 'hidden.txt'
+        [IO.File]::WriteAllText($hiddenSummary, "Adds the$zeroWidth example module.", [Text.UTF8Encoding]::new($false))
+        $hiddenSaid = & $messageOf { Invoke-Merge -Number 7 -SummaryFile $hiddenSummary -RecordsPath $recordsFile }
+        Add-HarnessCase $cases '-Merge: an invisible character of the summary is not sent, and the read-back passes' $true ($null -eq $hiddenSaid -and (Test-HarnessSameText (Get-HarnessProp $put[-1] 'commit_message') "Adds the example module.`n`n$(Get-HarnessSignoff)"))
+        # the summary file is read like every body file
+        $bomSummary = Join-Path $tmp 'bom.txt'
+        [IO.File]::WriteAllBytes($bomSummary, [byte[]](@(0xEF, 0xBB, 0xBF) + [Text.Encoding]::UTF8.GetBytes('Adds the example module.')))
+        $bomSaid = & $messageOf { Invoke-Merge -Number 7 -SummaryFile $bomSummary -RecordsPath $recordsFile }
+        Add-HarnessCase $cases '-Merge: a byte order mark of the summary file is not sent' $true ($null -eq $bomSaid -and (Test-HarnessSameText (Get-HarnessProp $put[-1] 'commit_message') "Adds the example module.`n`n$(Get-HarnessSignoff)"))
+        Push-Location -LiteralPath $tmp
+        try { $relativeSaid = & $messageOf { Invoke-Merge -Number 7 -SummaryFile (Split-Path -Leaf $hiddenSummary) -RecordsPath $recordsFile } } finally { Pop-Location }
+        Add-HarnessCase $cases '-Merge: a relative summary file means the current PowerShell location' $false ($null -ne $relativeSaid)
         $n = $put.Count
-        foreach ($mode in 'title', 'body') {
+        $latinSummary = Join-Path $tmp 'latin.txt'
+        [IO.File]::WriteAllBytes($latinSummary, [byte[]](0x41, 0xC3, 0x28))
+        Add-HarnessCase $cases '-Merge: a summary file that is not UTF-8 is refused before anything is sent' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $latinSummary -RecordsPath $recordsFile }) -match '-SummaryFile is not valid UTF-8') -and $put.Count -eq $n)
+        foreach ($mode in 'title', 'body', 'hidden') {
             $readback.Mode = $mode
             $found = & $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }
             Add-HarnessCase $cases "-Merge: the read-back finds a different $mode" $true ([bool]$found -and $found -match 'differ from what was sent')
@@ -1503,7 +1774,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases '-Merge: a summary that carries its own Signed-off-by is refused before anything is sent' $true ((Test-Throws { Invoke-Merge -Number 7 -SummaryFile $selfSigned -RecordsPath $recordsFile }) -and $put.Count -eq $n)
         $escaped = Join-Path $tmp 'escaped.txt'
         [IO.File]::WriteAllText($escaped, ('see C:' + $escape + '\Users\someone\x'), [Text.UTF8Encoding]::new($false))
-        Add-HarnessCase $cases '-Merge: a summary with a control character is refused before anything is sent' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $escaped -RecordsPath $recordsFile }) -match 'control or invisible character') -and $put.Count -eq $n)
+        Add-HarnessCase $cases '-Merge: a summary with a control character is refused before anything is sent' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $escaped -RecordsPath $recordsFile }) -match 'control character U\+001B') -and $put.Count -eq $n)
         $titleRoutes = $routes
         $moved = @{ Seen = 0 }
         $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge 3) { $p.title = "$($p.title) (edited)" }; $p }
@@ -1515,6 +1786,15 @@ function Invoke-SelfTest {
         $moved.Seen = 0
         $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge 3) { $p.state = 'closed' }; $p }
         Add-HarnessCase $cases '-Merge: the PR was closed right before the merge request' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'changed after the check \(base feature/v1, state closed') -and $put.Count -eq $n)
+        $moved.Seen = 0
+        $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge 3) { $p.base.ref = "feature/v1$zeroWidth" }; $p }
+        Add-HarnessCase $cases '-Merge: a zero-width space behind the base right before the merge request' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'changed after the check') -and $put.Count -eq $n)
+        $moved.Seen = 0
+        $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge 3) { $p.state = "open$zeroWidth" }; $p }
+        Add-HarnessCase $cases '-Merge: a zero-width space behind the state right before the merge request' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'changed after the check') -and $put.Count -eq $n)
+        $moved.Seen = 0
+        $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge 3) { $p.title = "$($p.title)$zeroWidth" }; $p }
+        Add-HarnessCase $cases '-Merge: a zero-width space added to the title after the squash message was built' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'title changed') -and $put.Count -eq $n)
         $moved.Seen = -100
         $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge -97) { $p.head.sha = 'a' * 40 }; $p }
         Add-HarnessCase $cases '-Merge: the PR head moved after the check' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'head moved|Cannot merge') -and $put.Count -eq $n)
@@ -1760,6 +2040,111 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases '-After: the commit cannot be read back (no field separators)' $true (((& $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }) -match 'Could not read back the commit') -and (& $removed) -eq 0)
         $squash.Raw = $null
 
+        # what git worktree remove cannot do has to be known before the remote branch goes
+        foreach ($lockLine in 'locked', 'locked kept on purpose') {
+            $worktreeText = { "$(& $savedWorktreeText)`n$lockLine" }
+            & $reset
+            $lockedRun = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+            Add-HarnessCase $cases "-After: the worktree is locked ('$lockLine'): nothing is deleted" $true ($lockedRun -match 'it is locked' -and (& $nothingDeleted))
+        }
+        $worktreeText = { "worktree $($fakeClone -replace '\\', '/')`nHEAD $tipSha`nbranch refs/heads/feature/v1`nlocked`n`nworktree $($workDir -replace '\\', '/')/example`nHEAD $headSha`nbranch refs/heads/feat/example" }
+        & $reset
+        $otherLocked = & $afterLine
+        Add-HarnessCase $cases '-After: another worktree is locked: cleaned up' $false ($otherLocked -notmatch 'remote sub-branch deleted, worktree removed')
+        $worktreeText = { "$(& $savedWorktreeText)`nprunable locked away" }
+        & $reset
+        $notLockLine = & $afterLine
+        Add-HarnessCase $cases '-After: a line that only holds the word locked is no lock' $false ($notLockLine -notmatch 'remote sub-branch deleted, worktree removed')
+        $worktreeText = $savedWorktreeText
+        & $reset
+        $treeBelow = Join-Path $exampleTree 'below'
+        New-Item -ItemType Directory -Force -Path $treeBelow | Out-Null
+        foreach ($inside in @($exampleTree, $treeBelow)) {
+            Push-Location -LiteralPath $inside
+            try { $insideRun = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree } } finally { Pop-Location }
+            Add-HarnessCase $cases "-After: the current location is inside the worktree ($(Split-Path -Leaf $inside)): nothing is deleted" $true ($insideRun -match 'the current directory .* is inside it' -and (& $nothingDeleted))
+        }
+        $processHere = [Environment]::CurrentDirectory
+        [Environment]::CurrentDirectory = $treeBelow
+        try { $processRun = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree } } finally { [Environment]::CurrentDirectory = $processHere }
+        Add-HarnessCase $cases '-After: the directory of the process is inside the worktree: nothing is deleted' $true ($processRun -match 'the current directory .* is inside it' -and (& $nothingDeleted))
+        $treeSibling = "$exampleTree-two"
+        New-Item -ItemType Directory -Force -Path $treeSibling | Out-Null
+        Push-Location -LiteralPath $treeSibling
+        try { $siblingRun = & $afterLine } finally { Pop-Location }
+        Add-HarnessCase $cases '-After: the current location is a directory whose name starts the same: cleaned up' $false ($siblingRun -notmatch 'remote sub-branch deleted, worktree removed')
+        # a run again after one that stopped halfway: git unregistered the worktree and left directories
+        $worktreeText = { "worktree $($fakeClone -replace '\\', '/')`nHEAD $tipSha`nbranch refs/heads/feature/v1" }
+        $leftBelow = Join-Path $exampleTree 'empty/below'
+        $halfDone = {
+            if (Test-Path -LiteralPath $exampleTree) { Remove-Item -LiteralPath $exampleTree -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $leftBelow | Out-Null
+            $log.Clear()
+        }
+        & $halfDone
+        $halfLine = & $afterLine
+        Add-HarnessCase $cases '-After: unregistered, only empty directories left: the rest is done' $false (-not (
+                $halfLine -match 'remote sub-branch deleted, worktree was already unregistered, its empty directory removed, local branch removed' -and (& $removed) -eq 0 -and
+                @($log | Where-Object { $_ -match 'push origin --delete' }).Count -eq 1 -and @($log | Where-Object { $_ -match 'branch -D' }).Count -eq 1 -and -not (Test-Path -LiteralPath $exampleTree)))
+        & $halfDone
+        Set-Content -LiteralPath (Join-Path $leftBelow 'kept.txt') -Value 'x'
+        $halfFile = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+        Add-HarnessCase $cases '-After: unregistered, a file left: nothing is deleted' $true ($halfFile -match 'not a worktree registered' -and (& $nothingDeleted) -and (Test-Path -LiteralPath (Join-Path $leftBelow 'kept.txt')))
+        & $halfDone
+        $hiddenFile = Join-Path $leftBelow 'hidden.txt'
+        Set-Content -LiteralPath $hiddenFile -Value 'x'
+        [IO.File]::SetAttributes($hiddenFile, [IO.FileAttributes]::Hidden)
+        $halfHidden = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+        [IO.File]::SetAttributes($hiddenFile, [IO.FileAttributes]::Normal)
+        Add-HarnessCase $cases '-After: unregistered, a hidden file left: nothing is deleted' $true ($halfHidden -match 'not a worktree registered' -and (& $nothingDeleted) -and (Test-Path -LiteralPath $hiddenFile))
+        & $halfDone
+        Push-Location -LiteralPath $leftBelow
+        try { $halfInside = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree } } finally { Pop-Location }
+        Add-HarnessCase $cases '-After: unregistered, the current location inside what is left: nothing is deleted' $true ($halfInside -match 'the current directory .* is inside it' -and (& $nothingDeleted))
+        if ($IsWindows) {
+            & $halfDone
+            $leftTarget = Join-Path $workDir 'left-target'
+            New-Item -ItemType Directory -Force -Path $leftTarget | Out-Null
+            Set-Content -LiteralPath (Join-Path $leftTarget 'keep.txt') -Value 'x'
+            $leftLink = Join-Path $leftBelow 'link'
+            New-Item -ItemType Junction -Path $leftLink -Target $leftTarget | Out-Null
+            $halfLink = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+            if (Test-Path -LiteralPath $leftLink) { [IO.Directory]::Delete($leftLink) }
+            Add-HarnessCase $cases '-After: unregistered, a link left: nothing is deleted' $true ($halfLink -match 'not a worktree registered' -and (& $nothingDeleted) -and (Test-Path -LiteralPath (Join-Path $leftTarget 'keep.txt')))
+            # a directory that cannot be removed stands for one another process still holds: the remote branch stays
+            & $halfDone
+            [IO.File]::SetAttributes($leftBelow, [IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReadOnly)
+            $halfHeld = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+            [IO.File]::SetAttributes($leftBelow, [IO.FileAttributes]::Directory)
+            Add-HarnessCase $cases '-After: unregistered, a directory that cannot be removed: an error, the branches stay' $true ($halfHeld -match 'could not be removed .*nothing else is cleaned up' -and (& $nothingDeleted))
+        }
+        if ($IsWindows) {
+            $emptyTarget = Join-Path $workDir 'empty-target'
+            New-Item -ItemType Directory -Force -Path $emptyTarget | Out-Null
+            $emptyLink = Join-Path $workDir 'to-empty'
+            New-Item -ItemType Junction -Path $emptyLink -Target $emptyTarget | Out-Null
+            $log.Clear()
+            $linkAsTree = & $messageOf { Invoke-After -Number 7 -WorktreePath $emptyLink }
+            $linkStays = Test-Path -LiteralPath $emptyLink
+            if ($linkStays) { [IO.Directory]::Delete($emptyLink) }
+            Add-HarnessCase $cases '-After: a junction to an empty directory given as -Worktree: refused as a link, nothing is deleted' $true ($linkAsTree -match 'is a link' -and $linkStays -and -not @($log | Where-Object { $_ -match 'push origin --delete| branch -D ' }).Count)
+        }
+        # registered and empty is something else: git still knows it, so it is looked at as a worktree
+        $worktreeText = $savedWorktreeText
+        & $halfDone
+        $registeredEmpty = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+        Add-HarnessCase $cases '-After: a registered worktree with nothing in it is no leftover: nothing is deleted' $true ($registeredEmpty -match 'does not look like a worktree' -and (& $nothingDeleted))
+        $worktreeText = { "worktree $($fakeClone -replace '\\', '/')`nHEAD $tipSha`nbranch refs/heads/feature/v1`n`nworktree $($elsewhereTree -replace '\\', '/')`nHEAD $headSha`nbranch refs/heads/feat/example" }
+        & $halfDone
+        $wrongEmpty = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+        Add-HarnessCase $cases '-After: an empty directory at a wrong path, the branch checked out elsewhere: nothing is deleted' $true ($wrongEmpty -match 'feat/example is checked out at .*elsewhere-tree, not at' -and (& $nothingDeleted))
+        $worktreeText = { "worktree $($fakeClone -replace '\\', '/')`nHEAD $tipSha`nbranch refs/heads/feature/v1" }
+        Remove-Item -LiteralPath $exampleTree -Recurse -Force
+        $log.Clear()
+        $nothingThere = & $afterLine
+        Add-HarnessCase $cases '-After: no directory and no registration: the last line says the worktree was already gone' $false (-not ($nothingThere -match 'remote sub-branch deleted, worktree was already gone, local branch removed' -and (& $removed) -eq 0))
+        $worktreeText = $savedWorktreeText
+
         # the checks before git worktree remove
         Set-HarnessFake (New-HarnessFake -Routes $afterRoutes -Log $log)
         $registered = @(Get-RegisteredWorktrees)
@@ -1901,6 +2286,37 @@ function Invoke-SelfTest {
             Remove-Item -LiteralPath $e2eTree -Recurse -Force
             $handDeleted = & $e2eRun
             Add-HarnessCase $cases '-After with real git: the directory deleted by hand, the worktree still registered: refused, the branches stay' $true ($handDeleted -match 'whose directory is gone' -and (& $hasRef $e2eOrigin $branchRefName) -and (& $hasRef $mainGitDir $branchRefName))
+
+            # what would make git worktree remove fail is found while the remote branch is still there
+            & $realGit @('-C', $e2eMain, 'worktree', 'prune') | Out-Null
+            & $realGit @('-C', $e2eMain, 'worktree', 'add', '--quiet', $e2eTree, 'feat/example') | Out-Null
+            foreach ($lockWay in @(@{ Name = 'with a reason'; Flags = @('--reason', 'kept on purpose') }, @{ Name = 'without a reason'; Flags = @() })) {
+                & $realGit (@('-C', $e2eMain, 'worktree', 'lock') + $lockWay.Flags + @($e2eTree)) | Out-Null
+                $lockedReal = & $e2eRun
+                & $realGit @('-C', $e2eMain, 'worktree', 'unlock', $e2eTree) | Out-Null
+                Add-HarnessCase $cases "-After with real git: a worktree locked $($lockWay.Name): refused, nothing is deleted" $true ($lockedReal -match 'it is locked' -and (& $intact))
+            }
+            Push-Location -LiteralPath $e2eTree
+            try { $locationReal = & $e2eRun } finally { Pop-Location }
+            Add-HarnessCase $cases '-After with real git: the current location inside the worktree: refused, nothing is deleted' $true ($locationReal -match 'the current directory .* is inside it' -and (& $intact))
+            $processHere = [Environment]::CurrentDirectory
+            [Environment]::CurrentDirectory = $e2eTree
+            try { $processReal = & $e2eRun } finally { [Environment]::CurrentDirectory = $processHere }
+            Add-HarnessCase $cases '-After with real git: the directory of the process inside the worktree: refused, nothing is deleted' $true ($processReal -match 'the current directory .* is inside it' -and (& $intact))
+
+            # git took the registration away and something kept the directory: first with a file in it, then only empty directories
+            & $realGit @('-C', $e2eMain, 'worktree', 'remove', $e2eTree) | Out-Null
+            New-Item -ItemType Directory -Force -Path (Join-Path $e2eTree 'empty/below') | Out-Null
+            $leftFile = Join-Path $e2eTree 'empty/kept.txt'
+            Set-Content -LiteralPath $leftFile -Value 'not empty'
+            $halfWithFile = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: unregistered with a file left: refused, the file and the branches stay' $true ($halfWithFile -match 'not a worktree registered' -and (Test-Path -LiteralPath $leftFile) -and (& $hasRef $e2eOrigin $branchRefName) -and (& $hasRef $mainGitDir $branchRefName))
+            Remove-Item -LiteralPath $leftFile
+            $halfEmpty = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: unregistered with only empty directories left: the run finishes, all three are gone' $false (
+                [bool]$halfEmpty -or $e2e.Line -notmatch 'remote sub-branch deleted, worktree was already unregistered, its empty directory removed, local branch removed' -or (Test-Path -LiteralPath $e2eTree) -or (& $hasRef $e2eOrigin $branchRefName) -or (& $hasRef $mainGitDir $branchRefName))
+            $allGone = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: once more with everything gone: the last line says so' $false ([bool]$allGone -or $e2e.Line -notmatch 'remote sub-branch was already gone, worktree was already gone, local branch was already gone')
         } finally {
             Set-HarnessFake (New-HarnessFake -Routes $afterRoutes -Log $log)
             foreach ($variableName in $gitEnvironmentSaved.get_Keys()) { & $setVariable $variableName $gitEnvironmentSaved[$variableName] }

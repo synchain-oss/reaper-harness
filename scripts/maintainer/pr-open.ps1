@@ -41,7 +41,7 @@ function Get-TemplateHeadings {
 <# Every check before a PR is opened or edited; returns the body to send (marker added) or throws. #>
 function Test-OpenRequest {
     param([string]$Branch, [string]$Base, [string]$PrTitle, [string]$Body, [bool]$IsDraft, [string]$AgentRole, [int]$AgentRound, [string]$HeadSha)
-    if ($Base -cne $BaseBranch) { throw "base must be $BaseBranch, got '$Base' (no PR into dev or prod from here)" }
+    if (-not (Test-HarnessSameText $Base $BaseBranch)) { throw "base must be $BaseBranch, got '$Base' (no PR into dev or prod from here)" }
     if ($Branch -cnotmatch '^feat/[a-z0-9][a-z0-9-]*$') { throw "head must be feat/<slug>, got '$Branch'" }
     if ($IsDraft) { throw 'No draft PRs: a draft does not trigger the review bot' }
     Assert-PublicText $Branch 'branch name'
@@ -144,6 +144,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'base=prod' $true (-not (& $accepted 'feat/example' 'prod' $goodTitle $good $false))
         Add-HarnessCase $cases 'base is another feature line' $true (-not (& $accepted 'feat/example' 'feature/v2' $goodTitle $good $false))
         Add-HarnessCase $cases 'base differs from feature/v1 only by case' $true (-not (& $accepted 'feat/example' 'Feature/V1' $goodTitle $good $false))
+        Add-HarnessCase $cases 'base is feature/v1 with a zero-width space behind it' $true (-not (& $accepted 'feat/example' "feature/v1$([char]0x200B)" $goodTitle $good $false))
         Add-HarnessCase $cases 'head is not feat/' $true (-not (& $accepted 'fix/example' 'feature/v1' $goodTitle $good $false))
         Add-HarnessCase $cases 'head with uppercase letters' $true (-not (& $accepted 'feat/Example' 'feature/v1' $goodTitle $good $false))
         Add-HarnessCase $cases 'head contains a card number' $true (-not (& $accepted ('feat/r' + 'h-03-x') 'feature/v1' $goodTitle $good $false))

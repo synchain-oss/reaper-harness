@@ -30,12 +30,13 @@
 # cell starts with, never by position, so extra columns (#, source, basis, commit or reason / issue) and a note after the name
 # ("处置（采纳 / 不改 / 挂账）") are fine. 级别 is 【红旗】 / 【重要】 / 【建议】 (brackets optional); only 建议, 总结 and 信息 count as not
 # severe, any other value is read as severe. Every 【红旗】 and 【重要】 finding of a bot summary gets one row: a disposition that
-# references the bot's run with fewer rows of that level is a failure; rows with the same location and summary count once, a row in
-# a code fence does not count. A severe row counts as handled only when its 处置 starts with 已修, 修复 or 采纳, holds no refusal word
+# references the bot's run with fewer rows of that level is a failure; rows with the same location and summary count once, and the
+# table is read the way markdown renders it: a row in a code fence or an HTML comment, or indented by 4 columns, does not count, and a
+# header row needs the delimiter row right below it. A severe row counts as handled only when its 处置 starts with 已修, 修复 or 采纳, holds no refusal word
 # (不改 不采纳 挂账 暂不 维持 and the like), does not go on to say the fix is not done (修复中, 采纳但不修, 采纳，后续再做 and the like) and has a
 # commit hash in that column or right of it; anything else, other words and an empty or missing 处置 included, needs the user's waiver
-# before the merge. A commit hash stands on its own and has a letter and a digit: a short hash of only digits or only letters reads as
-# an id or a word, so write it longer. For one finding, the row of the highest round and the row posted last must both show it handled.
+# before the merge. A commit hash stands on its own (abc1234.ps1 is a file name) and has a letter and a digit: a short hash of only digits
+# or only letters reads as an id or a word, so write it longer. For one finding, the row of the highest round and the row posted last must both show it handled.
 
 [CmdletBinding()]
 param(
