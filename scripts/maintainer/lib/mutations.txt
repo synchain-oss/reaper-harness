@@ -99,10 +99,10 @@
 < if ([bool]$pull.draft) {
 > if ($false) {
 @@ pr-merge.ps1 | any feature/** base accepted
-< if ($pull.base.ref -cne 'feature/v1') {
+< if (-not (Test-HarnessSameText $pull.base.ref 'feature/v1')) {
 > if ($pull.base.ref -notmatch '^feature/') {
 @@ pr-merge.ps1 | any base accepted
-< if ($pull.base.ref -cne 'feature/v1') {
+< if (-not (Test-HarnessSameText $pull.base.ref 'feature/v1')) {
 > if ($false) {
 @@ pr-merge.ps1 | head branch name not checked
 < if ($pull.head.ref -cnotmatch '^feat/[a-z0-9][a-z0-9-]*$') {
@@ -146,7 +146,7 @@
 < $fail.Add('The bot summary has no run link')
 > $null = 0
 @@ pr-merge.ps1 | run of another workflow accepted
-< if ($run.path -ne (Get-HarnessReviewWorkflow)) {
+< if (-not (Test-HarnessSameText $run.path (Get-HarnessReviewWorkflow))) {
 > if ($false) {
 @@ pr-merge.ps1 | unsuccessful run accepted
 < if ($run.conclusion -ne 'success') {
@@ -302,10 +302,10 @@
 < if (@($bad).Count) { throw
 > if ($false) { throw
 @@ push.ps1 | author not checked
-< if ($Commit.Author -cne $want) {
+< if (-not (Test-HarnessSameText $Commit.Author $want)) {
 > if ($false) {
 @@ push.ps1 | committer not checked
-< if ($Commit.Committer -cne $want) {
+< if (-not (Test-HarnessSameText $Commit.Committer $want)) {
 > if ($false) {
 @@ push.ps1 | merge commits judged like ordinary commits
 < -Merge:($Commit.Parents -gt 1)
@@ -338,10 +338,10 @@
 
 # ===================================================== pr-open.ps1
 @@ pr-open.ps1 | any base accepted
-< if ($Base -cne $BaseBranch) { throw
+< if (-not (Test-HarnessSameText $Base $BaseBranch)) { throw
 > if ($false) { throw
 @@ pr-open.ps1 | base compared without case
-< if ($Base -cne $BaseBranch) { throw
+< if (-not (Test-HarnessSameText $Base $BaseBranch)) { throw
 > if ($Base -ne $BaseBranch) { throw
 @@ pr-open.ps1 | head branch name not checked
 < if ($Branch -cnotmatch '^feat/[a-z0-9][a-z0-9-]*$') { throw
@@ -652,7 +652,7 @@
 > loadPersonalNeedles({ cwd: process.cwd() }).needles
 @@ lib/maint.mjs | text command finds no trailer
 % run=shared
-< print({ aiTrailerLines: aiTrailerLines(fs.readFileSync(file, "utf8")) });
+< print({ aiTrailerLines: aiTrailerLines(stripInvisible(fs.readFileSync(file, "utf8"))) });
 > print({ aiTrailerLines: [] });
 
 # ===================================================== lib/HarnessGh.psm1: identity and external commands
@@ -752,7 +752,7 @@
 > $null = 0
 @@ lib/HarnessGh.psm1 | message errors dropped
 % run=shared,push,pr-merge
-< @((Invoke-HarnessMaint -Command 'message' -Content $Message -Extra $flags).errors)
+< @((Get-HarnessMessageCheck -Message $Message -Merge:$Merge -ExactlyOne:$ExactlyOne).errors)
 > @()
 @@ lib/HarnessGh.psm1 | PR text errors dropped
 % run=shared,pr-open,pr-merge
@@ -1010,7 +1010,7 @@
 
 # ===================================================== pr-merge.ps1: findings deferred in the disposition
 @@ pr-merge.ps1 | deferred suggestions need a waiver too
-< if ($levelText -cin '建议', '总结', '信息') { return 'none' }
+< if (Test-HarnessTextIn $levelText @('建议', '总结', '信息')) { return 'none' }
 > $null = 0
 @@ pr-merge.ps1 | every row counts as severe
 < if ((Get-DispositionLevel $row) -ceq 'none') { continue }
@@ -1065,7 +1065,7 @@
 < if ($now.head.sha -ne $verdict.Head -or $pull.head.sha -ne $verdict.Head) { throw
 > if ($pull.head.sha -ne $verdict.Head) { throw
 @@ pr-merge.ps1 | title changed after the message was built
-< if ([string]$now.title -cne [string]$pull.title) { throw
+< if (-not (Test-HarnessSameText $now.title $pull.title)) { throw
 > if ($false) { throw
 @@ pr-merge.ps1 | merge request without the head pin
 < sha = $verdict.Head; commit_title
@@ -1080,16 +1080,16 @@
 < if (-not $res.merged) { throw
 > if ($false) { throw
 @@ pr-merge.ps1 | merge commit text not compared with what was sent
-< if ($actual -cne $expected) { $problems.Add(
+< if (-not (Test-HarnessSameText $actual $expected)) { $problems.Add(
 > if ($false) { $problems.Add(
 @@ pr-merge.ps1 | read-back problems ignored after the merge
 < if ($problems.Count) { throw "#$Number was merged as
 > if ($false) { throw "#$Number was merged as
 @@ pr-merge.ps1 | squash author not checked
-< if ($AuthorName -cne (Get-HarnessMaintainer) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
+< if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer)) -or -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) {
 > if ($false) {
 @@ pr-merge.ps1 | squash committer not checked
-< if ($AllowedCommitters -notcontains $CommitterEmail.ToLowerInvariant()) {
+< if (-not (Test-HarnessTextIn $CommitterEmail.ToLowerInvariant() $AllowedCommitters)) {
 > if ($false) {
 @@ pr-merge.ps1 | squash message rules not applied to the read-back
 < foreach ($e in @(Get-MessageErrors $Message -ExactlyOne)) { $problems.Add($e) }
@@ -1107,7 +1107,7 @@
 < $title = "$($PrData.title) (#$($PrData.number))"
 > $title = "$($PrData.title)"
 @@ pr-merge.ps1 | squash message rules not applied before sending
-< $problems = @(Get-MessageErrors $full -ExactlyOne)
+< $problems = @($checked.errors)
 > $problems = @()
 @@ pr-merge.ps1 | relied-on records not printed
 < foreach ($x in @($verdict.ReliedOn)) { Write-Output
@@ -1149,16 +1149,16 @@
 < if ([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) { & $refuse
 > if ($false) { & $refuse
 @@ pr-merge.ps1 | worktree path: main checkout accepted
-< if ($final -ieq (& $real $MainRoot)) {
+< if ($final -ieq (Get-RealDirectory $MainRoot)) {
 > if ($false) {
 @@ pr-merge.ps1 | worktree path: drive root accepted
 < if ([IO.Path]::GetPathRoot($final).TrimEnd('\', '/') -ieq $final) {
 > if ($false) {
 @@ pr-merge.ps1 | worktree path: home directory accepted
-< if ($homeDir -and $final -ieq (& $real $homeDir)) {
+< if ($homeDir -and $final -ieq (Get-RealDirectory $homeDir)) {
 > if ($false) {
 @@ pr-merge.ps1 | worktree path: unregistered directory accepted
-< if ($known -inotcontains $final) {
+< if ($known -inotcontains (Get-RealDirectory $Path)) {
 > if ($false) {
 @@ pr-merge.ps1 | worktree path: directory without a .git file accepted
 < if (-not (Test-Path -LiteralPath (Join-Path $Path '.git') -PathType Leaf)) {
@@ -1189,7 +1189,7 @@
 < $TableRow.Cells[$at] -replace '[【】\s]', ''
 > $TableRow.Cells[$at]
 @@ pr-merge.ps1 | level without a level column not looked for
-< if (@($TableRow.Cells | Where-Object { $_ -match "【$levelName】" }).Count) { return $levelName }
+< if (@($TableRow.Cells | Where-Object { $_ -match "【$levelName】" -or (Test-HarnessSameText $_ $levelName) }).Count) { return $levelName }
 > $null = 0
 @@ pr-merge.ps1 | finding called Values hides the others
 < @($word.get_Values() | Where-Object Deferred | ForEach-Object Line)
@@ -1267,11 +1267,11 @@
 < if ($null -eq $changedFiles -or [int]$changedFiles -ne @($Facts.Files).Count) {
 > if ($null -ne $changedFiles -and [int]$changedFiles -ne @($Facts.Files).Count) {
 @@ pr-merge.ps1 | base not read again before the merge request
-< if ($now.base.ref -cne 'feature/v1' -or $now.state -cne 'open') {
-> if ($now.state -cne 'open') {
+< if (-not (Test-HarnessSameText $now.base.ref 'feature/v1') -or -not (Test-HarnessSameText $now.state 'open')) {
+> if (-not (Test-HarnessSameText $now.state 'open')) {
 @@ pr-merge.ps1 | state not read again before the merge request
-< if ($now.base.ref -cne 'feature/v1' -or $now.state -cne 'open') {
-> if ($now.base.ref -cne 'feature/v1') {
+< if (-not (Test-HarnessSameText $now.base.ref 'feature/v1') -or -not (Test-HarnessSameText $now.state 'open')) {
+> if (-not (Test-HarnessSameText $now.base.ref 'feature/v1')) {
 @@ pr-merge.ps1 | CRLF of the summary kept
 < $text = ($Summary -replace "`r`n", "`n").Trim()
 > $text = $Summary.Trim()
@@ -1290,14 +1290,14 @@
 > if (-not $botJob) {
 # ===================================================== the squash read-back
 @@ pr-merge.ps1 | squash author name not checked
-< if ($AuthorName -cne (Get-HarnessMaintainer) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
-> if (@(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
+< if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer)) -or -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) {
+> if (-not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) {
 @@ pr-merge.ps1 | squash author email not checked
-< if ($AuthorName -cne (Get-HarnessMaintainer) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
-> if ($AuthorName -cne (Get-HarnessMaintainer)) {
+< if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer)) -or -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) {
+> if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer))) {
 @@ pr-merge.ps1 | squash author email compared with case
-< -cnotcontains $AuthorEmail.ToLowerInvariant()) {
-> -cnotcontains $AuthorEmail) {
+< -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) {
+> -not (Test-HarnessTextIn $AuthorEmail @(Get-HarnessSameAuthors))) {
 @@ ../check-commits.mjs | numbered noreply address of the maintainer not allowed
 % run=pr-merge
 < export const SAME_AUTHORS = ["noreply@synchain.ca", "140901583+dlsnows@users.noreply.github.com"];
@@ -1593,7 +1593,7 @@
 > $null = 0
 @@ lib/HarnessGh.psm1 | missing body file named as unreadable text
 % run=pr-comment
-< if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "-BodyFile (UTF-8 text) does not exist: $Path" }
+< if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "$Parameter (UTF-8 text) does not exist: $Path" }
 > $null = 0
 @@ lib/HarnessGh.psm1 | reply in another thread counts as the answer
 % run=shared
@@ -1625,12 +1625,12 @@
 # ===================================================== push and gitleaks
 @@ ../check-secrets.mjs | gitleaks does not read merge commits
 % run=check-secrets
-< const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--diff-merges=first-parent"];
-> const LOG_OPTS = ["--no-ext-diff", "--no-textconv"];
+< const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--text", "--diff-merges=first-parent"];
+> const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--text"];
 @@ ../check-secrets.mjs | hook: gitleaks does not read merge commits
 % run=pre-push
-< const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--diff-merges=first-parent"];
-> const LOG_OPTS = ["--no-ext-diff", "--no-textconv"];
+< const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--text", "--diff-merges=first-parent"];
+> const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--text"];
 @@ ../../.github/workflows/ci.yml | CI: the PR scan goes around the shared script
 % run=push
 < node scripts/check-secrets.mjs --commits "$BASE_SHA..$HEAD_SHA"
@@ -1819,8 +1819,8 @@
 > (?<![0-9A-Za-z])
 
 @@ pr-merge.ps1 | commit proof: letters or a path glued to the right
-< (?![0-9A-Za-z/-])
-> (?![0-9a-f])
+< (?![0-9A-Za-z/-]|\.[0-9A-Za-z])
+> (?![0-9a-f]|\.[0-9A-Za-z])
 
 @@ pr-merge.ps1 | commit proof: only letters count
 < (?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])
@@ -1839,16 +1839,16 @@
 > (?<=/commit/)
 
 @@ pr-merge.ps1 | commit proof: the full hash is too long
-< [0-9a-f]{7,40}(?![0-9A-Za-z/-])
-> [0-9a-f]{7,39}(?![0-9A-Za-z/-])
+< [0-9a-f]{7,40}(?![0-9A-Za-z/-]|\.[0-9A-Za-z])
+> [0-9a-f]{7,39}(?![0-9A-Za-z/-]|\.[0-9A-Za-z])
 
 @@ pr-merge.ps1 | commit proof: longer than a full hash counts
-< [0-9a-f]{7,40}(?![0-9A-Za-z/-])
-> [0-9a-f]{7,41}(?![0-9A-Za-z/-])
+< [0-9a-f]{7,40}(?![0-9A-Za-z/-]|\.[0-9A-Za-z])
+> [0-9a-f]{7,41}(?![0-9A-Za-z/-]|\.[0-9A-Za-z])
 
 @@ pr-merge.ps1 | commit proof: six characters count
-< [0-9a-f]{7,40}(?![0-9A-Za-z/-])
-> [0-9a-f]{6,40}(?![0-9A-Za-z/-])
+< [0-9a-f]{7,40}(?![0-9A-Za-z/-]|\.[0-9A-Za-z])
+> [0-9a-f]{6,40}(?![0-9A-Za-z/-]|\.[0-9A-Za-z])
 
 # disposition rows: a handled word that goes on to say it is not done
 
@@ -1927,24 +1927,25 @@
 # disposition rows: code fences and rows about one finding
 
 @@ pr-merge.ps1 | fence: never noticed
-< if (-not $fenceMark) { $fenceMark = $Matches[1] }
-> if (-not $fenceMark) { $fenceMark = '' }
+< if ($opening.Success) {
+> if ($false) {
 
 @@ pr-merge.ps1 | fence: the closing line does not end it
-< elseif ($fenceMark -ceq $Matches[1]) { $fenceMark = '' }
-> elseif ($fenceMark -ceq $Matches[1]) { }
+< $closing.Groups[1].Length -ge $fence.Length) { $fence = $null; $cols = $null; $inTable = $false; continue }
+> $closing.Groups[1].Length -ge $fence.Length) { $cols = $null; $inTable = $false; continue }
 
 @@ pr-merge.ps1 | fence: the other mark closes it
-< elseif ($fenceMark -ceq $Matches[1]) { $fenceMark = '' }
-> else { $fenceMark = '' }
+< if ($closing.Success -and $closing.Groups[1].Value[0] -eq $fence.Mark -and
+> if ($closing.Success -and
 
 @@ pr-merge.ps1 | fence: the header of the table before it stays
-< { $fenceMark = '' }; $cols = $null; continue }
-> { $fenceMark = '' }; continue }
+< $fence = [pscustomobject]@{ Mark = $run[0]; Length = $run.Length }
+<                 $cols = $null; $inTable = $false
+> $fence = [pscustomobject]@{ Mark = $run[0]; Length = $run.Length }
 
 @@ pr-merge.ps1 | fence: a tilde fence is not one
-< '^\s*(```|~~~)'
-> '^\s*(```)'
+< $opening = [regex]::Match($line, '^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$')
+> $opening = [regex]::Match($line, '^ {0,3}(`{3,})[^`]*$')
 
 @@ pr-merge.ps1 | fence: a fenced row can handle a finding
 < $handled = -not $row.Fenced -and $decision -match '^(?:已修|修复|采纳)' -and -not $refused -and -not $unfinished -and $proof
@@ -1996,7 +1997,7 @@
 > if ($false) { throw
 
 @@ pr-merge.ps1 | -After: a checkout at another path goes on
-< if ((& $real $checkout) -ine (& $real $WorktreePath)) { throw
+< if ((Get-RealDirectory $checkout) -ine (Get-RealDirectory $WorktreePath)) { throw
 > if ($false) { throw
 
 @@ pr-merge.ps1 | -After: a branch that starts with the same name is taken for it
@@ -2020,22 +2021,488 @@
 
 # the gate for public text
 
-@@ ../lib/privacy-needles.mjs | public text: invisible format characters accepted
+@@ ../lib/privacy-needles.mjs | public text: format characters that are not default-ignorable left in
 % run=privacy
-< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|\p{Cf}/u
-> /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)/u
+< /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu
+> /[\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu
 
 @@ ../lib/privacy-needles.mjs | public text: a CR without its LF accepted
 % run=privacy
-< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|\p{Cf}/u
-> /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\p{Cf}/u
+< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)/
+> /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/
 
 @@ ../lib/privacy-needles.mjs | public text: C1 control characters accepted
 % run=privacy
-< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|\p{Cf}/u
-> /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)|\p{Cf}/u
+< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)/
+> /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)/
 
-@@ ../lib/privacy-needles.mjs | public text: a format character beyond the first plane accepted
+@@ ../lib/privacy-needles.mjs | public text: a format character beyond the first plane left in
 % run=privacy
-< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|\p{Cf}/u
-> /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|[\xad\u0600-\u0605\u061c\u06dd\u070f\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/
+< /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu
+> /[\xad\u034f\u0600-\u0605\u061c\u06dd\u070f\u08e2\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2028\u2029\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb]/g
+
+# ===================================================== comparisons that see every character
+@@ pr-merge.ps1 | base compared under the rules of the culture
+< if (-not (Test-HarnessSameText $pull.base.ref 'feature/v1')) {
+> if ($pull.base.ref -cne 'feature/v1') {
+@@ pr-merge.ps1 | run path compared under the rules of the culture
+< if (-not (Test-HarnessSameText $run.path (Get-HarnessReviewWorkflow))) {
+> if ($run.path -cne (Get-HarnessReviewWorkflow)) {
+@@ push.ps1 | author compared under the rules of the culture
+< if (-not (Test-HarnessSameText $Commit.Author $want)) {
+> if ($Commit.Author -cne $want) {
+@@ push.ps1 | committer compared under the rules of the culture
+< if (-not (Test-HarnessSameText $Commit.Committer $want)) {
+> if ($Commit.Committer -cne $want) {
+@@ pr-open.ps1 | base compared under the rules of the culture
+< if (-not (Test-HarnessSameText $Base $BaseBranch)) { throw
+> if ($Base -cne $BaseBranch) { throw
+@@ pr-merge.ps1 | level of a severe row compared under the rules of the culture
+< if (Test-HarnessTextIn $levelText @('红旗', '重要')) { return $levelText }
+> if ($levelText -cin '红旗', '重要') { return $levelText }
+@@ pr-merge.ps1 | level of a light row compared under the rules of the culture
+< if (Test-HarnessTextIn $levelText @('建议', '总结', '信息')) { return 'none' }
+> if ($levelText -cin '建议', '总结', '信息') { return 'none' }
+@@ pr-merge.ps1 | title read again under the rules of the culture
+< if (-not (Test-HarnessSameText $now.title $pull.title)) { throw
+> if ([string]$now.title -cne [string]$pull.title) { throw
+@@ pr-merge.ps1 | merge commit text compared under the rules of the culture
+< if (-not (Test-HarnessSameText $actual $expected)) { $problems.Add(
+> if ($actual -cne $expected) { $problems.Add(
+@@ pr-merge.ps1 | squash author name compared under the rules of the culture
+< if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer)) -or -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) {
+> if ($AuthorName -cne (Get-HarnessMaintainer) -or -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) {
+@@ pr-merge.ps1 | squash author email compared under the rules of the culture
+< if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer)) -or -not (Test-HarnessTextIn $AuthorEmail.ToLowerInvariant() @(Get-HarnessSameAuthors))) {
+> if (-not (Test-HarnessSameText $AuthorName (Get-HarnessMaintainer)) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
+@@ pr-merge.ps1 | squash committer compared under the rules of the culture
+< if (-not (Test-HarnessTextIn $CommitterEmail.ToLowerInvariant() $AllowedCommitters)) {
+> if ($AllowedCommitters -notcontains $CommitterEmail.ToLowerInvariant()) {
+@@ pr-merge.ps1 | base read again under the rules of the culture
+< if (-not (Test-HarnessSameText $now.base.ref 'feature/v1') -or -not (Test-HarnessSameText $now.state 'open')) {
+> if ($now.base.ref -cne 'feature/v1' -or -not (Test-HarnessSameText $now.state 'open')) {
+@@ pr-merge.ps1 | state read again under the rules of the culture
+< if (-not (Test-HarnessSameText $now.base.ref 'feature/v1') -or -not (Test-HarnessSameText $now.state 'open')) {
+> if (-not (Test-HarnessSameText $now.base.ref 'feature/v1') -or $now.state -cne 'open') {
+@@ lib/HarnessGh.psm1 | same text: letter case ignored
+% run=shared
+< [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+> [string]::Equals($Left, $Right, [StringComparison]::OrdinalIgnoreCase)
+@@ lib/HarnessGh.psm1 | same text: under the rules of the culture
+% run=shared
+< [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+> $Left -ceq $Right
+@@ lib/HarnessGh.psm1 | text in a list: under the rules of the culture
+% run=shared
+< @($List | Where-Object { Test-HarnessSameText $Text $_ }).Count -gt 0
+> $List -ccontains $Text
+
+# ===================================================== disposition tables as markdown renders them
+@@ pr-merge.ps1 | comment: a block is not noticed
+< if ($line -match '^ {0,3}<!--') {
+> if ($false) {
+@@ pr-merge.ps1 | comment: a block ends with its first line
+< $inComment = -not $line.Contains('-->')
+> $inComment = $false
+@@ pr-merge.ps1 | comment: a one-line comment stays open
+< $inComment = -not $line.Contains('-->')
+> $inComment = $true
+@@ pr-merge.ps1 | comment: the end of a block is not noticed
+< if ($line.Contains('-->')) { $inComment = $false }
+> $null = 0
+@@ pr-merge.ps1 | comment: a row on the closing line counts
+< if ($line.Contains('-->')) { $inComment = $false }
+<                 continue
+> if ($line.Contains('-->')) { $inComment = $false; $line = $line.Substring($line.IndexOf('-->') + 3) } else { continue }
+@@ pr-merge.ps1 | comment: a block does not end the table
+< $inComment = -not $line.Contains('-->')
+<                 $cols = $null; $inTable = $false
+> $inComment = -not $line.Contains('-->')
+@@ pr-merge.ps1 | comment: a block leaves the table open
+< $inComment = -not $line.Contains('-->')
+<                 $cols = $null; $inTable = $false
+> $inComment = -not $line.Contains('-->')
+>                 $cols = $null
+@@ pr-merge.ps1 | comment: an inline one stays in the row
+< $visible = [regex]::Replace($line, '<!--.*?-->', '')
+> $visible = $line
+@@ pr-merge.ps1 | comment: an inline one reaches to the last end in the line
+< [regex]::Replace($line, '<!--.*?-->', '')
+> [regex]::Replace($line, '<!--.*-->', '')
+@@ pr-merge.ps1 | comment: one opened in a line of text is plain text
+< if ($commentAt -ge 0 -and -not $inTable -and -not $delimiterBelow) {
+> if ($false) {
+@@ pr-merge.ps1 | comment: one opened in a table row reaches over lines
+< if ($commentAt -ge 0 -and -not $inTable -and -not $delimiterBelow) {
+> if ($commentAt -ge 0 -and -not $delimiterBelow) {
+@@ pr-merge.ps1 | comment: one opened in a header row reaches over lines
+< if ($commentAt -ge 0 -and -not $inTable -and -not $delimiterBelow) {
+> if ($commentAt -ge 0 -and -not $inTable) {
+@@ pr-merge.ps1 | comment: one opened in a line of text reaches over blank lines
+< $later -lt $lines.Count -and $lines[$later].Trim(); $later++
+> $later -lt $lines.Count; $later++
+@@ pr-merge.ps1 | comment: one opened in a line of text does not hide the lines after it
+< $inComment = $true; $visible = $visible.Substring(0, $commentAt); break
+> $visible = $visible.Substring(0, $commentAt); break
+@@ pr-merge.ps1 | comment: one opened in a row outside a table stays in the row
+< $inComment = $true; $visible = $visible.Substring(0, $commentAt); break
+> $inComment = $true; break
+@@ pr-merge.ps1 | indent: an indented row counts
+< if ((Get-MdIndent $line) -ge 4) { $cols = $null; $inTable = $false; continue }
+> $null = 0
+@@ pr-merge.ps1 | indent: 5 columns are needed
+< if ((Get-MdIndent $line) -ge 4) { $cols = $null; $inTable = $false; continue }
+> if ((Get-MdIndent $line) -ge 5) { $cols = $null; $inTable = $false; continue }
+@@ pr-merge.ps1 | indent: 3 columns are enough
+< if ((Get-MdIndent $line) -ge 4) { $cols = $null; $inTable = $false; continue }
+> if ((Get-MdIndent $line) -ge 3) { $cols = $null; $inTable = $false; continue }
+@@ pr-merge.ps1 | indent: the table goes on
+< if ((Get-MdIndent $line) -ge 4) { $cols = $null; $inTable = $false; continue }
+> if ((Get-MdIndent $line) -ge 4) { continue }
+@@ pr-merge.ps1 | indent: the table stays open
+< if ((Get-MdIndent $line) -ge 4) { $cols = $null; $inTable = $false; continue }
+> if ((Get-MdIndent $line) -ge 4) { $cols = $null; continue }
+@@ pr-merge.ps1 | indent: a tab counts as one column
+< $width += 4 - ($width % 4)
+> $width += 1
+@@ pr-merge.ps1 | text between tables keeps the header
+< if ($visible -notmatch '^\s*\|') { $cols = $null; $inTable = $false; continue }
+> if ($visible -notmatch '^\s*\|') { continue }
+@@ pr-merge.ps1 | text between tables leaves the table open
+< if ($visible -notmatch '^\s*\|') { $cols = $null; $inTable = $false; continue }
+> if ($visible -notmatch '^\s*\|') { $cols = $null; continue }
+@@ pr-merge.ps1 | fence: a line with an info string closes it
+< $closing = [regex]::Match($line, '^ {0,3}(`+|~+)[ \t]*$')
+> $closing = [regex]::Match($line, '^ {0,3}(`+|~+)')
+@@ pr-merge.ps1 | fence: trailing spaces stop it from closing
+< $closing = [regex]::Match($line, '^ {0,3}(`+|~+)[ \t]*$')
+> $closing = [regex]::Match($line, '^ {0,3}(`+|~+)$')
+@@ pr-merge.ps1 | fence: a closing line indented by 4 columns closes it
+< $closing = [regex]::Match($line, '^ {0,3}(`+|~+)[ \t]*$')
+> $closing = [regex]::Match($line, '^\s*(`+|~+)[ \t]*$')
+@@ pr-merge.ps1 | fence: a closing line must not be indented
+< $closing = [regex]::Match($line, '^ {0,3}(`+|~+)[ \t]*$')
+> $closing = [regex]::Match($line, '^(`+|~+)[ \t]*$')
+@@ pr-merge.ps1 | fence: fewer marks close it
+< $closing.Groups[1].Length -ge $fence.Length)
+> $true)
+@@ pr-merge.ps1 | fence: only as many marks close it
+< $closing.Groups[1].Length -ge $fence.Length)
+> $closing.Groups[1].Length -eq $fence.Length)
+@@ pr-merge.ps1 | fence: two marks open one
+< $opening = [regex]::Match($line, '^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$')
+> $opening = [regex]::Match($line, '^ {0,3}(?:(`{2,})[^`]*|(~{3,}).*)$')
+@@ pr-merge.ps1 | fence: a backtick in the info string
+< $opening = [regex]::Match($line, '^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$')
+> $opening = [regex]::Match($line, '^ {0,3}(?:(`{3,}).*|(~{3,}).*)$')
+@@ pr-merge.ps1 | fence: a tilde in the info string of a tilde fence
+< $opening = [regex]::Match($line, '^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$')
+> $opening = [regex]::Match($line, '^ {0,3}(?:(`{3,})[^`]*|(~{3,})[^~]*)$')
+@@ pr-merge.ps1 | fence: an opening line must not be indented
+< $opening = [regex]::Match($line, '^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$')
+> $opening = [regex]::Match($line, '^(?:(`{3,})[^`]*|(~{3,}).*)$')
+@@ pr-merge.ps1 | fence: a row in a fence is not marked
+< Fenced = [bool]$fence })
+> Fenced = $false })
+@@ pr-merge.ps1 | fence: a table before it stays open
+< $fence = [pscustomobject]@{ Mark = $run[0]; Length = $run.Length }
+<                 $cols = $null; $inTable = $false
+> $fence = [pscustomobject]@{ Mark = $run[0]; Length = $run.Length }
+>                 $cols = $null
+@@ pr-merge.ps1 | fence: the header of a table in it stays after it
+< $closing.Groups[1].Length -ge $fence.Length) { $fence = $null; $cols = $null; $inTable = $false; continue }
+> $closing.Groups[1].Length -ge $fence.Length) { $fence = $null; continue }
+@@ pr-merge.ps1 | fence: a table in it stays open after it
+< $closing.Groups[1].Length -ge $fence.Length) { $fence = $null; $cols = $null; $inTable = $false; continue }
+> $closing.Groups[1].Length -ge $fence.Length) { $fence = $null; $cols = $null; continue }
+@@ pr-merge.ps1 | fence: text in it keeps the header
+< if ($line -notmatch '^\s*\|') { $cols = $null; $inTable = $false; continue }
+> if ($line -notmatch '^\s*\|') { continue }
+@@ pr-merge.ps1 | fence: text in it leaves the table open
+< if ($line -notmatch '^\s*\|') { $cols = $null; $inTable = $false; continue }
+> if ($line -notmatch '^\s*\|') { $cols = $null; continue }
+@@ pr-merge.ps1 | fence: a row indented by 4 columns in it is not listed
+< if ($line -notmatch '^\s*\|') { $cols = $null; $inTable = $false; continue }
+> if ($line -notmatch '^ {0,3}\|') { $cols = $null; $inTable = $false; continue }
+@@ pr-merge.ps1 | header: no delimiter row needed
+< $isHeader = -not $inTable -and $delimiterBelow -and (Get-MdCellCount $visible) -eq (Get-MdCellCount $lines[$at + 1])
+> $isHeader = -not $inTable
+@@ pr-merge.ps1 | header: any number of cells in the delimiter row
+< $isHeader = -not $inTable -and $delimiterBelow -and (Get-MdCellCount $visible) -eq (Get-MdCellCount $lines[$at + 1])
+> $isHeader = -not $inTable -and $delimiterBelow
+@@ pr-merge.ps1 | header: a second one in the same table
+< $isHeader = -not $inTable -and $delimiterBelow -and (Get-MdCellCount $visible) -eq (Get-MdCellCount $lines[$at + 1])
+> $isHeader = $delimiterBelow -and (Get-MdCellCount $visible) -eq (Get-MdCellCount $lines[$at + 1])
+@@ pr-merge.ps1 | header: the table is not known to be open
+< if ($isHeader) {
+<             $inTable = $true
+> if ($isHeader) {
+@@ pr-merge.ps1 | header: the delimiter row of known columns is read as a row
+< if ($map.Count) { $cols = $map; $at++; continue }
+> if ($map.Count) { $cols = $map; continue }
+@@ pr-merge.ps1 | header: the delimiter row of unknown columns is read as a row
+< if ($isHeader) { $at++ }
+> $null = 0
+@@ pr-merge.ps1 | delimiter row: indented by 4 columns
+< (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+> $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+@@ pr-merge.ps1 | delimiter row: no pipe needed
+< (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+> (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+@@ pr-merge.ps1 | delimiter row: anything with a pipe
+< (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+> (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|')
+@@ pr-merge.ps1 | delimiter row: at least two hyphens
+< (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+> (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?$'
+@@ pr-merge.ps1 | delimiter row: no colons
+< (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+> (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*-+\s*(?:\|\s*-+\s*)*\|?$'
+@@ pr-merge.ps1 | delimiter row: outer pipes needed
+< (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$'
+> (Get-MdIndent $MdLine) -lt 4 -and $MdLine.Contains('|') -and $MdLine.Trim() -match '^\|\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|$'
+@@ pr-merge.ps1 | cell count: an escaped pipe is a boundary
+< (($MdLine.Trim() -replace '\\\|', '' -replace '^\|', '' -replace '\|$', '') -split '\|').Count
+> (($MdLine.Trim() -replace '^\|', '' -replace '\|$', '') -split '\|').Count
+@@ pr-merge.ps1 | cell count: the outer pipes count
+< (($MdLine.Trim() -replace '\\\|', '' -replace '^\|', '' -replace '\|$', '') -split '\|').Count
+> (($MdLine.Trim() -replace '\\\|', '') -split '\|').Count
+@@ pr-merge.ps1 | level without a level column: 【重要】 not looked for
+< Where-Object { $_ -match "【$levelName】" -or (Test-HarnessSameText $_ $levelName) }
+> Where-Object { Test-HarnessSameText $_ $levelName }
+@@ pr-merge.ps1 | level without a level column: a cell of only the word not looked for
+< Where-Object { $_ -match "【$levelName】" -or (Test-HarnessSameText $_ $levelName) }
+> Where-Object { $_ -match "【$levelName】" }
+@@ pr-merge.ps1 | commit proof: a file name counts
+< (?![0-9A-Za-z/-]|\.[0-9A-Za-z])
+> (?![0-9A-Za-z/-])
+@@ pr-merge.ps1 | commit proof: the full stop that ends a sentence does not count
+< (?![0-9A-Za-z/-]|\.[0-9A-Za-z])
+> (?![0-9A-Za-z/.-])
+@@ pr-merge.ps1 | rows of one run: only the last comment counts
+< $rowsOfRun[$referenced] = @($(if ($rowsOfRun.ContainsKey($referenced)) { $rowsOfRun[$referenced] })) + @(Get-DispositionRows $i.Body)
+> $rowsOfRun[$referenced] = @(Get-DispositionRows $i.Body)
+
+# ===================================================== refusal words, one by one (未修复 has no entry: 未修 in the same pattern reads it, so removing it changes nothing)
+@@ pr-merge.ps1 | refusal word removed: 不改
+< [^采])(?:不改|不采纳
+> [^采])(?:不采纳
+@@ pr-merge.ps1 | refusal word removed: 不采纳
+< (?:不改|不采纳|挂账
+> (?:不改|挂账
+@@ pr-merge.ps1 | refusal word removed: 挂账
+< |不采纳|挂账|暂不
+> |不采纳|暂不
+@@ pr-merge.ps1 | refusal word removed: 暂不
+< |挂账|暂不|维持)
+> |挂账|维持)
+@@ pr-merge.ps1 | refusal word removed: 维持
+< |暂不|维持)|未采纳
+> |暂不)|未采纳
+@@ pr-merge.ps1 | refusal word removed: 未采纳
+< |维持)|未采纳|不修复
+> |维持)|不修复
+@@ pr-merge.ps1 | refusal word removed: 不修复
+< |未采纳|不修复|未修复
+> |未采纳|未修复
+@@ pr-merge.ps1 | refusal word removed: 未改
+< |未修复|未改|未修|
+> |未修复|未修|
+@@ pr-merge.ps1 | refusal word removed: 未修
+< |未改|未修|搁置
+> |未改|搁置
+@@ pr-merge.ps1 | refusal word removed: 搁置
+< |未修|搁置|驳回
+> |未修|驳回
+@@ pr-merge.ps1 | refusal word removed: 驳回
+< |搁置|驳回|不处理
+> |搁置|不处理
+@@ pr-merge.ps1 | refusal word removed: 不处理
+< |驳回|不处理|延后
+> |驳回|延后
+@@ pr-merge.ps1 | refusal word removed: 延后
+< |不处理|延后|暂缓
+> |不处理|暂缓
+@@ pr-merge.ps1 | refusal word removed: 暂缓
+< |延后|暂缓|忽略
+> |延后|忽略
+@@ pr-merge.ps1 | refusal word removed: 忽略
+< |暂缓|忽略'
+> |暂缓'
+
+# ===================================================== -After: what would stop git worktree remove, and a run again
+@@ pr-merge.ps1 | -After: a lock is not looked at
+< if ($listed.Success -and (Get-RealDirectory $listed.Groups[1].Value) -ieq $final -and $block -cmatch '(?m)^locked(?: .*)?\r?$') { return 'it is locked (git worktree unlock clears that)' }
+> $null = 0
+@@ pr-merge.ps1 | -After: the lock of another worktree counts
+< if ($listed.Success -and (Get-RealDirectory $listed.Groups[1].Value) -ieq $final -and $block -cmatch '(?m)^locked(?: .*)?\r?$'
+> if ($listed.Success -and $block -cmatch '(?m)^locked(?: .*)?\r?$'
+@@ pr-merge.ps1 | -After: a lock with a reason is not seen
+< $block -cmatch '(?m)^locked(?: .*)?\r?$'
+> $block -cmatch '(?m)^locked\r?$'
+@@ pr-merge.ps1 | -After: a lock without a reason is not seen
+< $block -cmatch '(?m)^locked(?: .*)?\r?$'
+> $block -cmatch '(?m)^locked .*\r?$'
+@@ pr-merge.ps1 | -After: the word locked anywhere is a lock
+< $block -cmatch '(?m)^locked(?: .*)?\r?$'
+> $block -cmatch 'locked'
+@@ pr-merge.ps1 | -After: the current location is not looked at
+< foreach ($current in @((Get-Location -PSProvider FileSystem).ProviderPath, [Environment]::CurrentDirectory)) {
+> foreach ($current in @([Environment]::CurrentDirectory)) {
+@@ pr-merge.ps1 | -After: the directory of the process is not looked at
+< foreach ($current in @((Get-Location -PSProvider FileSystem).ProviderPath, [Environment]::CurrentDirectory)) {
+> foreach ($current in @((Get-Location -PSProvider FileSystem).ProviderPath)) {
+@@ pr-merge.ps1 | -After: only the worktree itself is inside
+< if ($here -ieq $final -or $here.StartsWith($final + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+> if ($here -ieq $final) {
+@@ pr-merge.ps1 | -After: the worktree itself is not inside
+< if ($here -ieq $final -or $here.StartsWith($final + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+> if ($here.StartsWith($final + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+@@ pr-merge.ps1 | -After: a directory whose name starts the same is inside
+< $here.StartsWith($final + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+> $here.StartsWith($final, [StringComparison]::OrdinalIgnoreCase)
+@@ pr-merge.ps1 | -After: a blocked worktree goes on
+< if ($blocked) { throw "$WorktreePath cannot be removed
+> if ($false) { throw "$WorktreePath cannot be removed
+@@ pr-merge.ps1 | -After: what an earlier run left is not accepted
+< $leftover = $present -and (Test-WorktreeLeftover -Path $WorktreePath -MainRoot (Get-HarnessRepoRoot) -KnownTrees $registered)
+> $leftover = $false
+@@ pr-merge.ps1 | -After: a leftover may hold files
+< @(Get-ChildItem -LiteralPath $Path -Force -Recurse | Where-Object { -not $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 1).Count -eq 0
+> @(Get-ChildItem -LiteralPath $Path -Force -Recurse | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } | Select-Object -First 1).Count -eq 0
+@@ pr-merge.ps1 | -After: a leftover may hold links
+< @(Get-ChildItem -LiteralPath $Path -Force -Recurse | Where-Object { -not $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 1).Count -eq 0
+> @(Get-ChildItem -LiteralPath $Path -Force -Recurse | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1).Count -eq 0
+@@ pr-merge.ps1 | -After: a leftover may hold hidden files
+< @(Get-ChildItem -LiteralPath $Path -Force -Recurse | Where-Object { -not $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 1).Count -eq 0
+> @(Get-ChildItem -LiteralPath $Path -Recurse | Where-Object { -not $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 1).Count -eq 0
+@@ pr-merge.ps1 | -After: a registered worktree can be a leftover
+< if (@($KnownTrees | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-RealDirectory $_ }) -icontains (Get-RealDirectory $Path)) { return $false }
+> $null = 0
+@@ pr-merge.ps1 | -After: the path of a leftover is not checked
+< Assert-RemovablePath -Path $Path -MainRoot $MainRoot
+<     if (@($KnownTrees
+> if (@($KnownTrees
+@@ pr-merge.ps1 | -After: a leftover is not removed
+< if ($leftover) { Remove-WorktreeLeftover $WorktreePath }
+> $null = 0
+@@ pr-merge.ps1 | -After: a leftover is removed after the remote branch
+< if ($leftover) { Remove-WorktreeLeftover $WorktreePath }
+<     # delete the remote sub-branch (the pre-push hook lets feat/* deletions through), then remove the worktree and the local branch under the git lock
+<     if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
+> if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
+>     if ($leftover) { Remove-WorktreeLeftover $WorktreePath }
+@@ pr-merge.ps1 | -After: a leftover is removed from the top down
+< Sort-Object { $_.FullName.Length } -Descending
+> Sort-Object { $_.FullName.Length }
+@@ pr-merge.ps1 | -After: a leftover has to be a worktree
+< if ($present -and -not $leftover) {
+<         Assert-WorktreeDir
+> if ($present) {
+>         Assert-WorktreeDir
+@@ pr-merge.ps1 | -After: the status of a leftover is read
+< if ($present -and -not $leftover) {
+<         $statusLines
+> if ($present) {
+>         $statusLines
+@@ pr-merge.ps1 | -After: git removes a leftover
+< if ($present -and -not $leftover) { Invoke-HarnessGit @('worktree', 'remove', $WorktreePath) | Out-Null }
+> if ($present) { Invoke-HarnessGit @('worktree', 'remove', $WorktreePath) | Out-Null }
+@@ pr-merge.ps1 | -After: the last line calls every worktree removed
+< worktree $(if ($leftover) { 'was already unregistered, its empty directory removed' } else { & $what $present 'removed' })
+> worktree $(if ($leftover) { 'was already unregistered, its empty directory removed' } else { 'removed' })
+@@ pr-merge.ps1 | -After: the last line does not name a leftover
+< worktree $(if ($leftover) { 'was already unregistered, its empty directory removed' } else { & $what $present 'removed' })
+> worktree $(& $what $present 'removed')
+@@ pr-merge.ps1 | -After: the last line calls every remote branch deleted
+< remote sub-branch $(& $what $remoteTip 'deleted')
+> remote sub-branch deleted
+@@ pr-merge.ps1 | -After: the last line calls every local branch removed
+< local branch $(& $what $localTip 'removed')
+> local branch removed
+@@ pr-merge.ps1 | -After: the last line never says already gone
+< if ($there) { $doneWord } else { 'was already gone' }
+> $doneWord
+
+# ===================================================== invisible characters: removed before the rules read a text, and from what is sent
+@@ ../lib/privacy-needles.mjs | public text: nothing is removed
+% run=privacy
+< export const stripInvisible = (text) => text.replace(INVISIBLE, "");
+> export const stripInvisible = (text) => text;
+@@ ../lib/privacy-needles.mjs | public text: the gate hands back the text as it came
+% run=privacy
+< return stripInvisible(text);
+> return text;
+@@ ../lib/privacy-needles.mjs | public text: default-ignorable characters left in
+% run=privacy
+< /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu
+> /[\p{Cf}\u2028\u2029]/gu
+@@ ../lib/privacy-needles.mjs | public text: the line separator left in
+% run=privacy
+< /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu
+> /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2029]/gu
+@@ ../lib/privacy-needles.mjs | public text: the paragraph separator left in
+% run=privacy
+< /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu
+> /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2028]/gu
+@@ ../lib/privacy-needles.mjs | public text: invisible characters refused again
+% run=privacy
+< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)/
+> /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|\p{Cf}/u
+@@ ../lib/privacy-needles.mjs | public text: the escape character accepted
+% run=privacy
+< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)/
+> /[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f-\x9f]|\r(?!\n)/
+@@ ../lib/privacy-needles.mjs | public text: DEL accepted
+% run=privacy
+< /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)/
+> /[\x00-\x08\x0b\x0c\x0e-\x1f\x80-\x9f]|\r(?!\n)/
+@@ ../check-commits.mjs | commit message: the rules read the text as it came
+% run=check-commits
+< return { text: plainText(message, "the commit message").replace(/\r\n/g, "\n") };
+> return { text: String(message).replace(/\r\n/g, "\n") };
+@@ ../check-commits.mjs | commit message: a refused message has no problem
+% run=check-commits
+< const read = readMessage(message);
+<     if (read.refused) return { errors: [read.refused], warns: [] };
+> const read = readMessage(message);
+>     if (read.refused) return { errors: [], warns: [] };
+@@ ../check-commits.mjs | commit message of the dependency bot: the rules read the text as it came
+% run=check-commits
+< const read = readMessage(c.message);
+> const read = { text: c.message };
+@@ ../check-commits.mjs | commit message of the dependency bot: a refused message has no problem
+% run=check-commits
+< const read = readMessage(c.message);
+<         if (read.refused) return { errors: [read.refused], warns: [] };
+> const read = readMessage(c.message);
+>         if (read.refused) return { errors: [], warns: [] };
+@@ lib/maint.mjs | message command hands back the text as it came
+% run=maint,pr-merge
+< personal: personalNeedles(rest) }), text });
+> personal: personalNeedles(rest) }), text: fs.readFileSync(file, "utf8") });
+@@ lib/maint.mjs | text command reads around an invisible character
+% run=maint,shared
+< aiTrailerLines(stripInvisible(fs.readFileSync(file, "utf8")))
+> aiTrailerLines(fs.readFileSync(file, "utf8"))
+@@ pr-merge.ps1 | squash message: the text as it came is sent
+< $sentParts = $checked.text -split "`n`n", 2
+> $sentParts = $full -split "`n`n", 2
+@@ pr-merge.ps1 | squash message: the title as it came is sent
+< @{ Title = $sentParts[0]; Body = $sentBody }
+> @{ Title = $title; Body = $sentBody }
+@@ pr-merge.ps1 | squash message: a summary of invisible characters is sent
+< if (Test-HarnessSameText $sentBody (Get-HarnessSignoff)) { throw 'The summary paragraph is empty' }
+> $null = 0
+
+# ===================================================== the summary file, the commit range scan
+@@ pr-merge.ps1 | summary file: read without the rules of a body file
+< -Summary (Read-HarnessBodyFile -Path $SummaryFile -Parameter '-SummaryFile')
+> -Summary ([IO.File]::ReadAllText($SummaryFile, [Text.UTF8Encoding]::new($false)))
+@@ pr-merge.ps1 | summary file: named as a body file
+< -Summary (Read-HarnessBodyFile -Path $SummaryFile -Parameter '-SummaryFile')
+> -Summary (Read-HarnessBodyFile -Path $SummaryFile)
+@@ ../check-secrets.mjs | gitleaks does not read binary files as text
+% run=check-secrets
+< const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--text", "--diff-merges=first-parent"];
+> const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--diff-merges=first-parent"];
