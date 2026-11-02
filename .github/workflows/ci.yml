@@ -3,8 +3,9 @@
 # CI (required check: harness-gate). No compiling and no REAPER here: only the repository's own checks.
 #   compliance    script unit tests (every --self-test plus the privacy mutation check), SPDX headers, workflow
 #                 hardening with the pinned actionlint, gitleaks and the privacy scan over the worktree; on pull
-#                 requests gitleaks and the privacy scan over BASE..HEAD; on pushes the same over the pushed
-#                 commits plus the commit check at the push tier
+#                 requests gitleaks (through scripts/check-secrets.mjs: its exit code alone proves no scan) and the
+#                 privacy scan over BASE..HEAD; on pushes the same over the pushed commits plus the commit check at
+#                 the push tier
 #   harness-gate  needs every other job and runs with if: always(): any failure, cancellation or skip turns it red.
 #                 This is the check the rulesets require (.github/required-checks.json), so a job added here only
 #                 counts once it is in its needs (check-workflows.mjs fails when one is left out).
@@ -93,8 +94,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          "$HARNESS_GITLEAKS" git . --no-banner --redact --log-opts="$BASE_SHA..$HEAD_SHA --no-ext-diff --no-textconv"
+        run: node scripts/check-secrets.mjs --commits "$BASE_SHA..$HEAD_SHA"
       - name: Pull request commits (privacy)
         if: github.event_name == 'pull_request'
         env:
@@ -108,8 +108,7 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
-        run: |
-          "$HARNESS_GITLEAKS" git . --no-banner --redact --log-opts="$BEFORE..$AFTER --no-ext-diff --no-textconv"
+        run: node scripts/check-secrets.mjs --commits "$BEFORE..$AFTER"
       - name: Pushed commits (privacy and commit check, push tier)
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         env:

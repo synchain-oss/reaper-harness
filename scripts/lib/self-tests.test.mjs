@@ -15,6 +15,7 @@ import { selfTestCases as infraCases } from "./infra-paths.mjs";
 import { selfTestCases as safeRmCases } from "./safe-rm.mjs";
 import { selfTest as privacy } from "../check-privacy.mjs";
 import { selfTest as commits } from "../check-commits.mjs";
+import { selfTest as secrets } from "../check-secrets.mjs";
 import { selfTest as spdx } from "../check-spdx.mjs";
 import { selfTest as workflows } from "../check-workflows.mjs";
 import { selfTest as reviewBot } from "../review-bot.mjs";
@@ -24,6 +25,7 @@ import { selfTest as prePush } from "../hooks/pre-push.mjs";
 const SUITES = {
     "check-privacy": privacy,
     "check-commits": commits,
+    "check-secrets": secrets,
     "check-spdx": spdx,
     "check-workflows": workflows,
     "review-bot": reviewBot,

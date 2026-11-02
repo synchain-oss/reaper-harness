@@ -1,0 +1,26 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": false, "endCursor": "Y3Vyc29yOjE=" },
+          "nodes": [
+            {
+              "id": "PRRT_kwDOexample01",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "docs/example.md",
+              "line": 3,
+              "comments": {
+                "nodes": [
+                  { "databaseId": 8000000001, "author": { "login": "github-actions" }, "body": "【建议】步骤里缺少前置条件。", "createdAt": "2026-11-01T10:02:00Z", "updatedAt": "2026-11-01T10:02:00Z", "url": "https://github.com/synchain-oss/reaper-harness/pull/7#discussion_r8000000001" },
+                  { "databaseId": 8000000002, "author": { "login": "DLsnows" }, "body": "已补上前置条件。", "createdAt": "2026-11-01T10:25:00Z", "updatedAt": "2026-11-01T10:25:00Z", "url": "https://github.com/synchain-oss/reaper-harness/pull/7#discussion_r8000000002" }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
