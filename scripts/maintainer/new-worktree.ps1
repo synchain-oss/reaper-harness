@@ -56,16 +56,28 @@ function New-WorkWorktree {
     "Created worktree: $wt ($branch, based on origin/feature/v1)"
 }
 
+<# The command line: the arguments first, then the identity, and only then anything that changes the repository. #>
+function Invoke-Entry {
+    [CmdletBinding()]
+    param([string]$Card, [string]$Slug)
+    if (-not $Card -or -not $Slug) { throw 'Both -Card <name> and -Slug <slug> are required' }
+    Initialize-HarnessIdentity
+    Write-Output (New-WorkWorktree -Card $Card -Slug $Slug)
+}
+
 function Invoke-SelfTest {
     $cases = New-HarnessCases
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "harness-wt-selftest-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     $oldRoot = $env:HARNESS_ROOT
+    $savedToken = $env:GH_TOKEN
     $unit = 'unit-a'
     $log = [System.Collections.Generic.List[string]]::new()
     $locked = [System.Collections.Generic.List[string]]::new()
-    $state = @{ LocalBranch = 1; Current = 'feat/example-unit'; Name = 'DLsnows'; Email = 'noreply@synchain.ca'; Sticky = $false }
+    $state = @{ LocalBranch = 1; Current = 'feat/example-unit'; Name = 'DLsnows'; Email = 'noreply@synchain.ca'; Sticky = $false; Login = 'DLsnows' }
     $routes = [ordered]@{
+        '^gh auth token --user DLsnows$' = { 'tok-selftest' }
+        '^gh api user --jq \.login$' = { $state.Login }
         ' fetch '                   = { '' }
         'rev-parse --verify'        = { @{ Code = $state.LocalBranch; Out = ''; Err = '' } }
         'worktree add'              = { param($argv) New-Item -ItemType Directory -Force -Path $argv[-2] | Out-Null; '' }
@@ -82,20 +94,23 @@ function Invoke-SelfTest {
         Set-HarnessFake (New-HarnessFake -Routes $routes -Log $log)
         Set-HarnessLockImpl { param($name, $block) $locked.Add('lock'); & $block }
         $state.Name = ''; $state.Email = ''
-        $made = New-WorkWorktree -Card $unit -Slug 'example-unit'
+        # a refusal comes back as text: a run that was meant to pass then turns its own case red, by name
+        $make = { try { New-WorkWorktree -Card $unit -Slug 'example-unit' } catch { "threw: $($_.Exception.Message)" } }
+        $made = & $make
         $add = @($log | Where-Object { $_ -match 'worktree add' })
         $wt = Join-Path (Join-Path $tmp 'wt') $unit
         Add-HarnessCase $cases 'worktree add --no-track -b feat/<slug> <root>/wt/<card> origin/feature/v1 after a fetch under the git lock' $false (-not (
                 $locked.Count -eq 1 -and $add.Count -eq 1 -and $add[0].EndsWith("worktree add --no-track -b feat/example-unit $wt origin/feature/v1") -and
                 @($log | Where-Object { $_ -match ' fetch ' }).Count -eq 1))
         Add-HarnessCase $cases 'the repository-local identity is set and read back' $false (-not ($state.Name -ceq 'DLsnows' -and $state.Email -ceq 'noreply@synchain.ca' -and $made -match 'Created worktree'))
+        Add-HarnessCase $cases 'the identity is never set globally' $false (@($log | Where-Object { $_ -match 'config --global' }).Count -gt 0)
         $n = $log.Count
-        $again = New-WorkWorktree -Card $unit -Slug 'example-unit'
+        $again = & $make
         Add-HarnessCase $cases 'a worktree that already sits on the branch is not rebuilt' $false (-not ($again -match 'already exists' -and -not @($log | Select-Object -Skip $n | Where-Object { $_ -match 'worktree add' }).Count))
         Add-HarnessCase $cases 'the identity already correct is not rewritten' $false (@($log | Select-Object -Skip $n | Where-Object { $_ -match 'config --local' }).Count -gt 0)
         $state.Name = 'someone'
         $n = $log.Count
-        New-WorkWorktree -Card $unit -Slug 'example-unit' | Out-Null
+        & $make | Out-Null
         Add-HarnessCase $cases 'a wrong identity is corrected' $false (-not ($state.Name -ceq 'DLsnows' -and @($log | Select-Object -Skip $n | Where-Object { $_ -match 'config --local user\.name' }).Count -eq 1))
         $state.Name = 'someone'; $state.Sticky = $true
         Add-HarnessCase $cases 'an identity that does not stick (overridden elsewhere) is an error' $true (Test-Throws { New-WorkWorktree -Card $unit -Slug 'example-unit' })
@@ -113,16 +128,32 @@ function Invoke-SelfTest {
             Add-HarnessCase $cases "a card name that is not one path component: '$escape'" $true ((Get-ThrownMessage { New-WorkWorktree -Card $escape -Slug 'example' }) -match 'Not a usable card name')
         }
         Add-HarnessCase $cases 'a card name of 32 characters is accepted' $false ((Get-ThrownMessage { New-WorkWorktree -Card ('x' * 32) -Slug 'example' }) -match 'Not a usable card name')
+        # the command line: arguments first, then the identity, then the repository
+        $state.LocalBranch = 1; $state.Current = 'feat/entry-unit'; $log.Clear()
+        $entered = @(Invoke-Entry -Card 'unit-e' -Slug 'entry-unit')
+        $ghCalls = @($log | Where-Object { $_ -match '^gh ' })
+        Add-HarnessCase $cases 'entry: the first gh calls are the identity check, before the worktree is added' $false (-not (
+                $ghCalls.Count -ge 2 -and $ghCalls[0] -ceq 'gh auth token --user DLsnows' -and $ghCalls[1] -ceq 'gh api user --jq .login' -and $log.IndexOf($ghCalls[1]) -lt (@(0..($log.Count - 1) | Where-Object { $log[$_] -match 'worktree add' }) + @(-1))[0] -and $entered[0] -match 'Created worktree'))
+        $state.Login = 'someone-else'; $log.Clear()
+        Add-HarnessCase $cases 'entry: another account: refused, no fetch and no worktree' $true ((Get-ThrownMessage { Invoke-Entry -Card 'unit-f' -Slug 'entry-other' }) -match 'resolves to someone-else' -and @($log | Where-Object { $_ -match ' fetch |worktree add' }).Count -eq 0)
+        $state.Login = 'DLsnows'; $log.Clear()
+        Add-HarnessCase $cases 'entry: no -Card: refused before anything is asked' $true ((Get-ThrownMessage { Invoke-Entry -Slug 'example' }) -match 'Both -Card' -and $log.Count -eq 0)
+        Add-HarnessCase $cases 'entry: no -Slug: refused before anything is asked' $true ((Get-ThrownMessage { Invoke-Entry -Card 'unit-g' }) -match 'Both -Card' -and $log.Count -eq 0)
         $env:HARNESS_ROOT = ''
         Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{ ' config --get harness\.root$' ={ @{ Code = 1; Out = ''; Err = '' } } }) -Log $log)
         Add-HarnessCase $cases 'no workspace root configured' $true (Test-Throws { New-WorkWorktree -Card 'unit-d' -Slug 'example' })
         $selfText = Get-Content -Raw -LiteralPath $PSCommandPath
         Add-HarnessCase $cases 'source hygiene: new-worktree.ps1' $false (@(Get-HarnessSourceProblems -Text $selfText -Name 'new-worktree.ps1').Count -gt 0)
+    } catch {
+        # a crash does not hide what already turned red by name
+        Write-HarnessFailedCases $cases
+        throw
     } finally {
         Set-HarnessFake $null
         Set-HarnessLockImpl $null
         Set-HarnessNeedles
         $env:HARNESS_ROOT = $oldRoot
+        $env:GH_TOKEN = $savedToken
         $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
         $full = [IO.Path]::GetFullPath($tmp).TrimEnd('\', '/')
         if ((Split-Path -Parent $full) -ieq $tempRoot -and (Split-Path -Leaf $full) -like 'harness-wt-selftest-*') { Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue }
@@ -132,6 +163,4 @@ function Invoke-SelfTest {
 }
 
 if ($SelfTest) { exit [int]@(Invoke-SelfTest)[-1] }
-if (-not $Card -or -not $Slug) { throw 'Both -Card <name> and -Slug <slug> are required' }
-Initialize-HarnessIdentity
-Write-Output (New-WorkWorktree -Card $Card -Slug $Slug)
+Invoke-Entry @PSBoundParameters

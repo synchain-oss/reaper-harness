@@ -1,11 +1,11 @@
 #!/usr/bin/env pwsh
 # SPDX-License-Identifier: MIT
 #
-# Push the current sub-branch: only HEAD:refs/heads/feat/<slug>. There is no force option; long-lived branches and a
-# detached HEAD are refused; an already pushed branch may only fast-forward. Before anything is sent:
-#   - the gh credential resolves to the maintainer (GH_TOKEN of this process) and origin's push URL names that
-#     maintainer and this repository (git's credential helper picks the credential by the user name in the URL);
-#   - the working tree is clean (the commits are what is pushed);
+# Push the current sub-branch: exactly the checked commit to refs/heads/feat/<slug>. There is no force option; long-lived
+# branches and a detached HEAD are refused; an already pushed branch may only fast-forward. Before anything is sent:
+#   - the gh credential resolves to the maintainer (GH_TOKEN of this process) and every push URL and fetch URL of origin
+#     names that maintainer and this repository (git's credential helper picks the credential by the user name in the URL);
+#   - the branch name passes the public-text gate; the working tree is clean (the commits are what is pushed);
 #   - every new commit (not on origin/feature/v1, not on the remote branch) has the maintainer as author and committer
 #     and passes the message rules of scripts/check-commits.mjs (subject, sign-off, no AI attribution, privacy);
 #   - scripts/check-privacy.mjs --commits finds nothing in those commits;
@@ -26,12 +26,20 @@ $RecordSep = [string][char]0x1e
 $Maintainer = 'DLsnows'
 $MaintainerEmail = 'noreply@synchain.ca'
 
-<# git remote get-url --push has already expanded pushurl and pushInsteadOf: it is the address git push really uses. #>
+<#
+  git remote get-url has already expanded pushurl and insteadOf: these are the addresses git really uses. A remote can hold several
+  push URLs and git pushes to all of them, so --all, every one must be right; the fetch URL too, since new commits are measured against it.
+#>
 function Assert-PushUrl {
     param([Parameter(Mandatory)][string]$Worktree)
-    $url = (Invoke-HarnessGit @('remote', 'get-url', '--push', 'origin') -Repo $Worktree).Out.Trim()
     $want = "^https://$([regex]::Escape((Get-HarnessMaintainer)))@github\.com/$([regex]::Escape((Get-HarnessRepo)))(?:\.git)?$"
-    if ($url -notmatch $want) { throw "origin's push URL must be https://$(Get-HarnessMaintainer)@github.com/$(Get-HarnessRepo) (.git optional); nothing is pushed" }
+    $sets = [ordered]@{ push = @('remote', 'get-url', '--push', '--all', 'origin'); fetch = @('remote', 'get-url', '--all', 'origin') }
+    foreach ($direction in $sets.get_Keys()) {
+        $urls = @(((Invoke-HarnessGit $sets[$direction] -Repo $Worktree).Out -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if (-not $urls.Count -or @($urls | Where-Object { $_ -notmatch $want }).Count) {
+            throw "every $direction URL of origin must be https://$(Get-HarnessMaintainer)@github.com/$(Get-HarnessRepo) (.git optional); nothing is pushed"
+        }
+    }
 }
 
 <# New commits: reachable from the head, not from origin/feature/v1 and not from the remote branch. #>
@@ -65,7 +73,8 @@ function Invoke-Push {
     Assert-PushUrl $Worktree
     $branch = (Invoke-HarnessGit @('symbolic-ref', '--quiet', '--short', 'HEAD') -Repo $Worktree -AllowFail).Out.Trim()
     if ($branch -cnotmatch '^feat/[a-z0-9][a-z0-9-]*$') { throw "Only feat/<slug> sub-branches are pushed; the current branch is '$branch'" }
-    $dirty = (Invoke-HarnessGit @('status', '--porcelain') -Repo $Worktree).Out.Trim()
+    Assert-PublicText $branch 'branch name'
+    $dirty =(Invoke-HarnessGit @('status', '--porcelain') -Repo $Worktree).Out.Trim()
     if ($dirty) { throw 'The working tree is not clean: commit or clean up before pushing' }
     $headSha = (Invoke-HarnessGit @('rev-parse', 'HEAD') -Repo $Worktree).Out.Trim()
     Invoke-HarnessGitLocked {
@@ -95,11 +104,25 @@ function Invoke-Push {
     }
     $leaks = Get-HarnessSetting -Env 'HARNESS_GITLEAKS' -GitKey 'harness.gitleaks'
     if (-not $leaks) { throw 'gitleaks is not configured: set HARNESS_GITLEAKS or git config harness.gitleaks' }
-    $logOpts = (@($range) + @('--no-ext-diff', '--no-textconv')) -join ' '
-    $scan = Invoke-HarnessExternal $leaks @('git', $Worktree, '--no-banner', '--redact', "--log-opts=$logOpts") -AllowFail
-    if ($scan.Code -ne 0) { throw "gitleaks reported findings in the new commits, nothing is pushed" }
-    Invoke-HarnessGit @('push', 'origin', "HEAD:refs/heads/$branch") -Repo $Worktree | Out-Null
+    # gitleaks reads git log -p: without first-parent diffs a merge commit shows no patch, content only the merge adds would not be scanned
+    $logOpts = (@($range) + @('--no-ext-diff', '--no-textconv', '--diff-merges=first-parent')) -join ' '
+    $scan = Invoke-HarnessExternal $leaks @('git', $Worktree, '--no-banner', '--no-color', '--redact', '-v', "--log-opts=$logOpts") -AllowFail
+    if ($scan.Code -ne 0) { throw (Format-GitleaksFailure $scan) }
+    # exactly the commit that was checked: HEAD could have moved in the meantime
+    Invoke-HarnessGit @('push', 'origin', "${headSha}:refs/heads/$branch") -Repo $Worktree | Out-Null
     "Pushed $branch at $($headSha.Substring(0, 7))"
+}
+
+<#
+  A finding is exit code 1 with gitleaks' own "leaks found" line; anything else means the tool did not finish its work (a broken
+  option, a repository it cannot read). Both say what gitleaks said: run with --redact, its output holds no secret.
+#>
+function Format-GitleaksFailure {
+    param([Parameter(Mandatory)]$GitleaksRun)
+    $said = (($GitleaksRun.Out + "`n" + $GitleaksRun.Err) -replace '\x1b\[[0-9;]*m', '').Trim()
+    if ($said.Length -gt 4096) { $said = "$($said.Substring(0, 4096))... (output cut at 4096 characters)" }
+    if ($GitleaksRun.Code -eq 1 -and $said -match '(?<!no )leaks found') { return "gitleaks reported findings in the new commits, nothing is pushed: $said" }
+    "gitleaks did not finish normally (exit code $($GitleaksRun.Code)), nothing is pushed: $said"
 }
 
 function Invoke-SelfTest {
@@ -111,13 +134,16 @@ function Invoke-SelfTest {
     $makeCommit = { param($author = "$me|$mail", $committer = "$me|$mail", $parents = 'b' * 40, $message = $goodMsg)
         $a = $author -split '\|'; $c = $committer -split '\|'
         "$RecordSep$('c' * 40)$FieldSep$($a[0])$FieldSep$($a[1])$FieldSep$($c[0])$FieldSep$($c[1])$FieldSep$parents$FieldSep$message" }
-    $state = @{ Branch = 'feat/example'; Dirty = ''; Remote = ''; Ancestor = 0; Leaks = 0; Privacy = 0; Token = 0; Login = 'DLsnows'; Url = $goodUrl; Log = (& $makeCommit) }
+    $state = @{ Branch = 'feat/example'; Dirty = ''; Remote = ''; Ancestor = 0; Leaks = 0; LeakOut = ''; LeakErr = ''; Privacy = 0; Token = 0; Login = 'DLsnows'; Url = $goodUrl; FetchUrl = $goodUrl; Log = (& $makeCommit) }
+    # git remote get-url without --all answers with the first URL only: the fake answers the way git does
+    $urlAnswer = { param($argv, $value) if ($argv -contains '--all') { $value } else { @($value -split "`n")[0] } }
     $log = [System.Collections.Generic.List[string]]::new()
     $headSha = 'a' * 40
     $routes = [ordered]@{
         '^gh auth token --user DLsnows$' = { @{ Code = $state.Token; Out = $(if ($state.Token) { '' } else { 'tok-selftest' }); Err = '' } }
         '^gh api user --jq \.login$'     = { $state.Login }
-        'remote get-url --push origin$'  = { $state.Url }
+        'remote get-url --push'          = { param($argv) & $urlAnswer $argv $state.Url }
+        'remote get-url'                 = { param($argv) & $urlAnswer $argv $state.FetchUrl }
         'symbolic-ref'                   = { @{ Code = $(if ($state.Branch) { 0 } else { 1 }); Out = $state.Branch; Err = '' } }
         'status --porcelain'             = { $state.Dirty }
         'rev-parse HEAD'                 = { $headSha }
@@ -126,8 +152,8 @@ function Invoke-SelfTest {
         'merge-base'                     = { @{ Code = $state.Ancestor; Out = ''; Err = '' } }
         ' log --format='                 = { $state.Log }
         'check-privacy\.mjs --commits'   = { @{ Code = $state.Privacy; Out = $(if ($state.Privacy) { '[stand-in] finding' } else { '' }); Err = '' } }
-        '^gitleaks-fake git'             = { @{ Code = $state.Leaks; Out = ''; Err = '' } }
-        ' push origin '                  = { '' }
+        '^gitleaks-fake git'             = { @{ Code = $state.Leaks; Out = $state.LeakOut; Err = $state.LeakErr } }
+        ' push '                         = { '' }
     }
     $savedLeaks = $env:HARNESS_GITLEAKS
     $savedToken = $env:GH_TOKEN
@@ -141,17 +167,24 @@ function Invoke-SelfTest {
         Set-HarnessFake (New-HarnessFake -Routes $routes -Log $log)
         $lockNames = [System.Collections.Generic.List[string]]::new()
         Set-HarnessLockImpl { param($name, $sb) $lockNames.Add($name); & $sb }
-        $run = { $log.Clear(); Invoke-Push -Worktree 'wt' }
+        # a refusal comes back as text: a run that was meant to pass then turns its own case red, by name
+        $run = { $log.Clear(); try { Invoke-Push -Worktree 'wt' } catch { "threw: $($_.Exception.Message)" } }
         $r = & $run
         $push = @($log | Where-Object { $_ -match ' push ' })
-        Add-HarnessCase $cases 'new branch: pushes HEAD:refs/heads/feat/<slug> after gitleaks scans only the new commits' $false (-not (
-                $r -match '^Pushed' -and $push.Count -eq 1 -and $push[0] -match 'push origin HEAD:refs/heads/feat/example$' -and
+        Add-HarnessCase $cases 'new branch: pushes the checked commit to refs/heads/feat/<slug> after gitleaks scans only the new commits' $false (-not (
+                $r -match '^Pushed' -and $push.Count -eq 1 -and $push[0] -match "push origin ${headSha}:refs/heads/feat/example$" -and
                 @($log | Where-Object { $_ -match "gitleaks-fake git wt .*--log-opts=$headSha --not origin/feature/v1 --no-ext-diff" }).Count -eq 1))
+        Add-HarnessCase $cases 'gitleaks reads merge commits: first-parent diffs in the log options' $false (@($log | Where-Object { $_ -match 'gitleaks-fake git wt .*--log-opts=.* --diff-merges=first-parent' }).Count -ne 1)
+        Add-HarnessCase $cases 'gitleaks runs with redacted output' $false (@($log | Where-Object { $_ -match 'gitleaks-fake git wt .*--redact .*-v ' }).Count -ne 1)
+        $ciLogOpts = @((Get-Content -LiteralPath (Join-Path (Get-HarnessRepoRoot) '.github/workflows/ci.yml')) | Where-Object { $_ -match '--log-opts=' })
+        Add-HarnessCase $cases 'gitleaks reads merge commits in CI too: both scans of ci.yml have first-parent diffs' $false (-not ($ciLogOpts.Count -eq 2 -and @($ciLogOpts | Where-Object { $_ -notmatch '--diff-merges=first-parent' }).Count -eq 0))
         $first = { param($pattern) for ($k = 0; $k -lt $log.Count; $k++) { if ($log[$k] -match $pattern) { return $k } }; -1 }
         Add-HarnessCase $cases 'identity, push URL, commit check, privacy and gitleaks all come before the push' $false (-not (
                 $env:GH_TOKEN -eq 'tok-selftest' -and (& $first '^gh api user') -ge 0 -and (& $first 'remote get-url --push') -gt (& $first '^gh api user') -and
-                (& $first ' log --format=') -gt (& $first 'remote get-url --push') -and (& $first 'check-privacy') -gt (& $first ' log --format=') -and
-                (& $first '^gitleaks-fake') -gt (& $first 'check-privacy') -and (& $first ' push origin ') -gt (& $first '^gitleaks-fake')))
+                (& $first 'remote get-url --all') -gt (& $first '^gh api user') -and
+                (& $first ' log --format=') -gt (& $first 'remote get-url --push') -and (& $first ' log --format=') -gt (& $first 'remote get-url --all') -and
+                (& $first 'check-privacy.mjs --commits') -gt (& $first ' log --format=') -and
+                (& $first '^gitleaks-fake') -gt (& $first 'check-privacy.mjs --commits') -and (& $first ' push origin ') -gt (& $first '^gitleaks-fake')))
         Add-HarnessCase $cases 'origin/feature/v1 is fetched, under the git lock, before the new-commit range is taken' $false (-not (
                 (& $first 'fetch --no-tags origin \+refs/heads/feature/v1:refs/remotes/origin/feature/v1$') -ge 0 -and
                 (& $first 'fetch --no-tags') -lt (& $first ' log --format=') -and $lockNames -contains 'git'))
@@ -162,13 +195,18 @@ function Invoke-SelfTest {
                 @{ Label = 'no gh credential for the maintainer on this machine'; Key = 'Token'; Value = 1 },
                 @{ Label = 'push URL without the maintainer user name'; Key = 'Url'; Value = 'https://github.com/synchain-oss/reaper-harness.git' },
                 @{ Label = 'push URL with another account'; Key = 'Url'; Value = 'https://someone@github.com/synchain-oss/reaper-harness.git' },
-                @{ Label = 'push URL pointing at another repository'; Key = 'Url'; Value = 'https://DLsnows@github.com/someone/reaper-harness.git' })) {
+                @{ Label = 'push URL pointing at another repository'; Key = 'Url'; Value = 'https://DLsnows@github.com/someone/reaper-harness.git' },
+                @{ Label = 'a second push URL pointing at another repository'; Key = 'Url'; Value = "$goodUrl`nhttps://DLsnows@github.com/someone/reaper-harness.git" },
+                @{ Label = 'no push URL at all'; Key = 'Url'; Value = '' },
+                @{ Label = 'fetch URL pointing at another repository'; Key = 'FetchUrl'; Value = 'https://DLsnows@github.com/someone/reaper-harness.git' },
+                @{ Label = 'a second fetch URL pointing at another repository'; Key = 'FetchUrl'; Value = "$goodUrl`nhttps://DLsnows@github.com/someone/reaper-harness.git" },
+                @{ Label = 'no fetch URL at all'; Key = 'FetchUrl'; Value = '' })) {
             $saved = $state[$id.Key]; $state[$id.Key] = $id.Value; $log.Clear()
             Add-HarnessCase $cases "wrong identity, no push: $($id.Label)" $true ((Test-Throws { Invoke-Push -Worktree 'wt' }) -and -not @($log | Where-Object { $_ -match ' push |gitleaks|check-privacy' }).Count)
             $state[$id.Key] = $saved
         }
         & $run | Out-Null
-        Add-HarnessCase $cases 'push command has no force and no --no-verify' $false (@($log | Where-Object { $_ -match ' push .*(--force|-f\b|--no-verify|\+HEAD|--mirror)' }).Count -gt 0)
+        Add-HarnessCase $cases 'push command has no force and no --no-verify' $false (@($log | Where-Object { $_ -match ' push .*(--force|-f\b|--no-verify|\+HEAD|\+[0-9a-f]|--mirror)' }).Count -gt 0)
 
         $state.Remote = "$('b' * 40)`trefs/heads/feat/example"
         & $run | Out-Null
@@ -181,9 +219,23 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'remote already at HEAD: nothing to push, no push command' $false (-not ($msg -match 'up to date' -and -not @($log | Where-Object { $_ -match ' push ' }).Count))
         $state.Remote = ''
 
-        $state.Leaks = 1; $log.Clear()
-        Add-HarnessCase $cases 'gitleaks finding: no push' $true ((Test-Throws { Invoke-Push -Worktree 'wt' }) -and -not @($log | Where-Object { $_ -match ' push ' }).Count)
-        $state.Leaks = 0
+        $state.Leaks = 1; $state.LeakOut = 'Finding:     REDACTED'; $state.LeakErr = "2:07AM WRN leaks found: 1"; $log.Clear()
+        $leakFound = Get-ThrownMessage { Invoke-Push -Worktree 'wt' }
+        Add-HarnessCase $cases 'gitleaks finding: no push, and the message says findings and carries its output' $true ($leakFound -match '^gitleaks reported findings' -and $leakFound -match 'REDACTED' -and $leakFound -match 'leaks found: 1' -and -not @($log | Where-Object { $_ -match ' push ' }).Count)
+        foreach ($toolCase in @(
+                @{ Label = 'a broken option'; Code = 126; Err = 'Error: unknown flag: --nope' },
+                @{ Label = 'exit code 1 without a finding'; Code = 1; Err = 'FTL CreateFile wt: The system cannot find the file specified.' },
+                @{ Label = 'exit code 1 that says no leaks'; Code = 1; Err = 'INF no leaks found' },
+                @{ Label = 'another exit code with the words of a finding'; Code = 2; Err = 'WRN leaks found: 1' })) {
+            $state.Leaks = $toolCase.Code; $state.LeakOut = ''; $state.LeakErr = $toolCase.Err; $log.Clear()
+            $toolFailed = Get-ThrownMessage { Invoke-Push -Worktree 'wt' }
+            Add-HarnessCase $cases "gitleaks failed ($($toolCase.Label)): no push, not reported as findings" $true ($toolFailed -match "^gitleaks did not finish normally \(exit code $($toolCase.Code)\)" -and $toolFailed.Contains($toolCase.Err) -and -not @($log | Where-Object { $_ -match ' push ' }).Count)
+        }
+        $state.Leaks = 1; $state.LeakOut = ''; $state.LeakErr = "$([char]27)[33mWRN$([char]27)[0m leaks found: 1"
+        Add-HarnessCase $cases 'gitleaks output: colour codes are removed from the message' $true ((Get-ThrownMessage { Invoke-Push -Worktree 'wt' }) -notmatch [char]27)
+        $state.LeakOut = 'x' * 9000; $state.LeakErr = 'leaks found: 1'
+        Add-HarnessCase $cases 'gitleaks output: a long output is cut' $true ((Get-ThrownMessage { Invoke-Push -Worktree 'wt' }) -match 'output cut at 4096 characters')
+        $state.Leaks = 0; $state.LeakOut = ''; $state.LeakErr = ''
         $env:HARNESS_GITLEAKS = $null
         $withoutLeaks = [ordered]@{ ' config --get harness\.gitleaks' = { @{ Code = 1; Out = ''; Err = '' } } }
         foreach ($k in $routes.Keys) { $withoutLeaks[$k] = $routes[$k] }
@@ -223,6 +275,9 @@ function Invoke-SelfTest {
             $state.Branch = $b
             Add-HarnessCase $cases "branch $b is refused" $true (Test-Throws { Invoke-Push -Worktree 'wt' })
         }
+        $state.Branch = 'feat/r' + 'h-03-x'; $log.Clear()
+        $cardBranch = Get-ThrownMessage { Invoke-Push -Worktree 'wt' }
+        Add-HarnessCase $cases 'a branch name that fails the public-text gate: no push' $true ($cardBranch -match '^branch name failed the public-text check' -and -not @($log | Where-Object { $_ -match ' push ' }).Count)
         $state.Branch = ''
         Add-HarnessCase $cases 'detached HEAD' $true (Test-Throws { Invoke-Push -Worktree 'wt' })
         $state.Branch = 'feat/example'; $state.Dirty = ' M x.txt'
@@ -230,6 +285,10 @@ function Invoke-SelfTest {
         $state.Dirty = ''
         $selfText = Get-Content -Raw -LiteralPath $PSCommandPath
         Add-HarnessCase $cases 'source hygiene: push.ps1' $false (@(Get-HarnessSourceProblems -Text $selfText -Name 'push.ps1').Count -gt 0)
+    } catch {
+        # a crash does not hide what already turned red by name
+        Write-HarnessFailedCases $cases
+        throw
     } finally {
         Set-HarnessFake $null
         Set-HarnessLockImpl $null
@@ -241,6 +300,7 @@ function Invoke-SelfTest {
     Complete-HarnessSelfTest $cases 'push'
 }
 
-if ($SelfTest) { exit (Invoke-SelfTest) }
+# only the last value is the exit code: a stray object from the self-test would turn exit into an array and report 0
+if ($SelfTest) { exit [int]@(Invoke-SelfTest)[-1] }
 $target = if ($Repo) { $Repo } else { (Get-Location).Path }
 Write-Output (Invoke-Push -Worktree $target)

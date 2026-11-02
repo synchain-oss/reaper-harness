@@ -94,18 +94,28 @@ function Invoke-HarnessExternal {
             if ($Cwd) { Push-Location -LiteralPath $Cwd; $pushed = $true }
             $out = & $Exe @Arguments 2> $errFile
             $code = $LASTEXITCODE
+            $r = @{ Code = $code; Out = (@($out) -join "`n"); Err = [IO.File]::ReadAllText($errFile) }
         } finally {
             if ($pushed) { Pop-Location }
+            Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
         }
-        $r = @{ Code = $code; Out = (@($out) -join "`n"); Err = [IO.File]::ReadAllText($errFile) }
-        Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
         if ($memo) { $script:RealAnswers[$MemoKey] = $r }
     }
-    if ($r.Code -ne 0 -and -not $AllowFail) {
-        $first = (($r.Err -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
-        throw "$Exe $(@($Arguments | Select-Object -First 2) -join ' ') failed (exit code $($r.Code)): $first"
-    }
+    if ($r.Code -ne 0 -and -not $AllowFail) { throw (Format-HarnessExternalError $Exe $Arguments $r.Code $r.Err) }
     return $r
+}
+
+<#
+  What a failed command says: the command with its subcommand ("-C <path>" only says where git runs, the subcommand says what
+  failed), the exit code and the whole stderr, cut at about 4 KB (git and gitleaks explain themselves after the first line).
+#>
+function Format-HarnessExternalError {
+    param([string]$Exe, [string[]]$Arguments, [int]$ExitCode, [AllowEmptyString()][string]$ErrText)
+    $shown = @($Arguments)
+    if ($shown.Count -ge 2 -and $shown[0] -ceq '-C') { $shown = @($shown | Select-Object -Skip 2) }
+    $stderrText = ([string]$ErrText).Trim()
+    if ($stderrText.Length -gt 4096) { $stderrText = "$($stderrText.Substring(0, 4096))... (stderr cut at 4096 characters)" }
+    "$Exe $(@($shown | Select-Object -First 2) -join ' ') failed (exit code $ExitCode): $stderrText"
 }
 
 function Invoke-HarnessGh {
@@ -225,6 +235,28 @@ function ConvertTo-HarnessJsonText {
     ConvertTo-Json -InputObject $Value -Depth 100 -Compress
 }
 
+<# The author emails a commit of the same repository may carry: the one list of scripts/check-commits.mjs, asked through lib/maint.mjs. #>
+function Get-HarnessSameAuthors {
+    @((Invoke-HarnessMaint -Command 'same-authors' -Content '').authors)
+}
+
+<#
+  The body file of a comment or a PR: strict UTF-8, invalid bytes are an error instead of replacement characters that would then
+  be posted; a relative path means the current PowerShell location, not the process directory .NET would use. A byte order mark
+  is not part of the text, a body of only blanks is refused.
+#>
+function Read-HarnessBodyFile {
+    param([string]$Path)
+    if (-not $Path) { throw '-BodyFile (UTF-8 text) is required' }
+    $full = [IO.Path]::GetFullPath($Path, (Get-Location -PSProvider FileSystem).ProviderPath)
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "-BodyFile (UTF-8 text) does not exist: $Path" }
+    try { $bodyText = [Text.UTF8Encoding]::new($false, $true).GetString([IO.File]::ReadAllBytes($full)) }
+    catch [System.Text.DecoderFallbackException] { throw "-BodyFile is not valid UTF-8: $Path" }
+    $bodyText = $bodyText.TrimStart([char]0xFEFF)
+    if (-not $bodyText.Trim()) { throw 'The body is empty' }
+    $bodyText
+}
+
 # ---- identity -------------------------------------------------------------------------------
 
 <# GH_TOKEN of the maintainer account inside this process, verified to resolve to the maintainer; the global gh account is not switched. #>
@@ -309,7 +341,7 @@ $script:MarkerPattern = '^<!-- harness-agent v1 role=(impl|review|orchestrator) 
 <# <!-- harness-agent v1 role=<impl|review|orchestrator> kind=<...> round=<n> head=<sha7> [key=value ...] --> #>
 function New-AgentMarker {
     param(
-        [Parameter(Mandatory)][ValidateSet('impl', 'review', 'orchestrator')][string]$Role,
+        [Parameter(Mandatory)][ValidateSet('impl', 'review', 'orchestrator', IgnoreCase = $false)][string]$Role,
         [Parameter(Mandatory)][ValidatePattern('^[a-z][a-z-]*$', Options = 'None')][string]$Kind,
         [Parameter(Mandatory)][ValidateRange(0, 99)][int]$Round,
         [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{7,40}$', Options = 'None')][string]$Head,
@@ -476,17 +508,20 @@ function Get-HarnessReviewEdits {
 
 <#
   Issue comments, review comments, reviews and GraphQL review threads, all of them. Each review gets updated_at: the later
-  of its submission and its GraphQL edit time (a review whose body changed after our reply needs a new reply).
+  of its submission and its GraphQL edit time (a review whose body changed after our reply needs a new reply). A pending review
+  (state PENDING, no submitted_at) is a draft only its author sees: nobody can answer it yet, so it is left out with a note on stderr.
 #>
 function Get-HarnessPrActivity {
     param([Parameter(Mandatory)][int]$Pr)
     $r = $script:RepoSlug
-    $reviews = @(Get-HarnessApi "repos/$r/pulls/$Pr/reviews?per_page=100" -Paginate)
+    $allReviews = @(Get-HarnessApi "repos/$r/pulls/$Pr/reviews?per_page=100" -Paginate)
+    $reviews = @($allReviews | Where-Object { [string](Get-HarnessProp $_ 'state') -cne 'PENDING' -and (Get-HarnessProp $_ 'submitted_at') })
+    if ($reviews.Count -ne $allReviews.Count) { [Console]::Error.WriteLine("Note: $($allReviews.Count - $reviews.Count) pending review(s) on #$Pr are left out: not submitted yet") }
     $edits = Get-HarnessReviewEdits $Pr
     foreach ($rv in $reviews) {
         $id = [string]$rv.id
         if (-not $edits.ContainsKey($id)) { throw "GraphQL has no edit time for review $id, cannot tell whether it was edited" }
-        $updated = @([string]$rv.submitted_at, $edits[$id]) | Where-Object { $_ } | Sort-Object { ConvertTo-HarnessUtc $_ } | Select-Object -Last 1
+        $updated = @([string](Get-HarnessProp $rv 'submitted_at'), $edits[$id]) | Where-Object { $_ } | Sort-Object { ConvertTo-HarnessUtc $_ } | Select-Object -Last 1
         $rv | Add-Member -NotePropertyName updated_at -NotePropertyValue $updated -Force
     }
     [pscustomobject]@{
@@ -514,6 +549,12 @@ function Get-HarnessReviewState {
     Invoke-HarnessMaint -Command 'review-state' -Content $json -Extra @('--writers', ($writers -join ','), '--bot', $Bot)
 }
 
+<# The two notices of pr-agent (a persistent review was updated, a review could not be generated), within the first 5 lines: they say nothing to answer. #>
+function Test-HarnessPrAgentNotice {
+    param([AllowEmptyString()][AllowNull()][string]$Body)
+    @((($Body ?? '') -split "`r?`n") | Select-Object -First 5 | Where-Object { $_ -match '\[Persistent review\]' -or $_ -match '^\s*Failed to generate\b' }).Count -gt 0
+}
+
 <#
   pr-agent review output: author github-actions[bot] and, within the first 5 lines, a pr-agent:review / pr-agent:improve
   marker (HTML comment or link reference) or one of its two headings. A marker that only shows up further down (a quote of
@@ -521,8 +562,8 @@ function Get-HarnessReviewState {
 #>
 function Test-HarnessPrAgentComment {
     param([AllowEmptyString()][AllowNull()][string]$Body)
+    if (Test-HarnessPrAgentNotice $Body) { return $false }
     $lines = @((($Body ?? '') -split "`r?`n") | Select-Object -First 5)
-    if (@($lines | Where-Object { $_ -match '\[Persistent review\]' -or $_ -match '^\s*Failed to generate\b' }).Count) { return $false }
     if (@($lines | Where-Object {
                 $_ -match '^\s*<!--\s*pr-agent:(?:review|improve)\b' -or
                 $_ -match '^\s*\[pr-agent:(?:review|improve)[^\]]*\]:\s*\S+' -or
@@ -546,9 +587,10 @@ function Get-HarnessRunLog {
   The four sources as one table. Kind: agent (write access and an agent marker on the first line), bot-summary, bot,
   pr-agent (github-actions[bot] review output), user (write access, no marker: the maintainer's own opinion) and external
   (neither bot nor write access; a deleted account with an empty login too).
-  Review comments carry their thread, whether it is resolved and their review. Only COMMENTED and CHANGES_REQUESTED reviews
-  are collected (empty bodies too: inline comments hang under an empty COMMENTED review); an empty review that only holds
-  our replies counts as ours. IsNew: updated_at later than Since. InReplyTo: ids named by the marker's in-reply-to.
+  Review comments carry their thread, whether it is resolved and their review. COMMENTED and CHANGES_REQUESTED reviews are
+  always collected (empty bodies too: inline comments hang under an empty COMMENTED review); any other review (APPROVED,
+  DISMISSED) only with a body, which is an opinion like any other. An empty review that only holds our replies counts as ours.
+  IsNew: updated_at later than Since. InReplyTo: ids named by the marker's in-reply-to.
 #>
 function Get-HarnessCommentItems {
     param([Parameter(Mandatory)]$Activity, $State, [string]$Since)
@@ -592,7 +634,7 @@ function Get-HarnessCommentItems {
     $reviews = @($Activity.Reviews)
     foreach ($c in $reviews) {
         $reviewState = [string](Get-HarnessProp $c 'state')
-        if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $reviewState) { continue }
+        if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $reviewState -and -not ([string](Get-HarnessProp $c 'body')).Trim()) { continue }
         $rid = [string]$c.id
         $inline = @($table | Where-Object { $_.Source -eq 'review-comment' -and $_.ReviewId -eq $rid })
         $author = [string](Get-HarnessProp (Get-HarnessProp $c 'user') 'login')
@@ -609,7 +651,7 @@ function Get-HarnessCommentItems {
 <#
   Has a comment been answered. "Later" is always measured against the original comment's updated_at: edited after our
   reply means unanswered.
-  - agent items and bot notices (receipts and the like): nothing needed;
+  - agent items: nothing needed;
   - bot review summary: a disposition after it references its run id;
   - pr-agent review output: like the maintainer's opinions, a later agent comment must name it in in-reply-to;
   - review comment: if the thread holds a reply of ours it must be later than the last edit; the maintainer's own inline
@@ -618,6 +660,8 @@ function Get-HarnessCommentItems {
   - everything else (issue comment, review body, CHANGES_REQUESTED): one of our comments names it in in-reply-to
     (numbers that merely occur in the text do not count). An empty review that only holds inline comments is judged by
     those; CHANGES_REQUESTED can also be lifted by a later APPROVED of the same author.
+  A bot's words are opinions too (a manual deepseek-review comment is one): the only bot comments that need no answer are the
+  two pr-agent notices and an empty review of a bot without inline comments.
 #>
 function Test-HarnessResponded {
     param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items, $State)
@@ -638,26 +682,38 @@ function Test-HarnessResponded {
         if ($replies.Count -or $Item.Kind -ne 'bot') { return $explicit -or $later }
         return $explicit -or [bool]$Item.Resolved
     }
-    if ($Item.Kind -eq 'bot') { return $true }
     if ($Item.Source -eq 'review') {
         if ($Item.State -eq 'CHANGES_REQUESTED') { return $explicit -or [bool]$Item.ApprovedLater }
-        if (-not $Item.Body.Trim() -and @($Item.Comments).Count) {
-            foreach ($cid in @($Item.Comments)) {
-                $c = $Items | Where-Object { $_.Source -eq 'review-comment' -and $_.Id -eq $cid } | Select-Object -First 1
-                if ($c -and -not (Test-HarnessResponded -Item $c -Items $Items -State $State)) { return $false }
+        if (-not $Item.Body.Trim()) {
+            if (@($Item.Comments).Count) {
+                foreach ($cid in @($Item.Comments)) {
+                    $c = $Items | Where-Object { $_.Source -eq 'review-comment' -and $_.Id -eq $cid } | Select-Object -First 1
+                    if ($c -and -not (Test-HarnessResponded -Item $c -Items $Items -State $State)) { return $false }
+                }
+                return $true
             }
-            return $true
+            if ($Item.Kind -eq 'bot') { return $true }
         }
     }
+    if ($Item.Kind -eq 'bot' -and $Item.Source -eq 'issue' -and $Item.Author -ceq 'github-actions[bot]' -and (Test-HarnessPrAgentNotice $Item.Body)) { return $true }
     return $explicit
 }
 
-<# Latest result of each check on a head: name -> { status; conclusion; details_url }. #>
+<#
+  Latest result of each check on a head: name -> { status; conclusion; details_url }. Only runs of the pull_request event on
+  this head count: a later manual dispatch of the same workflow on the same commit has a larger id and must not cover a failed
+  PR run. A check run of GitHub Actions names its run in details_url; a check run of another app takes part as it is.
+#>
 function Get-HarnessCheckRuns {
     param([Parameter(Mandatory)][string]$Sha)
+    $prRuns = [System.Collections.Generic.HashSet[string]]::new()
+    $runPages = Get-HarnessApi "repos/$($script:RepoSlug)/actions/runs?head_sha=$Sha&event=pull_request&per_page=100" -Paginate
+    foreach ($run in @($runPages | ForEach-Object { $_.workflow_runs } | ForEach-Object { $_ })) { [void]$prRuns.Add([string]$run.id) }
     $pages = Get-HarnessApi "repos/$($script:RepoSlug)/commits/$Sha/check-runs?per_page=100" -Paginate
     $latest = @{}
     foreach ($c in @($pages | ForEach-Object { $_.check_runs } | ForEach-Object { $_ })) {
+        $actionsRun = [regex]::Match([string](Get-HarnessProp $c 'details_url'), '/actions/runs/(\d+)')
+        if ($actionsRun.Success -and -not $prRuns.Contains($actionsRun.Groups[1].Value)) { continue }
         if (-not $latest.ContainsKey($c.name) -or [long]$c.id -gt [long]$latest[$c.name].id) { $latest[$c.name] = $c }
     }
     return $latest
@@ -789,12 +845,18 @@ function Add-HarnessCase {
     $Cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = $(if ($Bad) { $Flagged } else { -not $Flagged }) })
 }
 
+<# Name the cases that are red. A self-test that falls over calls this too: the crash must not hide what already turned red. #>
+function Write-HarnessFailedCases {
+    param([Parameter(Mandatory)][AllowEmptyCollection()]$Cases)
+    foreach ($f in @($Cases | Where-Object { -not $_.Passed })) { [Console]::Error.WriteLine("self-test failed: $($f.Label)") }
+}
+
 function Complete-HarnessSelfTest {
     param([Parameter(Mandatory)]$Cases, [Parameter(Mandatory)][string]$Name)
     $badCount = @($Cases | Where-Object Bad).Count
     $good = $Cases.Count - $badCount
     $failed = @($Cases | Where-Object { -not $_.Passed })
-    foreach ($f in $failed) { [Console]::Error.WriteLine("self-test failed: $($f.Label)") }
+    Write-HarnessFailedCases $Cases
     $ok = $failed.Count -eq 0 -and $badCount -gt 0 -and $good -gt 0
     [Console]::Out.WriteLine("$Name -SelfTest: $(if ($ok) { 'PASS' } else { 'FAIL' }) (bad $badCount, good $good)")
     if ($ok) { return 0 } else { return 1 }
@@ -822,6 +884,8 @@ function Get-HarnessSourceProblems {
     if ($Text -match '(?i)\b[a-z]:[\\/](?:users|home|dev|claude|work)') { $problems.Add("${Name}: a local drive path is hard-coded") }
     if ($Text -match '(?i)/(?:users|home)/[a-z0-9_.-]+/') { $problems.Add("${Name}: a home-directory path is hard-coded") }
     if ($Text -match '\b(?:R' + 'N|R' + 'H)-?\d{2}[a-z]?\b') { $problems.Add("${Name}: a task-card number form appears") }
+    # the self-test can leave stray output on the pipeline: exit would then get an array and report 0
+    if ($Text -match 'exit \(' + 'Invoke-SelfTest\)') { $problems.Add("${Name}: the exit code must be the last value of the self-test") }
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
     if (@($errors).Count) { $problems.Add("${Name}: does not parse: $($errors[0].Message)"); return $problems.ToArray() }
@@ -833,7 +897,8 @@ function Get-HarnessSourceProblems {
         if (-not $spellings.ContainsKey($n)) { $spellings[$n] = [System.Collections.Generic.HashSet[string]]::new() }
         [void]$spellings[$n].Add($n)
     }
-    foreach ($key in $spellings.Keys) {
+    # get_Keys(): a variable named $keys is an entry of this table, and .Keys would then answer with that entry
+    foreach ($key in $spellings.get_Keys()) {
         if ($spellings[$key].Count -gt 1) { $problems.Add("${Name}: variable spelled differently only by case: $(@($spellings[$key] | Sort-Object) -join ' / ')") }
     }
     return $problems.ToArray()

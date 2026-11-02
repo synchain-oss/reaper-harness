@@ -30,7 +30,7 @@ const { FAKE_NEEDLE, plainText, redact, scan } = needles;
 
 export const MAINTAINER = "DLsnows <noreply@synchain.ca>";
 export const SIGNOFF = `Signed-off-by: ${MAINTAINER}`;
-const SAME_AUTHORS = ["noreply@synchain.ca", "140901583+dlsnows@users.noreply.github.com"];
+export const SAME_AUTHORS = ["noreply@synchain.ca", "140901583+dlsnows@users.noreply.github.com"];
 const WEB_FLOW = "noreply@github.com";
 const COMMITTERS = ["noreply@synchain.ca", WEB_FLOW];
 const DEPENDABOT = "49699333+dependabot[bot]@users.noreply.github.com";

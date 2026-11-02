@@ -88,10 +88,29 @@ function Invoke-Update {
     "Updated #$Number $(if ($NewTitle) { 'title and ' })body (head $($sha.Substring(0, 7)))"
 }
 
+<# The command line: the arguments first, then the identity, and only then anything that reads or writes on GitHub. #>
+function Invoke-Entry {
+    [CmdletBinding()]
+    param(
+        [string]$Head, [string]$Title, [string]$BodyFile,
+        [switch]$Draft, [string]$Role = 'impl', [int]$Round = 0, [switch]$Update, [int]$Pr
+    )
+    if ($Update) {
+        if ($Pr -le 0 -or -not $BodyFile) { throw '-Update needs -Pr and -BodyFile (-Title is optional)' }
+        Initialize-HarnessIdentity
+        Write-Output (Invoke-Update -Number $Pr -NewTitle $Title -Body (Read-HarnessBodyFile $BodyFile) -AgentRole $Role -AgentRound $Round)
+        return
+    }
+    if (-not $Head -or -not $Title -or -not $BodyFile) { throw '-Head, -Title and -BodyFile are required' }
+    Initialize-HarnessIdentity
+    Write-Output (Invoke-Open -Branch $Head -Base $BaseBranch -PrTitle $Title -Body (Read-HarnessBodyFile $BodyFile) -IsDraft $Draft.IsPresent -AgentRole $Role -AgentRound $Round)
+}
+
 function Invoke-SelfTest {
     $cases = New-HarnessCases
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "harness-pr-open-selftest-$PID"
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $savedToken = $env:GH_TOKEN
     try {
         # the repository's own privacy tool and message rules run for real, with a needle file of the self-test
         New-HarnessSelfTestNeedles -Directory $tmp | Out-Null
@@ -190,6 +209,50 @@ function Invoke-SelfTest {
         $gone = $(try { Invoke-Update -Number 12 -NewTitle '' -Body $good -AgentRole impl -AgentRound 2 } catch { $_.Exception.Message })
         Add-HarnessCase $cases '-Update: deleted source repository (head.repo is null) says why and sends nothing' $true ($gone -match 'was deleted' -and $gone -notmatch 'cannot be found' -and $patched.Count -eq $n)
         $existing.head.repo = [pscustomobject]@{ full_name = (Get-HarnessRepo) }
+
+        # the command line: arguments first, then the identity, then GitHub
+        $entryState = @{ Login = 'DLsnows' }
+        $entryLog = [System.Collections.Generic.List[string]]::new()
+        $entryRoutes = [ordered]@{
+            '^gh auth token --user DLsnows$' = { 'tok-selftest' }
+            '^gh api user --jq \.login$'     = { $entryState.Login }
+        }
+        foreach ($routeKey in $routes.get_Keys()) { $entryRoutes[$routeKey] = $routes[$routeKey] }
+        Set-HarnessFake (New-HarnessFake -Routes $entryRoutes -Log $entryLog)
+        $bodyPath = Join-Path $tmp 'body.md'
+        [IO.File]::WriteAllText($bodyPath, $good, [Text.UTF8Encoding]::new($false))
+        $firstCalls = { @($entryLog | Where-Object { $_ -match '^gh ' } | Select-Object -First 2) -join ' | ' }
+        $identityFirst = '^gh auth token --user DLsnows \| gh api user --jq \.login$'
+        $n = $posted.Count
+        $opened = @(Invoke-Entry -Head 'feat/example' -Title $goodTitle -BodyFile $bodyPath)
+        Add-HarnessCase $cases 'entry: opening a PR: the first gh calls are the identity check, and the PR is sent' $false (-not ((& $firstCalls) -match $identityFirst -and $posted.Count -eq $n + 1 -and $opened[0] -match '#9'))
+        $entryLog.Clear(); $n = $patched.Count
+        $updated = @(Invoke-Entry -Update -Pr 12 -BodyFile $bodyPath)
+        Add-HarnessCase $cases 'entry: -Update: the first gh calls are the identity check, and the body is sent' $false (-not ((& $firstCalls) -match $identityFirst -and $patched.Count -eq $n + 1 -and $updated[0] -match '#12'))
+        $entryState.Login = 'someone-else'; $entryLog.Clear(); $n = $posted.Count
+        $wrongLogin = Get-ThrownMessage { Invoke-Entry -Head 'feat/example' -Title $goodTitle -BodyFile $bodyPath }
+        Add-HarnessCase $cases 'entry: another account: refused, GitHub is not asked anything else' $true ($wrongLogin -match 'resolves to someone-else' -and @($entryLog | Where-Object { $_ -match '^gh ' }).Count -eq 2 -and $posted.Count -eq $n)
+        $entryLog.Clear(); $n = $patched.Count
+        $wrongUpdate = Get-ThrownMessage { Invoke-Entry -Update -Pr 12 -BodyFile $bodyPath }
+        Add-HarnessCase $cases 'entry: -Update with another account: refused, GitHub is not asked anything else' $true ($wrongUpdate -match 'resolves to someone-else' -and @($entryLog | Where-Object { $_ -match '^gh ' }).Count -eq 2 -and $patched.Count -eq $n)
+        $entryState.Login = 'DLsnows'; $entryLog.Clear()
+        Add-HarnessCase $cases 'entry: no -Head: refused before anything is asked' $true ((Get-ThrownMessage { Invoke-Entry -Title $goodTitle -BodyFile $bodyPath }) -match '-Head, -Title and -BodyFile are required' -and $entryLog.Count -eq 0)
+        Add-HarnessCase $cases 'entry: no -Title: refused before anything is asked' $true ((Get-ThrownMessage { Invoke-Entry -Head 'feat/example' -BodyFile $bodyPath }) -match '-Head, -Title and -BodyFile are required' -and $entryLog.Count -eq 0)
+        Add-HarnessCase $cases 'entry: no -BodyFile: refused before anything is asked' $true ((Get-ThrownMessage { Invoke-Entry -Head 'feat/example' -Title $goodTitle }) -match '-Head, -Title and -BodyFile are required' -and $entryLog.Count -eq 0)
+        Add-HarnessCase $cases 'entry: -Update without -Pr: refused before anything is asked' $true ((Get-ThrownMessage { Invoke-Entry -Update -BodyFile $bodyPath }) -match '-Update needs -Pr and -BodyFile' -and $entryLog.Count -eq 0)
+        Add-HarnessCase $cases 'entry: -Update without -BodyFile: refused before anything is asked' $true ((Get-ThrownMessage { Invoke-Entry -Update -Pr 12 }) -match '-Update needs -Pr and -BodyFile' -and $entryLog.Count -eq 0)
+        # the body file goes through the shared reader: strict UTF-8, relative to the PowerShell location
+        $brokenPath = Join-Path $tmp 'broken.md'
+        [IO.File]::WriteAllBytes($brokenPath, [byte[]](0x23, 0x20, 0xC3, 0x28, 0x0A))
+        $n = $posted.Count
+        Add-HarnessCase $cases 'entry: a body file that is not valid UTF-8: refused, nothing sent' $true ((Get-ThrownMessage { Invoke-Entry -Head 'feat/example' -Title $goodTitle -BodyFile $brokenPath }) -match 'not valid UTF-8' -and $posted.Count -eq $n)
+        $n = $patched.Count
+        Add-HarnessCase $cases 'entry: -Update with a body file that is not valid UTF-8: refused, nothing sent' $true ((Get-ThrownMessage { Invoke-Entry -Update -Pr 12 -BodyFile $brokenPath }) -match 'not valid UTF-8' -and $patched.Count -eq $n)
+        Push-Location -LiteralPath $tmp
+        try { $relativeBody = & { try { @(Invoke-Entry -Head 'feat/example' -Title $goodTitle -BodyFile 'body.md') } catch { "threw: $($_.Exception.Message)" } } } finally { Pop-Location }
+        Add-HarnessCase $cases 'entry: a relative body file means the current PowerShell location' $false ($relativeBody -notmatch '#9')
+        Set-HarnessFake (New-HarnessFake -Routes $routes)
+
         # a checkout without the template (or with one that has no sections) cannot say what the body needs: refused, nothing sent
         $n = $posted.Count; $m = $patched.Count
         Remove-Item -LiteralPath $templateFile
@@ -207,23 +270,20 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'the template of this checkout has sections' $false (@(Get-TemplateHeadings).Count -eq 0)
         $selfText = Get-Content -Raw -LiteralPath $PSCommandPath
         Add-HarnessCase $cases 'source hygiene: pr-open.ps1' $false (@(Get-HarnessSourceProblems -Text $selfText -Name 'pr-open.ps1').Count -gt 0)
+    } catch {
+        # a crash does not hide what already turned red by name
+        Write-HarnessFailedCases $cases
+        throw
     } finally {
         Set-HarnessFake $null
         $script:TemplateOverride = $null
         Set-HarnessNeedles
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        $env:GH_TOKEN = $savedToken
     }
     Complete-HarnessSelfTest $cases 'pr-open'
 }
 
-if ($SelfTest) { exit (Invoke-SelfTest) }
-if ($Update) {
-    if ($Pr -le 0 -or -not $BodyFile) { throw '-Update needs -Pr and -BodyFile (-Title is optional)' }
-    Initialize-HarnessIdentity
-    Write-Output (Invoke-Update -Number $Pr -NewTitle $Title -Body ([IO.File]::ReadAllText($BodyFile, [Text.UTF8Encoding]::new($false))) -AgentRole $Role -AgentRound $Round)
-    exit 0
-}
-if (-not $Head -or -not $Title -or -not $BodyFile) { throw '-Head, -Title and -BodyFile are required' }
-Initialize-HarnessIdentity
-$bodyText = [IO.File]::ReadAllText($BodyFile, [Text.UTF8Encoding]::new($false))
-Write-Output (Invoke-Open -Branch $Head -Base $BaseBranch -PrTitle $Title -Body $bodyText -IsDraft $Draft.IsPresent -AgentRole $Role -AgentRound $Round)
+# only the last value is the exit code: a stray object from the self-test would turn exit into an array and report 0
+if ($SelfTest) { exit [int]@(Invoke-SelfTest)[-1] }
+Invoke-Entry @PSBoundParameters

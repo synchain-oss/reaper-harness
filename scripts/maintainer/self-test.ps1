@@ -34,6 +34,8 @@ function Test-HygieneRules {
     $good = "#!/usr/bin/env pwsh`n# SPDX-License-Identifier: MIT`nSet-StrictMode -Version Latest`n`$ErrorActionPreference = 'Stop'`n`$alpha = 1`n`$beta = `$alpha`n"
     Add-HarnessCase $cases 'hygiene: a clean sample passes' $false (@(Get-HarnessSourceProblems -Text $good -Name 'x').Count -gt 0)
     $badSamples = [ordered]@{
+        'a variable differing only by case next to a variable named keys' = "$good`$keys = 1`n`$Alpha = 2`n"
+        'an exit code taken from the whole output of the self-test' = "$good" + 'if ($x) { exit (' + 'Invoke-SelfTest) }' + "`n"
         'no SPDX header'            = $good -replace 'SPDX-License-Identifier: MIT', 'license: none'
         'no StrictMode'             = $good -replace 'Set-StrictMode -Version Latest', '# off'
         'no ErrorActionPreference'  = $good -replace '\$ErrorActionPreference = ''Stop''', '$ErrorActionPreference = ''Continue'''
@@ -64,19 +66,24 @@ function Test-ModuleRules {
     $modRoot = Get-HarnessRepoRoot
     $modSign = Get-HarnessSignoff
     $modHead = 'a' * 40
-    $mod = @{ Privacy = @{ Code = 0; Out = ''; Err = '' }; GraphQl = $null; CheckRuns = $null; Edit = { param($edits) } }
+    $mod = @{ Privacy = @{ Code = 0; Out = ''; Err = '' }; GraphQl = $null; Paged = $null; CheckRuns = $null; Runs = @{ total_count = 0; workflow_runs = @() }; ExtraReview = $null; Edit = { param($edits) } }
     $modRoutes = [ordered]@{
         '^gh api boom$'                   = { @{ Code = 2; Out = ''; Err = "boom`nsecond line" } }
+        '^gh api longboom$'               = { @{ Code = 2; Out = ''; Err = 'e' * 9000 } }
+        '^git -C \S+ status --boom$'      = { @{ Code = 128; Out = ''; Err = 'fatal: not a git repository' } }
         'collaborators/DLsnows/permission' = { 'admin' }
         'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
+        'actions/runs\?head_sha=' = { $mod.Runs }
         'commits/\S+/check-runs'           = { $mod.CheckRuns }
         'pulls/7/comments'                 = { Read-HarnessFixture 'review-comments.json' }
-        'pulls/7/reviews'                  = { Read-HarnessFixture 'reviews.json' }
+        'pulls/7/reviews'                  = { $list = Read-HarnessFixture 'reviews.json'; if ($mod.ExtraReview) { @($list) + @($mod.ExtraReview) } else { $list } }
         'issues/7/comments'                = { Read-HarnessFixture 'issue-comments.json' }
         'api -X POST graphql'              = {
             param($argv)
             if ($mod.GraphQl) { return $mod.GraphQl }
-            if ((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json).query -match 'reviews\(') { $modEdits = Read-HarnessFixture 'review-edits.json'; & $mod.Edit $modEdits; return $modEdits }
+            $asked = Get-Content -Raw ($argv[-1]) | ConvertFrom-Json
+            if ($mod.Paged) { return & $mod.Paged $asked }
+            if ($asked.query -match 'reviews\(') { $modEdits = Read-HarnessFixture 'review-edits.json'; & $mod.Edit $modEdits; return $modEdits }
             Read-HarnessFixture 'threads.json'
         }
     }
@@ -88,8 +95,28 @@ function Test-ModuleRules {
 
         # ---- external commands, API reads, GraphQL -------------------------------------------
         $modFailed = Get-ThrownMessage { Invoke-HarnessExternal gh @('api', 'boom') }
-        Add-HarnessCase $modCases 'external: a non-zero exit code is an error naming the command, the code and the first stderr line' $true ($modFailed -match '^gh api boom failed \(exit code 2\): boom$')
+        Add-HarnessCase $modCases 'external: a non-zero exit code is an error naming the command, the code and the whole stderr' $true ($modFailed -ceq "gh api boom failed (exit code 2): boom`nsecond line")
+        Add-HarnessCase $modCases 'external: a git command is named by its subcommand, not by -C and the path' $true ((Get-ThrownMessage { Invoke-HarnessGit @('status', '--boom') }) -ceq 'git status --boom failed (exit code 128): fatal: not a git repository')
+        $modLong = Get-ThrownMessage { Invoke-HarnessExternal gh @('api', 'longboom') }
+        Add-HarnessCase $modCases 'external: a long stderr is cut at about 4 KB and says so' $true ($modLong.Length -lt 4300 -and $modLong -match 'stderr cut at 4096 characters\)$')
         Add-HarnessCase $modCases 'external: -AllowFail hands the answer back instead' $false ((Invoke-HarnessExternal gh @('api', 'boom') -AllowFail).Code -ne 2)
+        # the stderr file: gone after a command that ran and after one that could not even start (the real commands, a private temp directory)
+        $modTempDir = Join-Path $modTmp 'stderr-files'
+        New-Item -ItemType Directory -Force -Path $modTempDir | Out-Null
+        $modTempSaved = @($env:TMP, $env:TEMP)
+        Set-HarnessFake $null
+        try {
+            $env:TMP = $modTempDir; $env:TEMP = $modTempDir
+            $modNoExe = Get-ThrownMessage { Invoke-HarnessExternal 'harness-no-such-command-5d2a' @('x') }
+            $modLeftAfterNoExe = @(Get-ChildItem -LiteralPath $modTempDir -Force).Count
+            Invoke-HarnessExternal git @('--version') | Out-Null
+            $modLeftAfterRun = @(Get-ChildItem -LiteralPath $modTempDir -Force).Count
+        } finally {
+            $env:TMP = $modTempSaved[0]; $env:TEMP = $modTempSaved[1]
+            Set-HarnessFake (New-HarnessFake -Routes $modRoutes -Log $modLog)
+        }
+        Add-HarnessCase $modCases 'external: a command that cannot start is an error and leaves no stderr file behind' $true ($modNoExe -and $modLeftAfterNoExe -eq 0)
+        Add-HarnessCase $modCases 'external: a command that ran leaves no stderr file behind' $false ($modLeftAfterRun -ne 0)
         Add-HarnessCase $modCases 'api read: a failing call is an error' $true ($null -ne (Get-ThrownMessage { Get-HarnessApi 'boom' }))
         Add-HarnessCase $modCases 'api read: -AllowFail turns a failing call into null' $false ($null -ne (Get-HarnessApi 'boom' -AllowFail))
         $mod.GraphQl = @{ errors = @(@{ message = 'bad query' }) }
@@ -97,6 +124,27 @@ function Test-ModuleRules {
         $mod.GraphQl = @{ data = @{ ok = $true }; errors = $null }
         Add-HarnessCase $modCases 'graphql: an answer without errors passes through' $false (-not (Invoke-HarnessGraphQL -Query 'query { x }').data.ok)
         $mod.GraphQl = $null
+        # GraphQL pages: the second page is asked for with the cursor of the first, its nodes count; every page is asked for this PR
+        $modAsked = [System.Collections.Generic.List[string]]::new()
+        $mod.Paged = {
+            param($asked)
+            $modAsked.Add("$($asked.variables.number)/$($asked.variables.after)")
+            $second = [string]$asked.variables.after -ceq 'cursor-1'
+            $isEdits = $asked.query -match 'reviews\('
+            $node = if ($isEdits) { @{ databaseId = $(if ($second) { 2 } else { 1 }); updatedAt = '2026-11-01T10:00:00Z'; lastEditedAt = $null } }
+            else { @{ id = $(if ($second) { 'T2' } else { 'T1' }); isResolved = $true; comments = @{ nodes = @() } } }
+            $page = @{ pageInfo = @{ hasNextPage = (-not $second); endCursor = $(if ($second) { 'cursor-2' } else { 'cursor-1' }) }; nodes = @($node) }
+            $key = if ($isEdits) { 'reviews' } else { 'reviewThreads' }
+            @{ data = @{ repository = @{ pullRequest = @{ $key = $page } } } }
+        }
+        $modThreadPages = @(Get-HarnessReviewThreads 7)
+        Add-HarnessCase $modCases 'graphql: the review threads of the second page are read' $false ((@($modThreadPages | ForEach-Object id) -join ',') -cne 'T1,T2')
+        Add-HarnessCase $modCases 'graphql: the second page of threads is asked with the cursor of the first, for this PR' $false (($modAsked -join ' ') -cne '7/ 7/cursor-1')
+        $modAsked.Clear()
+        $modEditPages = Get-HarnessReviewEdits 42
+        Add-HarnessCase $modCases 'graphql: the edit times of the second page are read' $false (-not ($modEditPages.ContainsKey('1') -and $modEditPages.ContainsKey('2')))
+        Add-HarnessCase $modCases 'graphql: the second page of edit times is asked with the cursor of the first, for this PR' $false (($modAsked -join ' ') -cne '42/ 42/cursor-1')
+        $mod.Paged = $null
         Add-HarnessCase $modCases 'PowerShell 7.4 and older are refused (-DateKind)' $true ((-not (Test-HarnessPwshVersion 7 4)) -and (-not (Test-HarnessPwshVersion 6 9)))
         Add-HarnessCase $modCases 'PowerShell 7.5 and newer are accepted' $false (-not ((Test-HarnessPwshVersion 7 5) -and (Test-HarnessPwshVersion 7 6) -and (Test-HarnessPwshVersion 8 0)))
 
@@ -117,8 +165,10 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'public text: a checkout without the tools is an error, never a pass' $true ($modMissingText -match 'is missing in this checkout')
         $modMaintBad = Get-ThrownMessage { Invoke-HarnessMaint -Command 'review-state' -Content 'not json' }
         Add-HarnessCase $modCases 'maint.mjs: an error answer is an error' $true ($modMaintBad -match '^maint\.mjs review-state: ')
-        $modMaintOk = Invoke-HarnessMaint -Command 'review-state' -Content '[]'
-        Add-HarnessCase $modCases 'maint.mjs: a real answer is parsed' $false ($modMaintOk.rounds -ne 0 -or $null -ne $modMaintOk.summary)
+        $modMaintOk = & $modTry { Invoke-HarnessMaint -Command 'review-state' -Content '[]' }
+        Add-HarnessCase $modCases 'maint.mjs: a real answer is parsed' $false ($modMaintOk -is [string] -or (Get-HarnessProp $modMaintOk 'rounds') -ne 0 -or $null -ne (Get-HarnessProp $modMaintOk 'summary'))
+        $modSameAuthors = & $modTry { Get-HarnessSameAuthors }
+        Add-HarnessCase $modCases 'maint.mjs: the author list of check-commits.mjs arrives, the maintainer address and the no-reply address GitHub uses' $false (-not (@($modSameAuthors) -ccontains 'noreply@synchain.ca' -and @($modSameAuthors) -ccontains '140901583+dlsnows@users.noreply.github.com'))
         $modAi = 'Co-Authored' + '-By: a <a@b.c>'
         $modSession = 'Cla' + 'ude-Session: https://example.invalid/s'
         # a finding or a crash of the privacy tool is simulated by a route in front of the real tool; every other case runs the real one
@@ -185,6 +235,7 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'marker: two valid fields' $false ((New-AgentMarker -Role review -Kind disposition -Round 2 -Head $modHead -Extra ([ordered]@{ 'bot-run' = '77'; 'in-reply-to' = '1,2' })) -ne '<!-- harness-agent v1 role=review kind=disposition round=2 head=aaaaaaa bot-run=77 in-reply-to=1,2 -->')
         Add-HarnessCase $modCases 'marker: a kind in upper case is refused' $true ((Get-ThrownMessage { New-AgentMarker -Role impl -Kind 'Note' -Round 1 -Head $modHead }) -match 'Kind')
         Add-HarnessCase $modCases 'marker: a head in upper case is refused' $true ((Get-ThrownMessage { New-AgentMarker -Role impl -Kind note -Round 1 -Head ('A' * 40) }) -match 'Head')
+        Add-HarnessCase $modCases 'marker: a role in upper case is refused' $true ((Get-ThrownMessage { New-AgentMarker -Role 'IMPL' -Kind note -Round 1 -Head $modHead }) -match 'Role')
         $modBefore = $modLog.Count
         foreach ($modLogin in @('a/b', '-x', 'x-', 'with space', 'a;b', '..')) {
             $modAnswer = & $modTry { Test-RepoWriter $modLogin }
@@ -202,6 +253,25 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'review edits: an edit time older than the submission leaves the submission' $false ((& $modUpdated $modEarlier '7000000002') -ne '2026-11-01T10:25:00Z')
         $modNoEdit = Get-ThrownMessage { & $modActivity { param($edits) $edits.data.repository.pullRequest.reviews.nodes = @($edits.data.repository.pullRequest.reviews.nodes[0]) } }
         Add-HarnessCase $modCases 'review edits: a review GraphQL has no edit time for is an error' $true ($modNoEdit -match 'GraphQL has no edit time for review 7000000002')
+
+        # a pending review is a draft: no submitted_at, no edit time in GraphQL; it stays out of the table and a note says so
+        $modPendingReview = { param($state, $submitted) $r = [pscustomobject]@{ id = 7000000099; node_id = 'PRR_x'; user = [pscustomobject]@{ login = 'DLsnows' }; body = 'draft'; state = $state; html_url = 'u'; commit_id = $modHead }; if ($submitted) { $r | Add-Member -NotePropertyName submitted_at -NotePropertyValue $submitted }; $r }
+        $modWithReview = {
+            param($extra)
+            $mod.ExtraReview = $extra
+            $modErrWriter = [IO.StringWriter]::new()
+            $modErrSaved = [Console]::Error
+            [Console]::SetError($modErrWriter)
+            try { $modSeen = & $modTry { Get-HarnessPrActivity 7 } } finally { [Console]::SetError($modErrSaved); $mod.ExtraReview = $null }
+            [pscustomobject]@{ Activity = $modSeen; Err = $modErrWriter.ToString() }
+        }
+        $modNoReview = { param($seen) ($seen.Activity -isnot [string]) -and @($seen.Activity.Reviews | Where-Object { [string]$_.id -eq '7000000099' }).Count -eq 0 }
+        $modPendingSeen = & $modWithReview (& $modPendingReview 'PENDING' $null)
+        Add-HarnessCase $modCases 'pending review: left out before the edit times are looked up' $true (& $modNoReview $modPendingSeen)
+        Add-HarnessCase $modCases 'pending review: a note on stderr says so' $true ($modPendingSeen.Err -match '1 pending review\(s\) on #7 are left out')
+        Add-HarnessCase $modCases 'pending review: left out by its state even when it has a time' $true (& $modNoReview (& $modWithReview (& $modPendingReview 'PENDING' '2026-11-01T10:00:00Z')))
+        Add-HarnessCase $modCases 'pending review: a review without a time is left out by that alone' $true (& $modNoReview (& $modWithReview (& $modPendingReview 'COMMENTED' $null)))
+        Add-HarnessCase $modCases 'pending review: no note without one' $false ((& $modWithReview $null).Err -ne '')
 
         $modBase = & $modActivity { param($edits) }
         $modState = Get-HarnessReviewState $modBase
@@ -224,6 +294,21 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'approval: an approval from before the change request lifts nothing' $true (-not (& $modApproved (& $modReview 2 'APPROVED' 'DLsnows' '2026-11-01T09:00:00Z')))
         Add-HarnessCase $modCases 'approval: an approval by another person lifts nothing' $true (-not (& $modApproved (& $modReview 2 'APPROVED' 'someone-else' '2026-11-01T11:00:00Z')))
         Add-HarnessCase $modCases 'approval: a comment review after the change request lifts nothing' $true (-not (& $modApproved (& $modReview 2 'COMMENTED' 'DLsnows' '2026-11-01T11:00:00Z')))
+        # an approval or a dismissed review with a body is an opinion like any other; without a body there is nothing to read
+        $modReviewTable = {
+            param($state, $login, $text)
+            $found = [pscustomobject]@{ Issue = @(); Review = @(); Threads = @(); Reviews = @([pscustomobject]@{ id = 40; state = $state; body = $text; user = [pscustomobject]@{ login = $login }; submitted_at = '2026-11-01T10:00:00Z'; updated_at = '2026-11-01T10:00:00Z'; html_url = 'u' }) }
+            @(Get-HarnessCommentItems -Activity $found -State $null)
+        }
+        foreach ($modBodyState in 'APPROVED', 'DISMISSED') {
+            $modMine = @(& $modReviewTable $modBodyState 'DLsnows' 'Looks fine, but see the naming.')
+            Add-HarnessCase $modCases "reviews: a $modBodyState review with a body is in the table, as the maintainer's opinion" $true ($modMine.Count -eq 1 -and $modMine[0].Kind -eq 'user')
+            Add-HarnessCase $modCases "reviews: a $modBodyState review with a body needs an answer" $true ($modMine.Count -eq 1 -and -not (Test-HarnessResponded -Item $modMine[0] -Items $modMine -State $null))
+            $modTheirs = @(& $modReviewTable $modBodyState 'someone-else' 'Please change this.')
+            Add-HarnessCase $modCases "reviews: a $modBodyState review with a body by an outsider is external" $true ($modTheirs.Count -eq 1 -and $modTheirs[0].Kind -eq 'external')
+            Add-HarnessCase $modCases "reviews: an empty $modBodyState review stays out of the table" $false (@(& $modReviewTable $modBodyState 'DLsnows' '').Count -ne 0)
+            Add-HarnessCase $modCases "reviews: a $modBodyState review of only blanks stays out of the table" $false (@(& $modReviewTable $modBodyState 'DLsnows' "  `n ").Count -ne 0)
+        }
 
         $modItem = {
             param($over)
@@ -248,6 +333,8 @@ function Test-ModuleRules {
         $modInlineReply = { param($created) & $modItem @{ Id = '11'; Source = 'review-comment'; Kind = 'agent'; ThreadId = 'T1'; Created = $created; Updated = $created } }
         Add-HarnessCase $modCases 'answered: an inline comment with a reply of ours in its thread after the comment' $false (-not (& $modAnswered $modInline @($modInline, (& $modInlineReply '2026-11-01T10:10:00Z'))))
         Add-HarnessCase $modCases 'answered: an inline comment whose only reply of ours is older than its last edit' $true (-not (& $modAnswered $modInline @($modInline, (& $modInlineReply '2026-11-01T09:00:00Z'))))
+        $modOtherThread = & $modItem @{ Id = '12'; Source = 'review-comment'; Kind = 'agent'; ThreadId = 'T2'; Created = '2026-11-01T10:10:00Z'; Updated = '2026-11-01T10:10:00Z' }
+        Add-HarnessCase $modCases 'answered: a later reply of ours in another thread answers nothing here' $true (-not (& $modAnswered $modInline @($modInline, $modOtherThread)))
         Add-HarnessCase $modCases 'answered: an inline comment of the maintainer that is only resolved' $true (-not (& $modAnswered (& $modItem @{ Id = '10'; Source = 'review-comment'; ThreadId = 'T1'; Resolved = $true }) @($modInline)))
         $modBotInline = { param($resolved) & $modItem @{ Id = '10'; Source = 'review-comment'; Kind = 'bot'; ThreadId = 'T1'; Resolved = $resolved } }
         Add-HarnessCase $modCases 'answered: an inline comment of a bot in a resolved thread' $false (-not (& $modAnswered (& $modBotInline $true) @((& $modBotInline $true))))
@@ -258,14 +345,75 @@ function Test-ModuleRules {
         $modChange = { param($lifted) & $modItem @{ Id = '30'; Source = 'review'; State = 'CHANGES_REQUESTED'; ApprovedLater = $lifted } }
         Add-HarnessCase $modCases 'answered: a change request that nobody lifted or answered' $true (-not (& $modAnswered (& $modChange $false) @((& $modChange $false))))
         Add-HarnessCase $modCases 'answered: a change request lifted by a later approval' $false (-not (& $modAnswered (& $modChange $true) @((& $modChange $true))))
+        # bot comments: the words of a bot need an answer too; only the two pr-agent notices and an empty review without inline comments do not
+        $modBot = { param($over) $base = @{ Id = '50'; Kind = 'bot'; Author = 'github-actions[bot]' }; foreach ($key in $over.Keys) { $base[$key] = $over[$key] }; & $modItem $base }
+        $modBotReply = & $modItem @{ Id = '51'; Kind = 'agent'; Created = '2026-11-01T10:10:00Z'; Updated = '2026-11-01T10:10:00Z'; InReplyTo = @('50') }
+        $modDeepseek = & $modBot @{ Body = "### DeepSeek PR review (``deepseek``, manual run)`n`n- Possible issue." }
+        Add-HarnessCase $modCases 'answered: a manual deepseek-review comment nobody named' $true (-not (& $modAnswered $modDeepseek @($modDeepseek)))
+        Add-HarnessCase $modCases 'answered: a manual deepseek-review comment named by a later agent comment' $false (-not (& $modAnswered $modDeepseek @($modDeepseek, $modBotReply)))
+        Add-HarnessCase $modCases 'answered: a plain comment of a bot nobody named' $true (-not (& $modAnswered (& $modBot @{ Body = 'Some text.' }) @((& $modBot @{ Body = 'Some text.' }))))
+        $modNoticeCases = [ordered]@{ '[Persistent review]' = '**[Persistent review]** updated to latest commit abc1234'; 'Failed to generate' = "Failed to generate PR review: timeout`n<!-- pr-agent:improve:summary -->" }
+        foreach ($modNoticeName in $modNoticeCases.get_Keys()) {
+            $modNotice = & $modBot @{ Body = $modNoticeCases[$modNoticeName] }
+            Add-HarnessCase $modCases "answered: the pr-agent notice $modNoticeName needs no answer" $false (-not (& $modAnswered $modNotice @($modNotice)))
+            $modOtherBot = & $modBot @{ Body = $modNoticeCases[$modNoticeName]; Author = 'someone[bot]' }
+            Add-HarnessCase $modCases "answered: the words $modNoticeName from another bot are no notice" $true (-not (& $modAnswered $modOtherBot @($modOtherBot)))
+            $modNoticeReview = & $modBot @{ Body = $modNoticeCases[$modNoticeName]; Source = 'review'; State = 'COMMENTED' }
+            Add-HarnessCase $modCases "answered: the words $modNoticeName in a review body are no notice" $true (-not (& $modAnswered $modNoticeReview @($modNoticeReview)))
+            $modNoticeLow = & $modBot @{ Body = "one`ntwo`nthree`nfour`nfive`n$($modNoticeCases[$modNoticeName])" }
+            Add-HarnessCase $modCases "answered: the words $modNoticeName below the first 5 lines are no notice" $true (-not (& $modAnswered $modNoticeLow @($modNoticeLow)))
+        }
+        $modBotEmpty = & $modBot @{ Source = 'review'; State = 'COMMENTED'; Body = '' }
+        Add-HarnessCase $modCases 'answered: an empty review of a bot without inline comments needs no answer' $false (-not (& $modAnswered $modBotEmpty @($modBotEmpty)))
+        $modBotBlank = & $modBot @{ Source = 'review'; State = 'COMMENTED'; Body = " `n " }
+        Add-HarnessCase $modCases 'answered: a review of a bot of only blanks needs no answer' $false (-not (& $modAnswered $modBotBlank @($modBotBlank)))
+        $modUserEmpty = & $modItem @{ Id = '52'; Source = 'review'; State = 'COMMENTED'; Body = '' }
+        Add-HarnessCase $modCases 'answered: an empty review of a person without inline comments still needs an answer' $true (-not (& $modAnswered $modUserEmpty @($modUserEmpty)))
+        $modBotText = & $modBot @{ Source = 'review'; State = 'COMMENTED'; Body = 'Please rename this.' }
+        Add-HarnessCase $modCases 'answered: a review of a bot with a body nobody named' $true (-not (& $modAnswered $modBotText @($modBotText)))
+        Add-HarnessCase $modCases 'answered: a review of a bot with a body named by a later agent comment' $false (-not (& $modAnswered $modBotText @($modBotText, $modBotReply)))
+        $modBotChange = & $modBot @{ Source = 'review'; State = 'CHANGES_REQUESTED'; Body = '' }
+        Add-HarnessCase $modCases 'answered: an empty change request of a bot is still a change request' $true (-not (& $modAnswered $modBotChange @($modBotChange)))
+        $modBotInline = { param($resolved) & $modItem @{ Id = '53'; Source = 'review-comment'; Kind = 'bot'; ThreadId = 'T3'; Resolved = $resolved } }
+        $modBotHolder = & $modBot @{ Source = 'review'; State = 'COMMENTED'; Body = ''; Comments = @('53') }
+        Add-HarnessCase $modCases 'answered: an empty review of a bot is judged by its inline comments: an open thread' $true (-not (& $modAnswered $modBotHolder @($modBotHolder, (& $modBotInline $false))))
+        Add-HarnessCase $modCases 'answered: an empty review of a bot is judged by its inline comments: a resolved thread' $false (-not (& $modAnswered $modBotHolder @($modBotHolder, (& $modBotInline $true))))
+
+        # ---- the framework ---------------------------------------------------------------------
+        $modErrWriter = [IO.StringWriter]::new()
+        $modErrSaved = [Console]::Error
+        [Console]::SetError($modErrWriter)
+        try { Write-HarnessFailedCases @([pscustomobject]@{ Label = 'red one'; Bad = $true; Passed = $false }, [pscustomobject]@{ Label = 'green one'; Bad = $false; Passed = $true }) } finally { [Console]::SetError($modErrSaved) }
+        Add-HarnessCase $modCases 'framework: the cases that are red are named, the green ones are not' $false ($modErrWriter.ToString() -notmatch 'self-test failed: red one' -or $modErrWriter.ToString() -match 'green one')
 
         # ---- check runs ----------------------------------------------------------------------
         $modRun = { param($id, $checkName, $conclusion) [pscustomobject]@{ id = $id; name = $checkName; status = 'completed'; conclusion = $conclusion; details_url = 'u' } }
         foreach ($modOrder in @(@(5, 9), @(9, 5))) {
             $mod.CheckRuns = [pscustomobject]@{ check_runs = @(($modOrder | ForEach-Object { & $modRun $_ 'harness-gate' $(if ($_ -eq 9) { 'success' } else { 'failure' }) }) + @(& $modRun 7 'branch-gate' 'success')) }
             $modLatest = Get-HarnessCheckRuns $modHead
-            Add-HarnessCase $modCases "check runs: of two runs of one check the newer counts (listed $($modOrder -join ' then '))" $false (-not ($modLatest['harness-gate'].conclusion -eq 'success' -and $modLatest['branch-gate'].id -eq 7))
+            Add-HarnessCase $modCases "check runs: of two runs of one check the newer counts (listed $($modOrder -join ' then '))" $false (-not ((Get-HarnessProp $modLatest['harness-gate'] 'conclusion') -eq 'success' -and (Get-HarnessProp $modLatest['branch-gate'] 'id') -eq 7))
         }
+        # a check run of GitHub Actions counts only when its run belongs to the pull_request event on this head: fixtures in the shape of the real responses
+        $modPrRuns = Read-HarnessFixture 'pr-runs.json'
+        $modActionsRun = { param($id, $conclusion, $runId) [pscustomobject]@{ id = $id; name = 'harness-gate'; status = 'completed'; conclusion = $conclusion; head_sha = $modHead; details_url = "https://github.com/$(Get-HarnessRepo)/actions/runs/$runId/job/$($id + 1000)" } }
+        $modGate = { param($runs) $mod.CheckRuns = [pscustomobject]@{ total_count = @($runs).Count; check_runs = @($runs) }; (Get-HarnessCheckRuns $modHead)['harness-gate'] }
+        $mod.Runs = $modPrRuns
+        $modDispatched = & $modGate @((& $modActionsRun 101 'failure' 5000000002), (& $modActionsRun 909 'success' 5000000777))
+        Add-HarnessCase $modCases 'check runs: a failed PR run and a successful dispatch with a larger id: the PR run counts' $true ($modDispatched.conclusion -eq 'failure')
+        $modDispatchOnly = & $modGate @(& $modActionsRun 909 'success' 5000000777)
+        Add-HarnessCase $modCases 'check runs: only a dispatch on this head: no result at all' $true ($null -eq $modDispatchOnly)
+        $modRerun = & $modGate @((& $modActionsRun 101 'failure' 5000000002), (& $modActionsRun 102 'success' 5000000003))
+        Add-HarnessCase $modCases 'check runs: two runs of the pull_request event: the newer counts' $false ($modRerun.conclusion -ne 'success')
+        $modOtherApp = [pscustomobject]@{ id = 909; name = 'harness-gate'; status = 'completed'; conclusion = 'success'; head_sha = $modHead; details_url = 'https://example.invalid/report/909' }
+        Add-HarnessCase $modCases 'check runs: a check of another app has no Actions run and takes part as it is' $false ((Get-HarnessProp (& $modGate @((& $modActionsRun 101 'failure' 5000000002), $modOtherApp)) 'conclusion') -ne 'success')
+        $modLog.Clear()
+        & $modGate @(& $modActionsRun 101 'success' 5000000002) | Out-Null
+        Add-HarnessCase $modCases 'check runs: the runs are asked for this head and the pull_request event, every page' $false (@($modLog | Where-Object { $_ -match "^gh api --paginate --slurp repos/\S+/actions/runs\?head_sha=$modHead&event=pull_request&per_page=100$" }).Count -ne 1)
+        $mod.Runs = @{ Code = 0; Out = '[{"workflow_runs":[{"id":1}]},{"workflow_runs":[{"id":5000000002}]}]'; Err = '' }
+        Add-HarnessCase $modCases 'check runs: a run listed on the second page counts' $false ($null -eq (& $modGate @(& $modActionsRun 101 'success' 5000000002)))
+        $mod.Runs = @{ Code = 1; Out = ''; Err = 'gh: Bad Gateway (HTTP 502)' }
+        Add-HarnessCase $modCases 'check runs: the list of runs cannot be fetched: an error, never all runs or none' $true ((Get-ThrownMessage { & $modGate @(& $modActionsRun 101 'success' 5000000002) }) -match 'Bad Gateway')
+        $mod.Runs = @{ total_count = 0; workflow_runs = @() }
 
         # ---- locks (named mutexes; a private scope while the observer is set) ----------------
         $modLockName = Get-HarnessLockName 'merge'
@@ -301,6 +449,29 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'lock: released after the block' $false (-not (& $modFree))
         $null = Get-ThrownMessage { Invoke-WithHarnessLock -Name merge -ScriptBlock { throw 'inside the lock' } }
         Add-HarnessCase $modCases 'lock: released after a block that threw' $false (-not (& $modFree))
+        # a real process holds the lock and is killed (this child only). With no other handle on the mutex the kernel drops it; with the handle of a waiter open the next one gets it as abandoned
+        foreach ($modWaiterOpen in @($false, $true)) {
+            $modChildStart = [System.Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
+            foreach ($modChildArg in @('-NoProfile', '-NonInteractive', '-Command', "`$held = [System.Threading.Mutex]::new(`$false, '$modLockName'); [void]`$held.WaitOne(); [Console]::Out.WriteLine('held'); [Console]::Out.Flush(); Start-Sleep -Seconds 120")) { $modChildStart.ArgumentList.Add($modChildArg) }
+            $modChildStart.RedirectStandardOutput = $true
+            $modChildStart.UseShellExecute = $false
+            $modChild = [System.Diagnostics.Process]::Start($modChildStart)
+            $modWaiter = $null
+            try {
+                $modChildSaid = $modChild.StandardOutput.ReadLine()
+                if ($modWaiterOpen) { $modWaiter = [System.Threading.Mutex]::new($false, $modLockName) }
+                $modChild.Kill()
+                $modChild.WaitForExit()
+                $modTaken = & $modTry { Invoke-WithHarnessLock -Name merge -ScriptBlock { 'ran' } -TimeoutSeconds 10 }
+            } finally {
+                if ($modWaiter) { $modWaiter.Dispose() }
+                if (-not $modChild.HasExited) { $modChild.Kill() }
+                $modChild.Dispose()
+            }
+            $modHow = if ($modWaiterOpen) { 'another handle stays open, the lock comes back as abandoned' } else { 'no other handle' }
+            Add-HarnessCase $modCases "lock: a holder that was killed ($modHow): the lock is taken over and the block runs" $false ($modChildSaid -ne 'held' -or $modTaken -ne 'ran')
+            Add-HarnessCase $modCases "lock: released after a takeover ($modHow)" $false (-not (& $modFree))
+        }
 
         # ---- the personal needles handed to the tools ----------------------------------------
         Set-HarnessNeedles -Mode ci-optional -NeedleFile 'other-needles.txt'
@@ -392,6 +563,10 @@ function Test-ModuleRules {
             Set-HarnessRepoRoot $modRoot
             Set-HarnessFake (New-HarnessFake -Routes $modRoutes -Log $modLog)
         }
+    } catch {
+        # a crash does not hide what already turned red by name
+        Write-HarnessFailedCases $modCases
+        throw
     } finally {
         Set-HarnessFake $null
         Set-HarnessLockImpl $null

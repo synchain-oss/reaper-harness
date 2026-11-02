@@ -18,13 +18,15 @@
 //        checkPrText of check-commits.mjs: { errors, warns }
 //   node scripts/maintainer/lib/maint.mjs text --file <text>
 //        { aiTrailerLines } : the lines hasAiTrailer of check-commits.mjs takes for an AI attribution trailer, any author
+//   node scripts/maintainer/lib/maint.mjs same-authors --file <ignored>
+//        { authors } : the author emails check-commits.mjs allows for the same repository
 //   node scripts/maintainer/lib/maint.mjs --self-test
 // Output is one JSON line; a failure prints { error } and exits 2 (the PowerShell side treats that as an error, never as a pass).
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { SIGNOFF, checkMessage, checkPrText, hasAiTrailer } from "../../check-commits.mjs";
+import { SAME_AUTHORS, SIGNOFF, checkMessage, checkPrText, hasAiTrailer } from "../../check-commits.mjs";
 import { FOOTER, findPrevious, headMark, postedRecord, sectionCounts, validateSummary } from "../../review-bot.mjs";
 import { assertNodeVersion, isMain, j } from "../../lib/check-kit.mjs";
 import { FAKE_NEEDLE, loadPersonalNeedles, needlesArgs, plainText } from "../../lib/privacy-needles.mjs";
@@ -33,7 +35,7 @@ import { FAKE_NEEDLE, loadPersonalNeedles, needlesArgs, plainText } from "../../
 const RUN_LINK = /\/actions\/runs\/(\d+)/;
 /** Agent marker, first line of every comment we write: see CONTRIBUTING.md (review process). */
 const AGENT_MARK =
-    /^<!-- harness-agent v1 role=([a-z]+) kind=([a-z-]+) round=(\d+) head=([0-9a-f]{7,40})((?: [a-z-]+=[^\s>]+)*) -->$/;
+    /^<!-- harness-agent v1 role=(impl|review|orchestrator) kind=([a-z-]+) round=(\d+) head=([0-9a-f]{7,40})((?: [a-z-]+=[^\s>]+)*) -->$/;
 
 /** Body sha256 the way the bot records it (postedRecord of review-bot.mjs): CRLF folded to LF, then UTF-8 bytes. */
 export function bodySha256(body) {
@@ -57,7 +59,7 @@ export function summaryFacts(body) {
     if (!FOOTER.test(lines.at(-1).trim())) return { ...base, ok: false, reason: "footer is not the last line" };
     const v = validateSummary(body);
     if (!v.ok) return { ...base, ok: false, reason: v.reason };
-    const [, red, important, suggest] = FOOTER.exec(lines.at(-1).trim());
+    const [, red, important, suggest] = FOOTER.exec(footers[0].trim());
     return { ...base, ok: true, reason: null, red: +red, important: +important, suggest: +suggest };
 }
 
@@ -201,6 +203,7 @@ export function selfTest() {
     t("summary: no footer says so", true, summaryFacts(clean.replace(foot(0, 0, 1), "")).reason === "machine-readable footer missing");
     t("summary: two different footers are unusable", true, !summaryFacts(`${clean}\n${foot(0, 1, 1)}`).ok);
     t("summary: footer not on the last line is unusable", true, !summaryFacts(`${clean}\ntrailing text`).ok);
+    t("summary: footer not on the last line says so", true, summaryFacts(`${clean}\ntrailing text`).reason === "footer is not the last line");
     t("summary: duplicated identical footer is unusable (exactly one line)", true, !summaryFacts(`${clean}\n${foot(0, 0, 1)}`).ok);
     t("summary: footer undercounts an important item", true, !summaryFacts(body([], ["- real"], ["- a"], foot(0, 0, 1))).ok);
     t("summary: footer overcounts", true, !summaryFacts(body([], [], ["- a"], foot(0, 0, 3))).ok);
@@ -255,6 +258,8 @@ export function selfTest() {
     })());
     t("agent marker: not on the first line is no marker", true, agentMarker(`text\n${am()}`) === null);
     t("agent marker: malformed head", true, agentMarker("<!-- harness-agent v1 role=impl kind=note round=1 head=zz -->") === null);
+    t("agent marker: a role outside impl, review and orchestrator is no marker", true, agentMarker("<!-- harness-agent v1 role=admin kind=note round=1 head=aaaaaaa -->") === null);
+    t("agent marker: the three roles are markers", false, ["impl", "review", "orchestrator"].some((role) => agentMarker(`<!-- harness-agent v1 role=${role} kind=note round=1 head=aaaaaaa -->`)?.role !== role));
     const cm = (id, login, text, at) => ({ id, user: { login }, created_at: at, updated_at: at, body: text });
     const thread = [
         cm(1, "github-actions[bot]", clean, "2026-01-01T00:00:00Z"),
@@ -358,7 +363,11 @@ async function main(argv) {
         const paths = JSON.parse(fs.readFileSync(file, "utf8"));
         print({ hits: await infraHits(paths, opt("--module") ? path.resolve(opt("--module")) : DEFAULT_INFRA) });
     } else if (cmd === "message") {
-        print(messageErrors(fs.readFileSync(file, "utf8"), { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }));
+        // control characters are refused, not scanned: an ESC in the middle of a path or a needle would hide it from every rule
+        const text = plainText(fs.readFileSync(file), "the commit message");
+        print(messageErrors(text, { merge: has("--merge"), exactlyOne: has("--exactly-one"), personal: personalNeedles(rest) }));
+    } else if (cmd === "same-authors") {
+        print({ authors: SAME_AUTHORS });
     } else if (cmd === "pr-text") {
         const { title, body } = JSON.parse(fs.readFileSync(file, "utf8"));
         if (typeof title !== "string" || typeof body !== "string") throw new Error("pr-text needs a JSON object with string title and body");
@@ -366,7 +375,7 @@ async function main(argv) {
     } else if (cmd === "text") {
         print({ aiTrailerLines: aiTrailerLines(fs.readFileSync(file, "utf8")) });
     } else {
-        throw new Error("usage: review-state | infra | message | pr-text | text | --self-test (see the header comment)");
+        throw new Error("usage: review-state | infra | message | pr-text | text | same-authors | --self-test (see the header comment)");
     }
     return 0;
 }

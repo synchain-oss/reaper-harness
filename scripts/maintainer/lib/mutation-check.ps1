@@ -10,8 +10,11 @@
 #   < <text to find, exactly once in the file; several < lines are joined with newlines>
 #   > <replacement; several > lines are joined; a bare > is an empty line; no > line = delete>
 #   pwsh scripts/maintainer/lib/mutation-check.ps1 [-Only <text in the label or file>] [-Id 5,9] [-FromId 120]   (ids as listed by -List) [-Parallel 3] [-List] [-Check]
-# A run= name is a script (push, pr-open, pr-comment, pr-merge, new-worktree), maint (maint.mjs --self-test) or shared
-# (the shared-module and source-hygiene rules of self-test.ps1). A mutation is killed as soon as one of its self-tests turns red.
+# A run= name is a script (push, pr-open, pr-comment, pr-merge, new-worktree), maint (maint.mjs --self-test), shared (the
+# shared-module and source-hygiene rules of self-test.ps1) or pre-push (scripts/hooks/pre-push.mjs --self-test). A file outside this
+# directory is named relative to it (../hooks/pre-push.mjs, ../../.github/workflows/ci.yml) and needs a run=.
+# A mutation is killed only when a named case of one of its self-tests turns red ("self-test failed: <case>"). A self-test that
+# exits red without naming a case is a CRASH: the script fell over, which says nothing about the criterion, so it is not a kill.
 # A mutated file that no longer parses is an ERROR, not a kill: the self-tests would turn red for the wrong reason.
 # -Check only verifies that every text to find occurs exactly once and that every mutated file still parses (seconds, no self-test).
 # The result is a markdown table on stdout; exit code 0 only when the unmutated copy passes and every mutation was killed.
@@ -24,6 +27,11 @@ $ErrorActionPreference = 'Stop'
 
 $maintainerDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $nodeCommand = if ($env:HARNESS_NODE) { $env:HARNESS_NODE } else { 'node' }
+# the copies are no repositories, git config cannot answer there; without gitleaks the hook's self-test leaves out its end-to-end part
+if (-not $env:HARNESS_GITLEAKS) {
+    $pinnedGitleaks = & git -C $maintainerDir config --get harness.gitleaks
+    if ($LASTEXITCODE -eq 0 -and $pinnedGitleaks) { $env:HARNESS_GITLEAKS = $pinnedGitleaks }
+}
 
 function Read-Mutations {
     param([Parameter(Mandatory)][string]$Path)
@@ -56,12 +64,12 @@ $worker = {
     New-Item -ItemType Directory -Force -Path $copy | Out-Null
     Copy-Item -Path (Join-Path $SourceDir '*') -Destination $copy -Recurse -Force
     # the files of the repository that the wrappers and the real tools read: the check scripts and their libraries (scripts/ without
-    # this directory), the Node pin and the PR template
+    # this directory), the tool pins, the PR template and the workflow whose scans the self-tests read
     $repoRoot = Split-Path -Parent (Split-Path -Parent $SourceDir)
     foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts') -Force | Where-Object { $_.Name -ne 'maintainer' })) {
         Copy-Item -LiteralPath $entry.FullName -Destination (Join-Path $dir 'scripts') -Recurse -Force
     }
-    foreach ($relative in @('.node-version', '.github/pull_request_template.md')) {
+    foreach ($relative in @('.node-version', '.gitleaks-version', '.github/pull_request_template.md', '.github/workflows/ci.yml')) {
         $to = Join-Path $dir $relative
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
         Copy-Item -LiteralPath (Join-Path $repoRoot $relative) -Destination $to -Force
@@ -82,7 +90,7 @@ $worker = {
         if ($Mutation.File -like '*.mjs') {
             $null = & $NodePath --check $target 2>&1
             if ($LASTEXITCODE -ne 0) { $problem = 'the mutated file does not parse (node --check)' }
-        } else {
+        } elseif ($Mutation.File -match '\.psm?1$') {
             $tokens = $null; $parseErrors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($target, [ref]$tokens, [ref]$parseErrors)
             if (@($parseErrors).Count) { $problem = "the mutated file does not parse: $(@($parseErrors)[0].Message)" }
@@ -98,21 +106,29 @@ $worker = {
     }
     $failed = [System.Collections.Generic.List[string]]::new()
     $codes = [System.Collections.Generic.List[string]]::new()
+    $namedCase = $false
     foreach ($name in $Mutation.Run) {
         $out = if ($name -eq 'maint') { & $NodePath (Join-Path $copy 'lib/maint.mjs') --self-test 2>&1 }
+        elseif ($name -eq 'pre-push') { & $NodePath (Join-Path $dir 'scripts/hooks/pre-push.mjs') --self-test 2>&1 }
         elseif ($name -eq 'shared') { & ([Environment]::ProcessPath) -NoProfile -File (Join-Path $copy 'self-test.ps1') -Only none 2>&1 }
         else { & ([Environment]::ProcessPath) -NoProfile -File (Join-Path $copy "$name.ps1") -SelfTest 2>&1 }
         $code = $LASTEXITCODE
         $codes.Add("$name=$code")
         if ($code -ne 0) {
             $text = @($out | ForEach-Object { "$_" })
-            $named = @($text | Where-Object { $_ -match '^self-test failed: ' } | Select-Object -First 2)
-            foreach ($line in $(if ($named.Count) { $named } else { @($text | Where-Object { $_ -match 'FAIL|rror' } | Select-Object -First 2) })) { $failed.Add($line.Trim()) }
-            if (-not $failed.Count) { $failed.Add((@($out | ForEach-Object { "$_" } | Select-Object -Last 1) -join '')) }
-            break   # one red self-test is enough: the mutation is killed
+            $named = @($text | Where-Object { $_ -match '^self-test (case )?failed: ' } | Select-Object -First 2)
+            if ($named.Count) {
+                $failed.Clear()
+                foreach ($line in $named) { $failed.Add($line.Trim()) }
+                $namedCase = $true
+                break   # one named case is enough: the mutation is killed
+            }
+            # no case named: remember what it said and let the other self-tests of the entry have their say
+            foreach ($line in @($text | Where-Object { $_ -match 'FAIL|rror' } | Select-Object -First 2)) { $failed.Add($line.Trim()) }
+            if (-not $failed.Count) { $failed.Add((@($text | Select-Object -Last 1) -join '')) }
         }
     }
-    $result.Status = if (@($codes | Where-Object { $_ -notmatch '=0$' }).Count) { 'killed' } else { 'SURVIVED' }
+    $result.Status = if ($namedCase) { 'killed' } elseif (@($codes | Where-Object { $_ -notmatch '=0$' }).Count) { 'CRASH' } else { 'SURVIVED' }
     $result.Detail = ($failed | Select-Object -First 2) -join ' / '
     Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
     [pscustomobject]$result
@@ -128,7 +144,7 @@ $workRoot = Join-Path ([IO.Path]::GetTempPath()) "harness-mutation-$([guid]::New
 New-Item -ItemType Directory -Force -Path $workRoot | Out-Null
 try {
     # the unmutated copy first: a red baseline would make every "killed" meaningless
-    $baselineEntry = [pscustomobject]@{ Id = 0; File = 'self-test.ps1'; Label = 'baseline (no change)'; Run = @('push', 'pr-open', 'pr-comment', 'pr-merge', 'new-worktree', 'maint', 'shared'); Find = @(); Replace = @() }
+    $baselineEntry = [pscustomobject]@{ Id = 0; File = 'self-test.ps1'; Label = 'baseline (no change)'; Run = @('push', 'pr-open', 'pr-comment', 'pr-merge', 'new-worktree', 'maint', 'shared', 'pre-push'); Find = @(); Replace = @() }
     $baseline = if ($Check) { [pscustomobject]@{ Status = 'SURVIVED'; Detail = '' } } else { & $worker $baselineEntry $maintainerDir $nodeCommand $workRoot $false }
     # a script block cannot cross into the parallel runspaces as a variable; its text can
     $workerText = $worker.ToString()
@@ -142,11 +158,12 @@ Write-Output "Baseline (unmutated copy): $(if ($Check) { 'not run (-Check)' } el
 Write-Output ''
 Write-Output '| # | file | criterion removed or weakened | result | first failing case |'
 Write-Output '|---|---|---|---|---|'
-foreach ($r in $results) { Write-Output ("| {0} | {1} | {2} | {3} | {4} |" -f $r.Id, $r.File, ($r.Label -replace '\|', '/'), $r.Status, (($r.Detail -replace '\|', '/') -replace '^self-test failed: ', '')) }
+foreach ($r in $results) { Write-Output ("| {0} | {1} | {2} | {3} | {4} |" -f $r.Id, $r.File, ($r.Label -replace '\|', '/'), $r.Status, (($r.Detail -replace '\|', '/') -replace '^self-test (case )?failed: ', '')) }
 $killed = @($results | Where-Object Status -eq 'killed').Count
 $survived = @($results | Where-Object Status -eq 'SURVIVED')
 $errors = @($results | Where-Object Status -eq 'ERROR')
+$crashed = @($results | Where-Object Status -eq 'CRASH')
 Write-Output ''
-Write-Output "Mutations: $($results.Count), killed $killed, survived $($survived.Count), errors $($errors.Count)$(if ($Check) { ", valid $(@($results | Where-Object Status -eq 'checked').Count)" })"
-if ($baseline.Status -ne 'SURVIVED' -or $survived.Count -or $errors.Count) { exit 1 }
+Write-Output "Mutations: $($results.Count), killed $killed, survived $($survived.Count), crashed $($crashed.Count), errors $($errors.Count)$(if ($Check) { ", valid $(@($results | Where-Object Status -eq 'checked').Count)" })"
+if ($baseline.Status -ne 'SURVIVED' -or $survived.Count -or $crashed.Count -or $errors.Count) { exit 1 }
 exit 0

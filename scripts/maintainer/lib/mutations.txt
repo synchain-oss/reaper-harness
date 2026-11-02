@@ -134,7 +134,7 @@
 < if (-not $bot.ok) {
 > if ($false) {
 @@ pr-merge.ps1 | contradicting footers on one head accepted
-< if ($sameHead.Count -gt 1) {
+< if ($sameHeadCounts.Count -gt 1) {
 > if ($false) {
 @@ pr-merge.ps1 | red or important findings in the footer accepted
 < if ($bot.red -gt 0 -or $bot.important -gt 0) {
@@ -211,7 +211,7 @@
 < if ($deferred.Count -gt 0) {
 > if ($false) {
 @@ pr-merge.ps1 | any waiver clears deferred findings
-< if ($waiver -and [bool](Get-HarnessProp $waiver 'deferred')) {
+< if ($waiver -and (Get-HarnessProp $waiver 'deferred') -is [bool] -and (Get-HarnessProp $waiver 'deferred')) {
 > if ($waiver) {
 
 # ===================================================== pr-merge.ps1: CI checks, public text, infrastructure
@@ -254,8 +254,8 @@
 
 # ===================================================== push.ps1
 @@ push.ps1 | push URL not checked at all
-< if ($url -notmatch $want) { throw
-> if ($false) { throw
+< if (-not $urls.Count -or @($urls | Where-Object { $_ -notmatch $want }).Count) {
+> if ($false) {
 @@ push.ps1 | push URL accepted without the maintainer user name
 < $want = "^https://$([regex]::Escape((Get-HarnessMaintainer)))@github\.com/
 > $want = "^https://(?:[^@/]+@)?github\.com/
@@ -323,17 +323,17 @@
 < if ($scan.Code -ne 0) { throw
 > if ($false) { throw
 @@ push.ps1 | gitleaks scans the whole history
-< $logOpts = (@($range) + @('--no-ext-diff', '--no-textconv')) -join ' '
+< $logOpts = (@($range) + @('--no-ext-diff', '--no-textconv', '--diff-merges=first-parent')) -join ' '
 > $logOpts = '--all'
 @@ push.ps1 | force push
-< Invoke-HarnessGit @('push', 'origin', "HEAD:refs/heads/$branch") -Repo $Worktree | Out-Null
-> Invoke-HarnessGit @('push', '--force', 'origin', "HEAD:refs/heads/$branch") -Repo $Worktree | Out-Null
+< Invoke-HarnessGit @('push', 'origin', "${headSha}:refs/heads/$branch") -Repo $Worktree | Out-Null
+> Invoke-HarnessGit @('push', '--force', 'origin', "${headSha}:refs/heads/$branch") -Repo $Worktree | Out-Null
 @@ push.ps1 | push without hooks
-< Invoke-HarnessGit @('push', 'origin', "HEAD:refs/heads/$branch") -Repo $Worktree | Out-Null
-> Invoke-HarnessGit @('push', '--no-verify', 'origin', "HEAD:refs/heads/$branch") -Repo $Worktree | Out-Null
+< Invoke-HarnessGit @('push', 'origin', "${headSha}:refs/heads/$branch") -Repo $Worktree | Out-Null
+> Invoke-HarnessGit @('push', '--no-verify', 'origin', "${headSha}:refs/heads/$branch") -Repo $Worktree | Out-Null
 @@ push.ps1 | push to a ref other than the current branch
-< Invoke-HarnessGit @('push', 'origin', "HEAD:refs/heads/$branch") -Repo $Worktree | Out-Null
-> Invoke-HarnessGit @('push', 'origin', 'HEAD:refs/heads/feature/v1') -Repo $Worktree | Out-Null
+< Invoke-HarnessGit @('push', 'origin', "${headSha}:refs/heads/$branch") -Repo $Worktree | Out-Null
+> Invoke-HarnessGit @('push', 'origin', "${headSha}:refs/heads/feature/v1") -Repo $Worktree | Out-Null
 
 # ===================================================== pr-open.ps1
 @@ pr-open.ps1 | any base accepted
@@ -357,9 +357,6 @@
 @@ pr-open.ps1 | missing sections not reported
 < if ($missing.Count) { throw
 > if ($false) { throw
-@@ pr-open.ps1 | missing template means no warning
-< if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-> if ($true) {
 @@ pr-open.ps1 | title and body format not enforced
 < if ($problems.Count) { throw
 > if ($false) { throw
@@ -435,8 +432,9 @@
 @@ pr-comment.ps1 | wait: no nine minute cap
 < [Math]::Min([Math]::Max($Minutes, 0), 9)
 > [Math]::Max($Minutes, 0)
-@@ pr-comment.ps1 | empty body posted
-< if (-not $content.Trim()) { throw 'The body is empty' }
+@@ lib/HarnessGh.psm1 | empty body posted
+% run=pr-comment,pr-open
+< if (-not $bodyText.Trim()) { throw 'The body is empty' }
 > $null = 0
 @@ pr-comment.ps1 | write without role, round or head
 < if (-not $AgentRole -or $AgentRound -lt 0 -or $HeadSha -notmatch '^[0-9a-f]{7,40}$') { throw
@@ -870,7 +868,7 @@
 > if ($false) { 'bot-summary' }
 @@ lib/HarnessGh.psm1 | all reviews collected, approvals too
 % run=shared,pr-comment,pr-merge
-< if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $reviewState) { continue }
+< if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $reviewState -and -not ([string](Get-HarnessProp $c 'body')).Trim()) { continue }
 > if ($false) { continue }
 @@ lib/HarnessGh.psm1 | everything is new
 % run=shared,pr-comment
@@ -930,7 +928,7 @@
 > if ($Item.State -eq 'CHANGES_REQUESTED') { return $true }
 @@ lib/HarnessGh.psm1 | empty review judged by its inline comments is skipped
 % run=shared,pr-comment,pr-merge
-< if (-not $Item.Body.Trim() -and @($Item.Comments).Count) {
+< if (@($Item.Comments).Count) {
 > if ($false) {
 @@ lib/HarnessGh.psm1 | unanswered inline comment under an empty review ignored
 % run=shared,pr-comment,pr-merge
@@ -942,7 +940,7 @@
 > $lines = @((($Body ?? '') -split "`r?`n") | Select-Object -First 500)
 @@ lib/HarnessGh.psm1 | pr-agent notices counted as review output
 % run=shared,pr-comment
-< if (@($lines | Where-Object { $_ -match '\[Persistent review\]' -or $_ -match '^\s*Failed to generate\b' }).Count) { return $false }
+< if (Test-HarnessPrAgentNotice $Body) { return $false }
 > 
 @@ lib/HarnessGh.psm1 | review edit time ignored in favour of the submission
 % run=shared,pr-merge,pr-comment
@@ -1015,10 +1013,10 @@
 
 # ===================================================== pr-merge.ps1: findings deferred in the disposition
 @@ pr-merge.ps1 | deferred suggestions need a waiver too
-< $severe = if ($level) { $level -match '红旗|重要' }
-> $severe = if ($level) { $true }
+< if ($levelText -cin '建议', '总结', '信息') { return 'none' }
+> $null = 0
 @@ pr-merge.ps1 | every row counts as severe
-< if (-not $severe) { continue }
+< if ((Get-DispositionLevel $row) -ceq 'none') { continue }
 > 
 @@ pr-merge.ps1 | findings of one location wipe each other out
 < $key = (@($loc, $sum) | Where-Object { $_ }) -join ' | '
@@ -1030,10 +1028,10 @@
 < (?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)
 > (?:不改|不采纳|挂账|暂不|维持|采纳)
 @@ pr-merge.ps1 | fix without a commit proof clears the deferral
-< elseif (($decision -match '已修|修复|已改|采纳') -and $proof) {
-> elseif ($decision -match '已修|修复|已改|采纳') {
+< $handled = $decision -match '^(?:已修|修复|采纳)' -and -not $refused -and $proof
+> $handled = $decision -match '^(?:已修|修复|采纳)' -and -not $refused
 @@ pr-merge.ps1 | commit proof taken from any column
-< | Select-Object -Skip ([Math]::Max($at, 0)) |
+< | Select-Object -Skip $at |
 > | Select-Object -Skip 0 |
 @@ pr-merge.ps1 | digits only count as commit proof
 < (?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])
@@ -1045,8 +1043,10 @@
 < if (-not $m -or $m.Kind -ne 'disposition') { continue }
 > if (-not $m) { continue }
 @@ pr-merge.ps1 | tables of any author clear a deferral
-< foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' })) {
-> foreach ($i in @($Items)) {
+< $order = 0
+<     foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' })) {
+> $order = 0
+>     foreach ($i in @($Items)) {
 @@ pr-merge.ps1 | disposition table columns found anywhere in a header cell
 < if ($cells[$i] -match "^$name" -and
 > if ($cells[$i] -match $name -and
@@ -1089,7 +1089,7 @@
 < if ($problems.Count) { throw "#$Number was merged as
 > if ($false) { throw "#$Number was merged as
 @@ pr-merge.ps1 | squash author not checked
-< if ("$AuthorName <$AuthorEmail>" -cne "$(Get-HarnessMaintainer) <noreply@synchain.ca>") {
+< if ($AuthorName -cne (Get-HarnessMaintainer) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
 > if ($false) {
 @@ pr-merge.ps1 | squash committer not checked
 < if ($AllowedCommitters -notcontains $CommitterEmail.ToLowerInvariant()) {
@@ -1166,3 +1166,519 @@
 @@ pr-merge.ps1 | worktree path: directory without a .git file accepted
 < if (-not (Test-Path -LiteralPath (Join-Path $Path '.git') -PathType Leaf)) {
 > if ($false) {
+
+# ===================================================== default-deny disposition tables
+@@ pr-merge.ps1 | refusal word next to a handled word accepted
+< $handled = $decision -match '^(?:已修|修复|采纳)' -and -not $refused -and $proof
+> $handled = $decision -match '^(?:已修|修复|采纳)' -and $proof
+@@ pr-merge.ps1 | handled word anywhere in the disposition cell
+< $handled = $decision -match '^(?:已修|修复|采纳)' -and -not $refused -and $proof
+> $handled = $decision -match '已修|修复|采纳' -and -not $refused -and $proof
+@@ pr-merge.ps1 | handled word list wider than the three words
+< $handled = $decision -match '^(?:已修|修复|采纳)' -and -not $refused -and $proof
+> $handled = $decision -match '^(?:已修|修复|采纳|已改|已采纳)' -and -not $refused -and $proof
+@@ pr-merge.ps1 | a word on no list leaves the row out
+< $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = -not $handled }
+> if ($handled -or $refused -or -not $decision) { $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = -not $handled } }
+@@ pr-merge.ps1 | a table without a disposition column read cell by cell
+< $decision = if ($at -ge 0) { $row.Cells[$at] } else { '' }
+<             $proof = $at -ge 0 -and @($row.Cells | Select-Object -Skip $at |
+> $decision = if ($at -ge 0) { $row.Cells[$at] } else { @($row.Cells | Where-Object { $_ -match '^(?:已修|修复|采纳)' }) | Select-Object -First 1 }
+>             $proof = @($row.Cells | Select-Object -Skip ([Math]::Max($at, 0)) |
+@@ pr-merge.ps1 | an unknown level is not severe
+< return 'other'
+> return 'none'
+@@ pr-merge.ps1 | level with brackets not recognised
+< $TableRow.Cells[$at] -replace '[【】\s]', ''
+> $TableRow.Cells[$at]
+@@ pr-merge.ps1 | level without a level column not looked for
+< if (@($TableRow.Cells | Where-Object { $_ -match "【$levelName】" }).Count) { return $levelName }
+> $null = 0
+@@ pr-merge.ps1 | finding called Values hides the others
+< @($latest.get_Values() | Where-Object Deferred | ForEach-Object Line)
+> @($latest.Values | Where-Object Deferred | ForEach-Object Line)
+@@ pr-merge.ps1 | deferred waiver accepted as a string
+< (Get-HarnessProp $waiver 'deferred') -is [bool] -and (Get-HarnessProp $waiver 'deferred')
+> [bool](Get-HarnessProp $waiver 'deferred')
+@@ pr-merge.ps1 | deferred waiver not printed
+< -is [bool] -and (Get-HarnessProp $waiver 'deferred')) { & $rely 'waiver' $waiver }
+> -is [bool] -and (Get-HarnessProp $waiver 'deferred')) { $null = 0 }
+# ===================================================== one row per finding
+@@ pr-merge.ps1 | rows not counted per run
+< foreach ($gap in @(Get-DispositionShortfalls -Summaries @($Facts.State.summaries) -Items @($Facts.Items))) { $fail.Add($gap) }
+> $null = 0
+@@ pr-merge.ps1 | only the newest summary counted
+< Get-DispositionShortfalls -Summaries @($Facts.State.summaries)
+> Get-DispositionShortfalls -Summaries @($Facts.State.summaries | Select-Object -Last 1)
+@@ pr-merge.ps1 | rows of any author counted
+< $rowsOfRun = @{}
+<     foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' })) {
+> $rowsOfRun = @{}
+>     foreach ($i in @($Items)) {
+@@ pr-merge.ps1 | rows of another run counted
+< $rows = @($(if ($runKey -and $rowsOfRun.ContainsKey($runKey)) { $rowsOfRun[$runKey] }))
+> $rows = @($rowsOfRun.get_Values() | ForEach-Object { $_ })
+@@ pr-merge.ps1 | rows of any level counted
+< $listed = @($rows | Where-Object { (Get-DispositionLevel $_) -ceq $levelName }).Count
+> $listed = $rows.Count
+@@ pr-merge.ps1 | red flags not counted
+< foreach ($levelName in '红旗', '重要') {
+<             $wanted =
+> foreach ($levelName in , '重要') {
+>             $wanted =
+@@ pr-merge.ps1 | important findings not counted
+< foreach ($levelName in '红旗', '重要') {
+<             $wanted =
+> foreach ($levelName in , '红旗') {
+>             $wanted =
+@@ pr-merge.ps1 | suggestions need rows too
+< $wanted = @(@(Get-HarnessProp $botSummary 'items') | Where-Object { $_ -and $_.level -ceq $levelName }).Count
+> $wanted = @(Get-HarnessProp $botSummary 'items').Count
+@@ pr-merge.ps1 | shortfall message does not say how many are missing
+< $($wanted - $listed) missing
+> some missing
+@@ pr-merge.ps1 | summary without a run link not counted
+< $runKey = [string]$botSummary.runId
+> $runKey = [string]$botSummary.runId
+>         if (-not $runKey) { continue }
+# ===================================================== the small verdict rules
+@@ pr-merge.ps1 | contradiction compared with the suggestions
+< ForEach-Object { "$($_.red)/$($_.important)" }
+> ForEach-Object { "$($_.red)/$($_.important)/$($_.suggest)" }
+@@ pr-merge.ps1 | several records of a kind take the first
+< if ($sameHead.Count -gt 1) {
+> if ($false) {
+@@ pr-merge.ps1 | several waivers not looked for
+< $recordKinds = [ordered]@{ waivers = $recs.Waivers; approvals
+> $recordKinds = [ordered]@{ approvals
+@@ pr-merge.ps1 | several approvals not looked for
+< ; approvals = $recs.Approvals; 'external-handled'
+> ; 'external-handled'
+@@ pr-merge.ps1 | several external-handled records not looked for
+< ; 'external-handled' = $recs.ExternalHandled }
+>  }
+@@ pr-merge.ps1 | records of any head counted as several
+< $sameHead = @(Get-HeadRecords -List $recordKinds[$recordKind] -ForHead $sha)
+> $sameHead = @($recordKinds[$recordKind])
+@@ pr-merge.ps1 | message about several records without the file
+< The records file $($recs.File) has
+> The records file has
+@@ pr-merge.ps1 | file list shorter than changed_files accepted
+< if ($null -eq $changedFiles -or [int]$changedFiles -ne @($Facts.Files).Count) {
+> if ($false) {
+@@ pr-merge.ps1 | missing changed_files accepted
+< if ($null -eq $changedFiles -or [int]$changedFiles -ne @($Facts.Files).Count) {
+> if ($null -ne $changedFiles -and [int]$changedFiles -ne @($Facts.Files).Count) {
+@@ pr-merge.ps1 | base not read again before the merge request
+< if ($now.base.ref -cne 'feature/v1' -or $now.state -cne 'open') {
+> if ($now.state -cne 'open') {
+@@ pr-merge.ps1 | state not read again before the merge request
+< if ($now.base.ref -cne 'feature/v1' -or $now.state -cne 'open') {
+> if ($now.base.ref -cne 'feature/v1') {
+@@ pr-merge.ps1 | CRLF of the summary kept
+< $text = ($Summary -replace "`r`n", "`n").Trim()
+> $text = $Summary.Trim()
+@@ pr-merge.ps1 | waiver: red not compared with the footer
+< $waiver -and $bot.red -le [int](Get-HarnessProp $waiver 'red') -and
+> $waiver -and
+@@ pr-merge.ps1 | hash waiver accepted as the boolean false
+< (Get-HarnessProp $waiver 'summaryHash') -is [bool] -and (Get-HarnessProp $waiver 'summaryHash')
+> (Get-HarnessProp $waiver 'summaryHash') -is [bool]
+@@ pr-merge.ps1 | hash waiver not printed
+< a user hash waiver for this head exists: $(Get-HarnessProp $waiver 'note')")
+<                         & $rely 'waiver' $waiver
+> a user hash waiver for this head exists: $(Get-HarnessProp $waiver 'note')")
+@@ pr-merge.ps1 | bot job conclusion not checked
+< if (-not $botJob -or $botJob.conclusion -ne 'success') {
+> if (-not $botJob) {
+# ===================================================== the squash read-back
+@@ pr-merge.ps1 | squash author name not checked
+< if ($AuthorName -cne (Get-HarnessMaintainer) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
+> if (@(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
+@@ pr-merge.ps1 | squash author email not checked
+< if ($AuthorName -cne (Get-HarnessMaintainer) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) {
+> if ($AuthorName -cne (Get-HarnessMaintainer)) {
+@@ pr-merge.ps1 | squash author email compared with case
+< -cnotcontains $AuthorEmail.ToLowerInvariant()) {
+> -cnotcontains $AuthorEmail) {
+@@ ../check-commits.mjs | numbered noreply address of the maintainer not allowed
+% run=pr-merge
+< export const SAME_AUTHORS = ["noreply@synchain.ca", "140901583+dlsnows@users.noreply.github.com"];
+> export const SAME_AUTHORS = ["noreply@synchain.ca"];
+@@ lib/maint.mjs | same-authors answers with nothing
+% run=pr-merge
+< print({ authors: SAME_AUTHORS });
+> print({ authors: [] });
+@@ pr-merge.ps1 | message that cannot be read crashes the read-back
+< } catch { $problems.Add("the message could not be checked: $($_.Exception.Message)") }
+> } catch { throw }
+@@ lib/maint.mjs | control characters reach the message rules
+% run=pr-merge
+< const text = plainText(fs.readFileSync(file), "the commit message");
+> const text = fs.readFileSync(file, "utf8");
+# ===================================================== -After compares before it deletes
+@@ pr-merge.ps1 | unmerged commits on the remote branch deleted
+< if ($remoteTip -and $remoteTip -cne $mergedHead) {
+> if ($false) {
+@@ pr-merge.ps1 | unmerged commits on the local branch deleted
+< if ($localTip -and $localTip -cne $mergedHead) {
+> if ($false) {
+@@ pr-merge.ps1 | worktree with changes or untracked files cleaned up
+< if ($untidy.Trim()) {
+> if ($false) {
+@@ pr-merge.ps1 | untracked files not asked for
+< 'status', '--porcelain', '--untracked-files=normal'
+> 'status', '--porcelain', '--untracked-files=no'
+@@ pr-merge.ps1 | tips compared with the merge commit, not with the head
+< $mergedHead = [string]$pull.head.sha
+> $mergedHead = $sha
+@@ pr-merge.ps1 | failing ls-remote read as no remote branch
+< } elseif ($remoteRead.Code -ne 2) {
+> } elseif ($false) {
+@@ pr-merge.ps1 | ls-remote line not read for the exact ref
+< \t$([regex]::Escape($branchRef))\r?$")
+> \t$([regex]::Escape($branchRef))")
+@@ pr-merge.ps1 | ls-remote without the exact ref line accepted
+< if (-not $tipLine.Success) {
+> if ($false) {
+@@ pr-merge.ps1 | failing rev-parse read as no local branch
+< elseif ($localRead.Code -ne 1) {
+> elseif ($false) {
+@@ pr-merge.ps1 | remote branch deleted even when it is gone
+< if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
+> Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null
+@@ pr-merge.ps1 | failed delete of the remote branch ignored
+< Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null
+> Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) -AllowFail | Out-Null
+@@ pr-merge.ps1 | local branch deleted even when it is gone
+< if ($localTip) { Invoke-HarnessGit @('branch', '-D', $branch) | Out-Null }
+> Invoke-HarnessGit @('branch', '-D', $branch) | Out-Null
+@@ pr-merge.ps1 | last line says deleted even when the remote branch was gone
+< remote sub-branch $(& $what $remoteTip 'deleted')
+> remote sub-branch deleted
+@@ pr-merge.ps1 | last line says removed even when the local branch was gone
+< local branch $(& $what $localTip 'removed')
+> local branch removed
+# ===================================================== the command lines
+@@ pr-merge.ps1 | entry: identity not established
+< if ($Pr -le 0) { throw '-Pr <n> is required' }
+<     Initialize-HarnessIdentity
+> if ($Pr -le 0) { throw '-Pr <n> is required' }
+@@ pr-merge.ps1 | entry: identity checked after the check has read everything
+< if ($Pr -le 0) { throw '-Pr <n> is required' }
+<     Initialize-HarnessIdentity
+<     if ($Check) {
+<         $verdict = Invoke-MergeCheck -Number $Pr -RecordsPath $WaiverFile
+> if ($Pr -le 0) { throw '-Pr <n> is required' }
+>     if ($Check) {
+>         $verdict = Invoke-MergeCheck -Number $Pr -RecordsPath $WaiverFile
+>         Initialize-HarnessIdentity
+@@ pr-merge.ps1 | entry: modes not counted
+< if (@($Check, $Merge, $After | Where-Object { $_ }).Count -ne 1) {
+> if ($false) {
+@@ pr-merge.ps1 | entry: -Pr not required
+< if ($Pr -le 0) { throw '-Pr <n> is required' }
+> $null = 0
+@@ pr-merge.ps1 | entry: exit code of the check dropped
+< $script:EntryCode = Get-CheckExitCode $verdict.Code
+> $script:EntryCode = 0
+@@ pr-merge.ps1 | entry: -Check does not hand the records file on
+< $verdict = Invoke-MergeCheck -Number $Pr -RecordsPath $WaiverFile
+> $verdict = Invoke-MergeCheck -Number $Pr
+@@ pr-merge.ps1 | entry: -Merge does not hand the records file on
+< Invoke-Merge -Number $Pr -SummaryFile $SummaryFile -RecordsPath $WaiverFile
+> Invoke-Merge -Number $Pr -SummaryFile $SummaryFile
+@@ pr-merge.ps1 | entry: -Merge does not hand the summary on
+< Invoke-Merge -Number $Pr -SummaryFile $SummaryFile -RecordsPath $WaiverFile
+> Invoke-Merge -Number $Pr -SummaryFile '' -RecordsPath $WaiverFile
+@@ pr-merge.ps1 | entry: -After does not hand the worktree on
+< Invoke-After -Number $Pr -WorktreePath $Worktree
+> Invoke-After -Number $Pr -WorktreePath ''
+@@ pr-comment.ps1 | entry: identity not established
+< if ($Pr -le 0) { throw '-Pr <n> is required' }
+<     Initialize-HarnessIdentity
+> if ($Pr -le 0) { throw '-Pr <n> is required' }
+@@ pr-comment.ps1 | entry: modes not counted
+< if ($modes.Count -ne 1) {
+> if ($false) {
+@@ pr-comment.ps1 | entry: -Pr not required
+< if ($Pr -le 0) { throw '-Pr <n> is required' }
+> $null = 0
+@@ pr-comment.ps1 | entry: write arguments not checked
+< $bodyText = Read-HarnessBodyFile $BodyFile
+<     Assert-WriteArgs $Role $Round $Head
+> $bodyText = Read-HarnessBodyFile $BodyFile
+@@ pr-comment.ps1 | entry: -Wait head not checked
+< if ($Head -notmatch '^[0-9a-f]{40}$') { throw '-Wait needs a 40-character -Head' }
+> $null = 0
+@@ pr-comment.ps1 | entry: exit code of -Wait dropped
+< $script:EntryCode = switch ($r.State) { 'done' { 0 } 'moved' { 4 } default { 3 } }
+> $script:EntryCode = 0
+@@ pr-comment.ps1 | entry: exit code of an unusable footer dropped
+< Write-Output "bot verdict unusable: $($f.Reason)"; $script:EntryCode = 2; return
+> Write-Output "bot verdict unusable: $($f.Reason)"; return
+@@ pr-comment.ps1 | entry: -Post without -Kind
+< if (-not $Kind) { throw '-Post needs -Kind (for example disposition, note, reply)' }
+> $null = 0
+@@ pr-comment.ps1 | entry: -BotRun not handed on
+< -CommentKind $Kind -AgentRound $Round -HeadSha $Head -Run $BotRun -ReplyTo $InReplyTo
+> -CommentKind $Kind -AgentRound $Round -HeadSha $Head -ReplyTo $InReplyTo
+@@ pr-comment.ps1 | entry: -InReplyTo not handed on
+< -CommentKind $Kind -AgentRound $Round -HeadSha $Head -Run $BotRun -ReplyTo $InReplyTo
+> -CommentKind $Kind -AgentRound $Round -HeadSha $Head -Run $BotRun
+@@ pr-comment.ps1 | entry: -To not handed on
+< Invoke-Reply -Number $Pr -Target $To -Text $bodyText
+> Invoke-Reply -Number $Pr -Target '8000000002' -Text $bodyText
+@@ pr-comment.ps1 | reply to a reply sent to the comment itself
+< $threadRoot = (Get-HarnessProp $rc 'in_reply_to_id') ?? $Target
+> $threadRoot = $Target
+@@ pr-open.ps1 | entry: identity not established when opening
+< if (-not $Head -or -not $Title -or -not $BodyFile) { throw '-Head, -Title and -BodyFile are required' }
+<     Initialize-HarnessIdentity
+> if (-not $Head -or -not $Title -or -not $BodyFile) { throw '-Head, -Title and -BodyFile are required' }
+@@ pr-open.ps1 | entry: identity not established when updating
+< if ($Pr -le 0 -or -not $BodyFile) { throw '-Update needs -Pr and -BodyFile (-Title is optional)' }
+<         Initialize-HarnessIdentity
+> if ($Pr -le 0 -or -not $BodyFile) { throw '-Update needs -Pr and -BodyFile (-Title is optional)' }
+@@ pr-open.ps1 | entry: arguments of an open not checked
+< if (-not $Head -or -not $Title -or -not $BodyFile) { throw '-Head, -Title and -BodyFile are required' }
+> $null = 0
+@@ pr-open.ps1 | entry: arguments of an update not checked
+< if ($Pr -le 0 -or -not $BodyFile) { throw '-Update needs -Pr and -BodyFile (-Title is optional)' }
+> $null = 0
+@@ pr-open.ps1 | entry: body of an open read without the strict reader
+< -Body (Read-HarnessBodyFile $BodyFile) -IsDraft
+> -Body ([IO.File]::ReadAllText($BodyFile)) -IsDraft
+@@ pr-open.ps1 | entry: body of an update read without the strict reader
+< -NewTitle $Title -Body (Read-HarnessBodyFile $BodyFile)
+> -NewTitle $Title -Body ([IO.File]::ReadAllText($BodyFile))
+@@ new-worktree.ps1 | entry: identity not established
+< if (-not $Card -or -not $Slug) { throw 'Both -Card <name> and -Slug <slug> are required' }
+<     Initialize-HarnessIdentity
+> if (-not $Card -or -not $Slug) { throw 'Both -Card <name> and -Slug <slug> are required' }
+@@ new-worktree.ps1 | entry: arguments not checked
+< if (-not $Card -or -not $Slug) { throw 'Both -Card <name> and -Slug <slug> are required' }
+> $null = 0
+# ===================================================== the facts layer (the routes decide)
+@@ pr-merge.ps1 | facts: dirty checkout not read
+< Dirty = [bool](Invoke-HarnessGit @('status', '--porcelain')).Out.Trim()
+> Dirty = $false
+@@ pr-merge.ps1 | facts: HEAD of the checkout not read
+< Head = (Invoke-HarnessGit @('rev-parse', 'HEAD')).Out.Trim()
+> Head = (Invoke-HarnessGit @('rev-parse', 'origin/feature/v1')).Out.Trim()
+@@ pr-merge.ps1 | facts: feature line tip not read
+< Tip = (Invoke-HarnessGit @('rev-parse', 'origin/feature/v1')).Out.Trim()
+> Tip = (Invoke-HarnessGit @('rev-parse', 'HEAD')).Out.Trim()
+@@ pr-merge.ps1 | facts: fetched PR ref not read
+< PrRef = (Invoke-HarnessGit @('rev-parse', "refs/remotes/origin/pr/$Number")).Out.Trim()
+> PrRef = $sha
+@@ pr-merge.ps1 | facts: first posted record of the log used
+< $posted = [pscustomobject]@{ Id = $found[$found.Count - 1].Groups[1].Value; Sha256 = $found[$found.Count - 1].Groups[2].Value }
+> $posted = [pscustomobject]@{ Id = $found[0].Groups[1].Value; Sha256 = $found[0].Groups[2].Value }
+@@ pr-merge.ps1 | facts: log of the first job of the run read
+< $job = @($jobs | Where-Object { $_.name -eq (Get-HarnessBotCheck) }) | Select-Object -First 1
+> $job = @($jobs) | Select-Object -First 1
+@@ pr-merge.ps1 | facts: log of the whole run read
+< $logText = Get-HarnessRunLog -RunId $runId -JobId ([string]$job.id)
+> $logText = Get-HarnessRunLog -RunId $runId
+@@ pr-merge.ps1 | facts: fixed PR number in the fetch
+< "+refs/pull/${Number}/head:refs/remotes/origin/pr/$Number"
+> "+refs/pull/7/head:refs/remotes/origin/pr/7"
+@@ pr-merge.ps1 | facts: fixed PR number in the local ref
+< "refs/remotes/origin/pr/$Number"
+> "refs/remotes/origin/pr/7"
+# ===================================================== shared module
+@@ lib/HarnessGh.psm1 | check runs of any event count
+% run=shared,pr-merge
+< if ($actionsRun.Success -and -not $prRuns.Contains($actionsRun.Groups[1].Value)) { continue }
+> $null = 0
+@@ lib/HarnessGh.psm1 | runs asked without the event
+% run=shared,pr-merge
+< actions/runs?head_sha=$Sha&event=pull_request&per_page=100
+> actions/runs?head_sha=$Sha&per_page=100
+@@ lib/HarnessGh.psm1 | runs asked without paging
+% run=shared
+< &event=pull_request&per_page=100" -Paginate
+> &event=pull_request&per_page=100"
+@@ lib/HarnessGh.psm1 | failed run list read as no runs
+% run=shared
+< &event=pull_request&per_page=100" -Paginate
+> &event=pull_request&per_page=100" -Paginate -AllowFail
+@@ lib/HarnessGh.psm1 | check of another app dropped
+% run=shared
+< if ($actionsRun.Success -and -not $prRuns.Contains($actionsRun.Groups[1].Value)) { continue }
+> if (-not $prRuns.Contains($actionsRun.Groups[1].Value)) { continue }
+@@ lib/HarnessGh.psm1 | approved or dismissed review with a body left out
+% run=shared,pr-merge
+< if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $reviewState -and -not ([string](Get-HarnessProp $c 'body')).Trim()) { continue }
+> if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $reviewState) { continue }
+@@ lib/HarnessGh.psm1 | pending review not left out
+% run=shared
+< $reviews = @($allReviews | Where-Object { [string](Get-HarnessProp $_ 'state') -cne 'PENDING' -and (Get-HarnessProp $_ 'submitted_at') })
+> $reviews = $allReviews
+@@ lib/HarnessGh.psm1 | pending review recognised only by its missing time
+% run=shared
+< [string](Get-HarnessProp $_ 'state') -cne 'PENDING' -and (Get-HarnessProp $_ 'submitted_at')
+> (Get-HarnessProp $_ 'submitted_at')
+@@ lib/HarnessGh.psm1 | review without a time not left out
+% run=shared
+< [string](Get-HarnessProp $_ 'state') -cne 'PENDING' -and (Get-HarnessProp $_ 'submitted_at')
+> [string](Get-HarnessProp $_ 'state') -cne 'PENDING'
+@@ lib/HarnessGh.psm1 | pending review left out silently
+% run=shared
+< if ($reviews.Count -ne $allReviews.Count) { [Console]::Error.WriteLine("Note: $($allReviews.Count - $reviews.Count) pending review(s) on #$Pr are left out: not submitted yet") }
+> $null = 0
+@@ lib/HarnessGh.psm1 | every bot comment passes without an answer
+% run=shared,pr-merge
+< if ($Item.Kind -eq 'bot' -and $Item.Source -eq 'issue' -and $Item.Author -ceq 'github-actions[bot]' -and (Test-HarnessPrAgentNotice $Item.Body)) { return $true }
+> if ($Item.Kind -eq 'bot') { return $true }
+@@ lib/HarnessGh.psm1 | pr-agent notices need an answer
+% run=shared,pr-merge
+< if ($Item.Kind -eq 'bot' -and $Item.Source -eq 'issue' -and $Item.Author -ceq 'github-actions[bot]' -and (Test-HarnessPrAgentNotice $Item.Body)) { return $true }
+> $null = 0
+@@ lib/HarnessGh.psm1 | notice words of another bot pass
+% run=shared
+< $Item.Source -eq 'issue' -and $Item.Author -ceq 'github-actions[bot]' -and (Test-HarnessPrAgentNotice $Item.Body)
+> $Item.Source -eq 'issue' -and (Test-HarnessPrAgentNotice $Item.Body)
+@@ lib/HarnessGh.psm1 | notice words in a review pass
+% run=shared
+< $Item.Source -eq 'issue' -and $Item.Author -ceq 'github-actions[bot]' -and (Test-HarnessPrAgentNotice $Item.Body)
+> $Item.Author -ceq 'github-actions[bot]' -and (Test-HarnessPrAgentNotice $Item.Body)
+@@ lib/HarnessGh.psm1 | empty review of a bot needs an answer
+% run=shared
+< if ($Item.Kind -eq 'bot') { return $true }
+> $null = 0
+@@ lib/HarnessGh.psm1 | stderr file left behind when a command cannot start
+% run=shared
+<         } finally {
+<             if ($pushed) { Pop-Location }
+<             Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
+<         }
+>         } finally {
+>             if ($pushed) { Pop-Location }
+>         }
+>         Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
+@@ lib/HarnessGh.psm1 | failed git command named by -C and its path
+% run=shared
+< if ($shown.Count -ge 2 -and $shown[0] -ceq '-C') { $shown = @($shown | Select-Object -Skip 2) }
+> $null = 0
+@@ lib/HarnessGh.psm1 | only the first line of stderr reported
+% run=shared
+< $stderrText = ([string]$ErrText).Trim()
+> $stderrText = (([string]$ErrText).Trim() -split "`n")[0]
+@@ lib/HarnessGh.psm1 | stderr not cut
+% run=shared
+< if ($stderrText.Length -gt 4096) {
+> if ($false) {
+@@ lib/HarnessGh.psm1 | role compared without case
+% run=shared
+< ValidateSet('impl', 'review', 'orchestrator', IgnoreCase = $false)
+> ValidateSet('impl', 'review', 'orchestrator')
+@@ lib/HarnessGh.psm1 | hygiene: case collisions read through the shadowed member
+% run=shared
+< foreach ($key in $spellings.get_Keys()) {
+> foreach ($key in $spellings.Keys) {
+@@ lib/HarnessGh.psm1 | hygiene: exit with the whole output of the self-test allowed
+% run=shared
+< if ($Text -match 'exit \(' + 'Invoke-SelfTest\)') {
+> if ($false) {
+@@ lib/HarnessGh.psm1 | body file read with replacement characters
+% run=pr-comment,pr-open
+< [Text.UTF8Encoding]::new($false, $true).GetString([IO.File]::ReadAllBytes($full))
+> [Text.UTF8Encoding]::new($false, $false).GetString([IO.File]::ReadAllBytes($full))
+@@ lib/HarnessGh.psm1 | body file path relative to the process directory
+% run=pr-comment,pr-open
+< $full = [IO.Path]::GetFullPath($Path, (Get-Location -PSProvider FileSystem).ProviderPath)
+> $full = [IO.Path]::GetFullPath($Path)
+@@ lib/HarnessGh.psm1 | byte order mark left in the body
+% run=pr-comment
+< $bodyText = $bodyText.TrimStart([char]0xFEFF)
+> $null = 0
+@@ lib/HarnessGh.psm1 | missing body file named as unreadable text
+% run=pr-comment
+< if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "-BodyFile (UTF-8 text) does not exist: $Path" }
+> $null = 0
+@@ lib/HarnessGh.psm1 | reply in another thread counts as the answer
+% run=shared
+< $_.ThreadId -and $_.ThreadId -eq $Item.ThreadId -and $_.Id -ne $Item.Id
+> $_.ThreadId -and $_.Id -ne $Item.Id
+@@ lib/HarnessGh.psm1 | second page of review threads not read
+% run=shared
+<         $after = $page.pageInfo.endCursor
+<     } while ($page.pageInfo.hasNextPage)
+<     $nodes.ToArray()
+>         $after = $page.pageInfo.endCursor
+>     } while ($false)
+>     $nodes.ToArray()
+@@ lib/HarnessGh.psm1 | second page of review edit times not read
+% run=shared
+<         $after = $page.pageInfo.endCursor
+<     } while ($page.pageInfo.hasNextPage)
+<     $edits
+>         $after = $page.pageInfo.endCursor
+>     } while ($false)
+>     $edits
+@@ lib/HarnessGh.psm1 | lock of a killed holder not taken over
+% run=shared
+< catch [System.Threading.AbandonedMutexException] { $got = $true;
+> catch [System.Threading.AbandonedMutexException] { $got = $false;
+@@ lib/maint.mjs | any role word in a marker accepted
+< role=(impl|review|orchestrator) kind=
+> role=([a-z]+) kind=
+# ===================================================== push and gitleaks
+@@ push.ps1 | gitleaks does not read merge commits
+< @('--no-ext-diff', '--no-textconv', '--diff-merges=first-parent')
+> @('--no-ext-diff', '--no-textconv')
+@@ ../hooks/pre-push.mjs | hook: gitleaks does not read merge commits
+% run=pre-push
+< "--no-ext-diff", "--no-textconv", "--diff-merges=first-parent"
+> "--no-ext-diff", "--no-textconv"
+@@ ../../.github/workflows/ci.yml | CI: the PR scan does not read merge commits
+% run=push
+< --log-opts="$BASE_SHA..$HEAD_SHA --no-ext-diff --no-textconv --diff-merges=first-parent"
+> --log-opts="$BASE_SHA..$HEAD_SHA --no-ext-diff --no-textconv"
+@@ ../../.github/workflows/ci.yml | CI: the push scan does not read merge commits
+% run=push
+< --log-opts="$BEFORE..$AFTER --no-ext-diff --no-textconv --diff-merges=first-parent"
+> --log-opts="$BEFORE..$AFTER --no-ext-diff --no-textconv"
+@@ ../lib/infra-paths.mjs | the gitleaks ignore file is not infrastructure
+% run=pr-merge
+< ".gitleaks.toml",
+<     ".gitleaksignore",
+> ".gitleaks.toml",
+@@ push.ps1 | branch name not scanned
+< Assert-PublicText $branch 'branch name'
+> $null = 0
+@@ push.ps1 | what is pushed is whatever HEAD is by then
+< Invoke-HarnessGit @('push', 'origin', "${headSha}:refs/heads/$branch") -Repo $Worktree | Out-Null
+> Invoke-HarnessGit @('push', 'origin', "HEAD:refs/heads/$branch") -Repo $Worktree | Out-Null
+@@ push.ps1 | only the first push URL checked
+< push = @('remote', 'get-url', '--push', '--all', 'origin')
+> push = @('remote', 'get-url', '--push', 'origin')
+@@ push.ps1 | only the first fetch URL checked
+< fetch = @('remote', 'get-url', '--all', 'origin')
+> fetch = @('remote', 'get-url', 'origin')
+@@ push.ps1 | fetch URL not checked
+< ; fetch = @('remote', 'get-url', '--all', 'origin') }
+>  }
+@@ push.ps1 | no URL at all accepted
+< if (-not $urls.Count -or @($urls | Where-Object { $_ -notmatch $want }).Count) {
+> if (@($urls | Where-Object { $_ -notmatch $want }).Count) {
+@@ push.ps1 | gitleaks failure without its own output
+< if ($scan.Code -ne 0) { throw (Format-GitleaksFailure $scan) }
+> if ($scan.Code -ne 0) { throw 'gitleaks failed, nothing is pushed' }
+@@ push.ps1 | any exit code 1 of gitleaks is a finding
+< if ($GitleaksRun.Code -eq 1 -and $said -match '(?<!no )leaks found') {
+> if ($GitleaksRun.Code -eq 1) {
+@@ push.ps1 | the words alone make a finding
+< if ($GitleaksRun.Code -eq 1 -and $said -match '(?<!no )leaks found') {
+> if ($said -match '(?<!no )leaks found') {
+@@ push.ps1 | colour codes of gitleaks left in the message
+< (($GitleaksRun.Out + "`n" + $GitleaksRun.Err) -replace '\x1b\[[0-9;]*m', '').Trim()
+> ($GitleaksRun.Out + "`n" + $GitleaksRun.Err).Trim()
+@@ push.ps1 | gitleaks output not cut
+< if ($said.Length -gt 4096) {
+> if ($false) {
+@@ push.ps1 | gitleaks output not redacted
+< '--no-banner', '--no-color', '--redact', '-v',
+> '--no-banner', '--no-color', '-v',

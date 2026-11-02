@@ -89,8 +89,9 @@ function gitleaksCheck(revArgs, cwd, env) {
     const want = fs.readFileSync(path.join(ROOT, ".gitleaks-version"), "utf8").trim();
     const wrong = versionErrors(run(bin, ["version"], env).stdout, want);
     if (wrong.length) return wrong;
-    // gitleaks runs git log -p itself; external diff and textconv drivers would rewrite the patches
-    const logOpts = [...revArgs, "--no-ext-diff", "--no-textconv"].join(" ");
+    // gitleaks runs git log -p itself; external diff and textconv drivers would rewrite the patches, and without
+    // first-parent diffs a merge commit shows no patch, so content that only the merge adds would not be scanned
+    const logOpts = [...revArgs, "--no-ext-diff", "--no-textconv", "--diff-merges=first-parent"].join(" ");
     const r = spawnSync(bin, ["git", "--no-banner", "--no-color", "--redact", "-v", `--log-opts=${logOpts}`, "."], { cwd, env, encoding: "utf8" });
     if (r.status === 0) return [];
     return ["gitleaks found possible secrets (redacted):", ...`${r.stdout}${r.stderr}`.trim().split("\n").map((l) => `  ${l}`)];
@@ -228,6 +229,18 @@ export function selfTest() {
         bad("a committer who is not the maintainer", "docs/f.md", "x\n", `docs(test): someone else${signed}`, other, [`--author=${MAINTAINER}`]);
         const leak = j("gh", "p_", "Zr8XcV2nQ7tLm4Kp9Ws6Yb3Hd5Fg1Jq0Ae2T");
         bad("gitleaks catches a credential", "src/g.txt", `auth = "${leak}"\n`, `docs(test): credential${signed}`);
+        // the credential is in the merge commit only: neither parent has it, so a plain git log -p shows nothing
+        const beforeMerge = repo.git(["rev-parse", "HEAD"]).trim();
+        repo.git(["checkout", "-q", "-b", "side", "HEAD~1"]);
+        commit("docs/side.md", "clean\n", `docs(test): side${signed}`);
+        repo.git(["checkout", "-q", "-"]);
+        repo.git(["merge", "-q", "--no-ff", "--no-commit", "side"]);
+        repo.write("src/m.txt", `auth = "${leak}"\n`);
+        repo.git(["add", "."]);
+        repo.git(["commit", "-q", "-m", "Merge branch 'side' into feat/ok"]);
+        push("a credential that only the merge commit adds", true, "HEAD:refs/heads/feat/ok");
+        repo.git(["reset", "-q", "--hard", beforeMerge]);
+        repo.git(["branch", "-q", "-D", "side"]);
         const allow = { HARNESS_ALLOW_TAG_PUSH: "1" };
         repo.git(["tag", "-a", "v0.0.1", "-m", "v0.0.1"]);
         push("an annotated tag with the switch", false, "refs/tags/v0.0.1", [], allow);

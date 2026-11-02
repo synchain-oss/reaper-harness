@@ -9,8 +9,10 @@
 #       check again; only "ready" is merged: squash, sha pinned to the checked head, explicit subject "<PR title> (#n)" and
 #       body (summary paragraph, blank line, the one sign-off line); the merge commit is read back (title, body, author)
 #   -After -Pr <n> -Worktree <path>
-#       read back the squash commit on origin/feature/v1, delete the remote sub-branch, remove exactly that worktree
-#       (not recursively, nothing derived from it) and the local branch
+#       read back the squash commit on origin/feature/v1 and compare before anything is deleted: the remote tip and the local
+#       tip (where they exist) must be the head of the PR that was merged, the worktree must have no changes and no untracked
+#       files. Any mismatch or failed command throws and nothing is deleted. Then delete the remote sub-branch, remove exactly that
+#       worktree (not recursively, nothing derived from it) and the local branch; the last line says what was there and what was not
 #   -SelfTest
 #       run offline on the recorded responses in fixtures/, with a counter-example for every criterion
 # The criteria are read from the checkout this script runs from, so that checkout must sit exactly on the freshly fetched
@@ -24,9 +26,11 @@
 #   { "waivers":          { "<pr>": [{ "head": "<sha40>", "by": "user", "red": 0, "important": 1, "deferred": false, "note": "..." }] },
 #     "approvals":        { "<pr>": [{ "head": "<sha40>", "by": "user", "note": "..." }] },
 #     "external-handled": { "<pr>": [{ "head": "<sha40>", "by": "user", "comments": [{ "id": "<comment id>", "updated_at": "<its updated_at when handled>" }], "note": "..." }] } }
-# waivers let a footer with red / important pass, and findings judged "will not fix" / "deferred" ("summaryHash": true also lets
-# a bot summary whose hash does not match the posted record pass); approvals approve a change to the infrastructure paths;
-# external-handled names external comments the user dealt with (bound to the comment's updated_at, an edit voids it).
+# waivers let a footer with red / important pass ("deferred": true, a JSON boolean, also lets severe findings that are not
+# handled pass, see below; "summaryHash": true, a JSON boolean, also lets a bot summary whose hash does not match the posted
+# record pass); approvals approve a change to the infrastructure paths; external-handled names external comments the user dealt
+# with (bound to the comment's updated_at, an edit voids it). More than one record of a kind for the same head is a failure
+# that names the file and the kind: which one was meant is the user's to say.
 # Trust model: a record binds a decision to one head and leaves a written trace; it is not authentication. "by" is a label,
 # anything that can write the file can write "user". So records are written only on the maintainer's explicit instruction,
 # and -Check / -Merge print every record they rely on. The file must live outside the repository and all of its worktrees
@@ -35,6 +39,11 @@
 # The bot summary is create-only: updated_at different from created_at is red; when the run log holds the review bot's
 # posted record (comment id and body sha256) the summary must match it, otherwise the check degrades to updated_at only and
 # says so in Warnings.
+# Disposition tables are read default-deny. In the level column only 建议, 总结 and 信息 are not severe; any other value is. A severe row
+# counts as handled only when its disposition starts with 已修, 修复 or 采纳 (markdown marks removed), holds no refusal word and has a
+# commit hash in that column or right of it; anything else, other words, an empty cell and a table without a disposition column
+# included, needs a user waiver. Every 【红旗】 and 【重要】 finding of a bot summary needs a row of that level in the disposition comments
+# that reference the summary's run: a shortfall is a failure that says how many rows are missing.
 
 [CmdletBinding()]
 param(
@@ -157,12 +166,18 @@ function Read-Records {
     [pscustomobject]@{ File = $(if ($Usable) { $Path } else { $null }); Waivers = @(& $pick 'waivers'); Approvals = @(& $pick 'approvals'); ExternalHandled = @(& $pick 'external-handled') }
 }
 
-<# A record by the user for this head: head must be a full 40 characters and equal, by must be user. #>
+<# The records by the user for this head: head must be a full 40 characters and equal, by must be user. #>
+function Get-HeadRecords {
+    param([object[]]$List, [string]$ForHead)
+    @(@($List) | Where-Object {
+            $_ -and [string](Get-HarnessProp $_ 'head') -eq $ForHead -and $ForHead -match '^[0-9a-f]{40}$' -and [string](Get-HarnessProp $_ 'by') -eq 'user'
+        })
+}
+
+<# The record of one kind for this head; more than one is a failure of the verdict, never decided here. #>
 function Get-HeadRecord {
     param([object[]]$List, [string]$ForHead)
-    @($List) | Where-Object {
-        $_ -and [string](Get-HarnessProp $_ 'head') -eq $ForHead -and $ForHead -match '^[0-9a-f]{40}$' -and [string](Get-HarnessProp $_ 'by') -eq 'user'
-    } | Select-Object -First 1
+    @(Get-HeadRecords -List $List -ForHead $ForHead) | Select-Object -First 1
 }
 
 <# A comment named in external-handled: same id, and the registered updated_at is the same moment as the comment's updated_at now. #>
@@ -280,12 +295,33 @@ function Get-DispositionRows {
 }
 
 <#
-  Red-flag / important findings that a disposition table judges "will not fix", "not adopted", "deferred", "not for now" or
-  "keep as is" (the decision words are Chinese: 不改 不采纳 挂账 暂不 维持, and the others in the pattern below): the whole row, for the user to decide.
-  The same finding is recognised by location + summary (markdown marks removed); the last disposition wins: a later "fixed"
-  with a commit hash no longer needs a waiver, a later "deferred" is listed again. A decision word anywhere in the
-  disposition column counts; "adopted" is not a refusal. The commit proof is looked for only in the disposition column and
-  the columns right of it, and must contain at least one a-f letter (comment or run ids are pure digits).
+  The level of a disposition row; the deferred findings and the per-run count share it. With a level column its value decides,
+  brackets or not: 红旗 and 重要 are those levels, only 建议 总结 信息 are not severe, every other value (another language, 高, an empty
+  cell) comes back as other and is read as severe. Without a level column the cells are scanned for 【红旗】 and 【重要】.
+  Returns 红旗, 重要, other or none.
+#>
+function Get-DispositionLevel {
+    param([Parameter(Mandatory)]$TableRow)
+    if ($TableRow.Cols -and $TableRow.Cols.ContainsKey('级别')) {
+        $at = $TableRow.Cols['级别']
+        $levelText = if ($at -lt $TableRow.Cells.Count) { $TableRow.Cells[$at] -replace '[【】\s]', '' } else { '' }
+        if ($levelText -cin '红旗', '重要') { return $levelText }
+        if ($levelText -cin '建议', '总结', '信息') { return 'none' }
+        return 'other'
+    }
+    foreach ($levelName in '红旗', '重要') {
+        if (@($TableRow.Cells | Where-Object { $_ -match "【$levelName】" }).Count) { return $levelName }
+    }
+    'none'
+}
+
+<#
+  Severe findings a disposition table does not show as handled: the whole row, for the user to decide. Default deny: a severe row
+  is handled only when the disposition column starts with 已修, 修复 or 采纳, holds no refusal word (不改 不采纳 挂账 暂不 维持 and the others in the
+  pattern below) and has a commit hash; other words, an empty cell and a table without a disposition column are not handled. The
+  same finding is recognised by location + summary (markdown marks removed); the last disposition wins: a later "fixed" with a
+  commit hash no longer needs a waiver, a later "deferred" is listed again. The commit proof is looked for only in the disposition
+  column and the columns right of it, and must contain at least one a-f letter (comment or run ids are pure digits).
 #>
 function Get-DeferredSevere {
     param([object[]]$Items)
@@ -301,26 +337,50 @@ function Get-DeferredSevere {
     $latest = @{}
     foreach ($entry in @($rounds | Sort-Object Round, Order)) {
         foreach ($row in @($entry.Rows)) {
+            if ((Get-DispositionLevel $row) -ceq 'none') { continue }
             $cell = { param($name) if ($row.Cols -and $row.Cols.ContainsKey($name) -and $row.Cols[$name] -lt $row.Cells.Count) { $row.Cells[$row.Cols[$name]] } else { $null } }
-            $level = & $cell '级别'
-            $severe = if ($level) { $level -match '红旗|重要' } else { @($row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0 }
-            if (-not $severe) { continue }
             $loc, $sum = (& $cell '位置'), (& $cell '摘要')
             # location + summary make one finding: two different findings at one location do not wipe each other out;
             # a row with a rewritten summary is not the same finding, "fixed" then cannot clear the old deferral - better to ask the user once more
             $key = (@($loc, $sum) | Where-Object { $_ }) -join ' | '
             if (-not $key) { $key = $row.Line }
             $at = if ($row.Cols -and $row.Cols.ContainsKey('处置') -and $row.Cols['处置'] -lt $row.Cells.Count) { $row.Cols['处置'] } else { -1 }
-            $decision = if ($at -ge 0) { $row.Cells[$at] } else { $row.Cells -join ' ' }
-            $proof = @($row.Cells | Select-Object -Skip ([Math]::Max($at, 0)) | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count
-            if (-not $decision -or $decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略') {
-                $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $true }
-            } elseif (($decision -match '已修|修复|已改|采纳') -and $proof) {
-                $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $false }
-            }
+            $decision = if ($at -ge 0) { $row.Cells[$at] } else { '' }
+            $proof = $at -ge 0 -and @($row.Cells | Select-Object -Skip $at | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count -gt 0
+            $refused = $decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略'
+            $handled = $decision -match '^(?:已修|修复|采纳)' -and -not $refused -and $proof
+            $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = -not $handled }
         }
     }
-    @($latest.Values | Where-Object Deferred | ForEach-Object Line)
+    # get_Values(): the keys are text from the table, a finding called "Values" would hide the dictionary's own member
+    @($latest.get_Values() | Where-Object Deferred | ForEach-Object Line)
+}
+
+<#
+  One row per finding: for every bot summary, the disposition comments that reference its run must hold at least as many rows of
+  红旗 and of 重要 as the summary lists findings of that level. A summary without a run link cannot be referenced, so its severe findings
+  are all missing. Returns one message per shortfall, saying how many rows are missing.
+#>
+function Get-DispositionShortfalls {
+    param([object[]]$Summaries, [object[]]$Items)
+    $rowsOfRun = @{}
+    foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' })) {
+        $m = Get-AgentMarker $i.Body
+        if (-not $m -or $m.Kind -ne 'disposition' -or -not $m.Extra.ContainsKey('bot-run')) { continue }
+        $referenced = [string]$m.Extra['bot-run']
+        $rowsOfRun[$referenced] = @($(if ($rowsOfRun.ContainsKey($referenced)) { $rowsOfRun[$referenced] })) + @(Get-DispositionRows $i.Body)
+    }
+    $problems = [System.Collections.Generic.List[string]]::new()
+    foreach ($botSummary in @($Summaries)) {
+        $runKey = [string]$botSummary.runId
+        $rows = @($(if ($runKey -and $rowsOfRun.ContainsKey($runKey)) { $rowsOfRun[$runKey] }))
+        foreach ($levelName in '红旗', '重要') {
+            $wanted = @(@(Get-HarnessProp $botSummary 'items') | Where-Object { $_ -and $_.level -ceq $levelName }).Count
+            $listed = @($rows | Where-Object { (Get-DispositionLevel $_) -ceq $levelName }).Count
+            if ($listed -lt $wanted) { $problems.Add("The dispositions of $(if ($runKey) { "run $runKey" } else { 'a bot summary without a run link' }) hold $listed 【$levelName】 row(s), the bot summary lists ${wanted}: $($wanted - $listed) missing") }
+        }
+    }
+    $problems.ToArray()
 }
 
 function Get-MergeVerdict {
@@ -343,6 +403,11 @@ function Get-MergeVerdict {
     if ($Facts.Clone.Dirty) { $fail.Add('The checkout this script runs from has uncommitted changes') }
     if (-not (Test-HooksPath -CheckoutRoot $Facts.Clone.Root -Value $Facts.Clone.HooksPath)) { $fail.Add("core.hooksPath is '$($Facts.Clone.HooksPath)', not scripts/hooks of this checkout: the commit and push guards are not active") }
     foreach ($problem in @($Facts.RecordsProblems)) { $fail.Add($problem) }
+    $recordKinds = [ordered]@{ waivers = $recs.Waivers; approvals = $recs.Approvals; 'external-handled' = $recs.ExternalHandled }
+    foreach ($recordKind in $recordKinds.get_Keys()) {
+        $sameHead = @(Get-HeadRecords -List $recordKinds[$recordKind] -ForHead $sha)
+        if ($sameHead.Count -gt 1) { $fail.Add("The records file $($recs.File) has $($sameHead.Count) records of kind $recordKind for head ${sha}: which one was meant is not guessed, keep one") }
+    }
 
     # 1. the PR itself: open, not a draft, base feature/v1, head a feat/ sub-branch of this repository, mergeable
     if ($pull.state -ne 'open' -or [bool](Get-HarnessProp $pull 'merged')) { $fail.Add('The PR is not open') }
@@ -353,6 +418,12 @@ function Get-MergeVerdict {
     if ($Facts.PrRef -ne $sha) { $fail.Add('The PR head fetched locally differs from the API (a push just now?)') }
     if ((Get-HarnessProp $pull 'mergeable') -ne $true -or (Get-HarnessProp $pull 'mergeable_state') -in @('dirty', 'draft')) {
         $fail.Add("GitHub reports the PR as not mergeable (mergeable=$(Get-HarnessProp $pull 'mergeable'), state=$(Get-HarnessProp $pull 'mergeable_state'))")
+    }
+
+    # the list of files stops at 3000 entries: a longer change could hide an infrastructure path from criterion 8
+    $changedFiles = Get-HarnessProp $pull 'changed_files'
+    if ($null -eq $changedFiles -or [int]$changedFiles -ne @($Facts.Files).Count) {
+        $fail.Add("GitHub reports changed_files=$changedFiles for the PR, the file list holds $(@($Facts.Files).Count): the infrastructure check would not see every path")
     }
 
     # 2. bot verdict: the newest summary reviewed the current head, its footer is usable, red = 0 and important = 0 (or a user waiver for this head)
@@ -367,8 +438,9 @@ function Get-MergeVerdict {
         }
         if (-not $bot.ok) { $fail.Add("The bot verdict is unusable: $($bot.reason)") }
         else {
-            $sameHead = @($Facts.State.summaries | Where-Object { $_.head -eq $sha -and $_.ok } | ForEach-Object { "$($_.red)/$($_.important)/$($_.suggest)" } | Select-Object -Unique)
-            if ($sameHead.Count -gt 1) { $fail.Add('The current head has several bot summaries whose footers contradict each other') }
+            # only red and important decide; a second run that counts the suggestions differently contradicts nothing
+            $sameHeadCounts = @($Facts.State.summaries | Where-Object { $_.head -eq $sha -and $_.ok } | ForEach-Object { "$($_.red)/$($_.important)" } | Select-Object -Unique)
+            if ($sameHeadCounts.Count -gt 1) { $fail.Add('The current head has several bot summaries whose footers contradict each other') }
             if ($bot.red -gt 0 -or $bot.important -gt 0) {
                 if ($waiver -and $bot.red -le [int](Get-HarnessProp $waiver 'red') -and $bot.important -le [int](Get-HarnessProp $waiver 'important')) {
                     $warn.Add("Footer red=$($bot.red) important=$($bot.important), a user waiver for this head exists: $(Get-HarnessProp $waiver 'note')")
@@ -425,6 +497,7 @@ function Get-MergeVerdict {
     foreach ($x in @($Facts.State.summaries)) {
         if ($x.runId -and @($Facts.State.dispositionRuns) -notcontains [string]$x.runId) { $fail.Add("The bot summary of run $($x.runId) has no disposition") }
     }
+    foreach ($gap in @(Get-DispositionShortfalls -Summaries @($Facts.State.summaries) -Items @($Facts.Items))) { $fail.Add($gap) }
 
     # 5. threads and responses: open threads = 0; every bot and human comment is answered (against the original's updated_at, by in-reply-to);
     #    external comments go to the user; the ones the user dealt with (an external-handled record for this head names them and they were not edited since) pass
@@ -445,8 +518,8 @@ function Get-MergeVerdict {
     }
     $deferred = @(Get-DeferredSevere $Facts.Items)
     if ($deferred.Count -gt 0) {
-        if ($waiver -and [bool](Get-HarnessProp $waiver 'deferred')) { & $rely 'waiver' $waiver }
-        else { & $need 'user' 'deferred' "$($deferred.Count) red-flag / important finding(s) are still judged will-not-fix or deferred in the newest disposition; only the user can waive them" }
+        if ($waiver -and (Get-HarnessProp $waiver 'deferred') -is [bool] -and (Get-HarnessProp $waiver 'deferred')) { & $rely 'waiver' $waiver }
+        else { & $need 'user' 'deferred' "$($deferred.Count) severe finding(s) are not shown as handled in the newest disposition (the 处置 cell must start with 已修, 修复 or 采纳, hold no refusal word and have a commit hash); only the user can waive them" }
     }
 
     # 6. CI: the required checks are success on the current head; pr-agent is not required, but when this head already has that
@@ -503,7 +576,8 @@ function Get-CheckExitCode {
 <# Squash message: subject "<PR title> (#n)", the summary paragraph, a blank line, the one sign-off line; all through the message rules of scripts/check-commits.mjs (which include the privacy rules). #>
 function New-MergeMessage {
     param([Parameter(Mandatory)]$PrData, [Parameter(Mandatory)][string]$Summary)
-    $text = $Summary.Trim()
+    # the read-back compares with LF line endings, and that is what GitHub stores
+    $text = ($Summary -replace "`r`n", "`n").Trim()
     if (-not $text) { throw 'The summary paragraph is empty' }
     $title = "$($PrData.title) (#$($PrData.number))"
     $full = "$title`n`n$text`n`n$(Get-HarnessSignoff)"
@@ -520,12 +594,16 @@ function Get-SquashProblems {
         [Parameter(Mandatory)][string]$CommitterEmail, [Parameter(Mandatory)][AllowEmptyString()][string]$Message
     )
     $problems = [System.Collections.Generic.List[string]]::new()
-    if ("$AuthorName <$AuthorEmail>" -cne "$(Get-HarnessMaintainer) <noreply@synchain.ca>") { $problems.Add("author is $AuthorName <$AuthorEmail>, not the maintainer") }
+    # GitHub writes the web-flow squash as the account's numbered noreply address; the allow list of scripts/check-commits.mjs is the only copy
+    if ($AuthorName -cne (Get-HarnessMaintainer) -or @(Get-HarnessSameAuthors) -cnotcontains $AuthorEmail.ToLowerInvariant()) { $problems.Add("author is $AuthorName <$AuthorEmail>, not the maintainer") }
     if ($AllowedCommitters -notcontains $CommitterEmail.ToLowerInvariant()) { $problems.Add("committer email $CommitterEmail is not allowed") }
-    foreach ($e in @(Get-MessageErrors $Message -ExactlyOne)) { $problems.Add($e) }
     if ((($Message -replace "`r`n", "`n") -split "`n")[0] -notmatch "\(#$Number\)$") { $problems.Add("the subject does not end with (#$Number)") }
-    $scan = Test-PublicText $Message
-    if (-not $scan.Ok) { $problems.Add("the message failed the public-text check: $($scan.Findings -join '; ')") }
+    # a message the tools refuse to read (a control character) is one more problem: after a merge the report must still name the commit
+    try {
+        foreach ($e in @(Get-MessageErrors $Message -ExactlyOne)) { $problems.Add($e) }
+        $scan = Test-PublicText $Message
+        if (-not $scan.Ok) { $problems.Add("the message failed the public-text check: $($scan.Findings -join '; ')") }
+    } catch { $problems.Add("the message could not be checked: $($_.Exception.Message)") }
     $problems.ToArray()
 }
 
@@ -543,6 +621,7 @@ function Invoke-MergeUnlocked {
     }
     $now = Get-HarnessApi "repos/$slug/pulls/$Number"
     if ($now.head.sha -ne $verdict.Head -or $pull.head.sha -ne $verdict.Head) { throw 'The PR head moved after the check; check again' }
+    if ($now.base.ref -cne 'feature/v1' -or $now.state -cne 'open') { throw "The PR changed after the check (base $($now.base.ref), state $($now.state)); check again" }
     if ([string]$now.title -cne [string]$pull.title) { throw 'The PR title changed after the squash message was built; check again' }
     foreach ($x in @($verdict.ReliedOn)) { Write-Output "User record relied on ($($x.Kind), verbatim, from $($x.File)): $(ConvertTo-HarnessJsonText $x.Record)" }
     # sha pins the checked head: a push in between makes GitHub refuse the merge (the approval records are valid for this head only too)
@@ -611,18 +690,37 @@ function Invoke-AfterUnlocked {
         $current = (Invoke-HarnessGit @('symbolic-ref', '--quiet', '--short', 'HEAD') -Repo $WorktreePath -AllowFail).Out.Trim()
         if ($current -ne $branch) { throw "$WorktreePath is on branch '$current', not on $branch of #${Number}: wrong path, nothing is cleaned up" }
     }
-    # delete the remote sub-branch (the pre-push hook lets feat/* deletions through), then remove the worktree and the local branch under the git lock
-    if ((Invoke-HarnessGit @('ls-remote', '--exit-code', '--heads', 'origin', $branch) -AllowFail).Code -eq 0) {
-        Invoke-HarnessGit @('push', 'origin', '--delete', "refs/heads/$branch") | Out-Null
+    # everything is compared before anything is deleted: a tip other than the merged head holds commits the merge does not have
+    $mergedHead = [string]$pull.head.sha
+    $branchRef = "refs/heads/$branch"
+    # ls-remote --exit-code: 0 found, 2 no such ref; anything else (no network, no access) says nothing about the branch
+    $remoteRead = Invoke-HarnessGit @('ls-remote', '--exit-code', '--heads', 'origin', $branchRef) -AllowFail
+    $remoteTip = $null
+    if ($remoteRead.Code -eq 0) {
+        $tipLine = [regex]::Match($remoteRead.Out, "(?m)^([0-9a-f]{40})\t$([regex]::Escape($branchRef))\r?$")
+        if (-not $tipLine.Success) { throw "git ls-remote did not name ${branchRef}, nothing is cleaned up: $($remoteRead.Out)" }
+        $remoteTip = $tipLine.Groups[1].Value
+    } elseif ($remoteRead.Code -ne 2) { throw "git ls-remote origin failed (exit code $($remoteRead.Code)), nothing is cleaned up: $($remoteRead.Err.Trim())" }
+    if ($remoteTip -and $remoteTip -cne $mergedHead) { throw "The remote $branch is at $remoteTip, not at the head $mergedHead of #${Number} that was merged: nothing is cleaned up" }
+    # rev-parse --verify --quiet: 0 found, 1 no such branch
+    $localRead = Invoke-HarnessGit @('rev-parse', '--verify', '--quiet', $branchRef) -AllowFail
+    $localTip = $null
+    if ($localRead.Code -eq 0) { $localTip = $localRead.Out.Trim() }
+    elseif ($localRead.Code -ne 1) { throw "git rev-parse failed (exit code $($localRead.Code)), nothing is cleaned up: $($localRead.Err.Trim())" }
+    if ($localTip -and $localTip -cne $mergedHead) { throw "The local $branch is at $localTip, not at the head $mergedHead of #${Number} that was merged: nothing is cleaned up" }
+    if ($present) {
+        $untidy = (Invoke-HarnessGit @('status', '--porcelain', '--untracked-files=normal') -Repo $WorktreePath).Out
+        if ($untidy.Trim()) { throw "$WorktreePath has changes or untracked files, nothing is cleaned up: $($untidy.Trim())" }
     }
+    # delete the remote sub-branch (the pre-push hook lets feat/* deletions through), then remove the worktree and the local branch under the git lock
+    if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
     Invoke-HarnessGitLocked {
-        # the plain remove: git itself refuses a worktree with modified or untracked files, no --force
+        # the plain remove: no --force, git itself still refuses a worktree that changed in the meantime
         if ($present) { Invoke-HarnessGit @('worktree', 'remove', $WorktreePath) | Out-Null }
-        if ((Invoke-HarnessGit @('rev-parse', '--verify', '--quiet', "refs/heads/$branch") -AllowFail).Code -eq 0) {
-            Invoke-HarnessGit @('branch', '-D', $branch) | Out-Null
-        }
+        if ($localTip) { Invoke-HarnessGit @('branch', '-D', $branch) | Out-Null }
     } | Out-Null
-    "#$Number merged as $($sha.Substring(0, 7)) '$($pull.title)'; read-back passed, remote sub-branch deleted, $(if ($present) { 'worktree and ' })local branch removed"
+    $what = { param($there, $doneWord) if ($there) { $doneWord } else { 'was already gone' } }
+    "#$Number merged as $($sha.Substring(0, 7)) '$($pull.title)'; read-back passed, remote sub-branch $(& $what $remoteTip 'deleted'), worktree $(& $what $present 'removed'), local branch $(& $what $localTip 'removed')"
 }
 
 <# -Merge and -After hold the merge lock for their whole run: one merge at a time on this machine. #>
@@ -634,6 +732,31 @@ function Invoke-Merge {
 function Invoke-After {
     param([int]$Number, [string]$WorktreePath)
     Invoke-HarnessMergeLocked { Invoke-AfterUnlocked -Number $Number -WorktreePath $WorktreePath }
+}
+
+# ---- the command line -----------------------------------------------------------------------
+
+$script:EntryCode = 0
+
+<# The arguments first, then the identity, and only then anything that reads or writes on GitHub. The exit code is left in $script:EntryCode. #>
+function Invoke-Entry {
+    [CmdletBinding()]
+    param([switch]$Check, [switch]$Merge, [switch]$After, [int]$Pr, [string]$SummaryFile, [string]$Worktree, [string]$WaiverFile)
+    $script:EntryCode = 0
+    if (@($Check, $Merge, $After | Where-Object { $_ }).Count -ne 1) { throw 'Usage: -Check | -Merge | -After, exactly one (or -SelfTest)' }
+    if ($Pr -le 0) { throw '-Pr <n> is required' }
+    Initialize-HarnessIdentity
+    if ($Check) {
+        $verdict = Invoke-MergeCheck -Number $Pr -RecordsPath $WaiverFile
+        Write-Output (ConvertTo-HarnessJsonText $verdict)
+        $script:EntryCode = Get-CheckExitCode $verdict.Code
+        return
+    }
+    if ($Merge) {
+        Invoke-Merge -Number $Pr -SummaryFile $SummaryFile -RecordsPath $WaiverFile
+        return
+    }
+    Invoke-After -Number $Pr -WorktreePath $Worktree
 }
 
 # ---- self-test ------------------------------------------------------------------------------
@@ -706,10 +829,17 @@ function Invoke-SelfTest {
         $log = [System.Collections.Generic.List[string]]::new()
         $pullState = @{ Nulls = 0 }
         $prFixture = $pull
-        $clone = @{ Head = $tipSha; Tip = $tipSha; Dirty = $false; HooksPath = 'scripts/hooks' }
+        $clone = @{ Head = $tipSha; Tip = $tipSha; Dirty = $false; HooksPath = 'scripts/hooks'; PrRef = $headSha }
+        $identity = @{ Login = 'DLsnows' }
+        $savedToken = $env:GH_TOKEN
+        # what the routes answer can be changed per case: the commands decide, not an edited copy of the facts
+        $answers = @{ Checks = Read-HarnessFixture 'check-runs.json'; Jobs = Read-HarnessFixture 'run-jobs.json'; PrNumber = 7 }
+        $wrongJobLog = "other-job`tstep`t2026-11-01T10:02:10.0000000Z harness-review-posted id=1 sha256=$('0' * 64)"
         $worktreeText = { "worktree $($fakeClone -replace '\\', '/')`nHEAD $tipSha`nbranch refs/heads/feature/v1`n`nworktree $($workDir -replace '\\', '/')/example`nHEAD $headSha`nbranch refs/heads/feat/example" }
         $lockLog = [System.Collections.Generic.List[string]]::new()
         $routes = [ordered]@{
+            '^gh auth token --user DLsnows$'   = { 'tok-selftest' }
+            '^gh api user --jq \.login$'       = { $identity.Login }
             'collaborators/DLsnows/permission' = { 'admin' }
             'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
             'pulls/7/files'                    = { $prFiles }
@@ -722,15 +852,20 @@ function Invoke-SelfTest {
             'issues/7/comments'                = { Read-HarnessFixture 'issue-comments.json' }
             'api -X POST graphql'              = {
                 param($argv)
-                if ((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json).query -notmatch 'reviews\(') { return Read-HarnessFixture 'threads.json' }
+                $request = Get-Content -Raw ($argv[-1]) | ConvertFrom-Json
+                if ($request.variables.number -ne $answers.PrNumber) { return @{ Code = 1; Out = ''; Err = "GraphQL asked about PR $($request.variables.number)" } }
+                if ($request.query -notmatch 'reviews\(') { return Read-HarnessFixture 'threads.json' }
                 Read-HarnessFixture 'review-edits.json'
             }
-            'actions/runs/\d+/jobs'            = { Read-HarnessFixture 'run-jobs.json' }
-            'actions/runs/\d+$'                = { Read-HarnessFixture 'run.json' }
-            '^gh run view \d+ --repo \S+ --log( --job \d+)?$' = { $runLog.Text }
-            'check-runs'                       = { Read-HarnessFixture 'check-runs.json' }
+            "actions/runs\?head_sha=$headSha&event=pull_request" = { Read-HarnessFixture 'pr-runs.json' }
+            'actions/runs/5000000001/jobs'     = { $answers.Jobs }
+            'actions/runs/5000000001$'         = { Read-HarnessFixture 'run.json' }
+            '^gh run view 5000000001 --repo \S+ --log --job 5000000011$' = { $runLog.Text }
+            # the log of another job, or of the whole run, holds a record that does not match: reading it is a failure
+            '^gh run view 5000000001 --repo \S+ --log( --job \d+)?$' = { $wrongJobLog }
+            "commits/$headSha/check-runs"      = { $answers.Checks }
             '^git .* fetch '                   = { '' }
-            '^git .* rev-parse refs/remotes/origin/pr/7' = { $headSha }
+            '^git .* rev-parse refs/remotes/origin/pr/7' = { $clone.PrRef }
             '^git .* rev-parse HEAD$'          = { $clone.Head }
             '^git .* rev-parse origin/feature/v1$' = { $clone.Tip }
             '^git .* status --porcelain$'      = { $(if ($clone.Dirty) { ' M x' } else { '' }) }
@@ -741,7 +876,10 @@ function Invoke-SelfTest {
         Set-HarnessLockImpl { param($name, $block) $lockLog.Add($name); & $block }
         $MergeablePoll.Seconds = 0
 
-        $base = Get-MergeFacts -Number 7 -RecordsPath $recordsFile
+        $baseError = $null
+        try { $base = Get-MergeFacts -Number 7 -RecordsPath $recordsFile } catch { $baseError = $_.Exception.Message }
+        Add-HarnessCase $cases 'the facts of a clean PR can be read' $false ([bool]$baseError)
+        if ($baseError) { throw $baseError }
         $ready = Get-MergeVerdict $base
         Add-HarnessCase $cases 'a clean PR is ready' $false ($ready.Code -ne 'ready')
         if ($ready.Code -ne 'ready') { [Console]::Error.WriteLine((ConvertTo-HarnessJsonText $ready)) }
@@ -766,6 +904,60 @@ function Invoke-SelfTest {
         $clone.HooksPath = 'scripts/hooks'
         Add-HarnessCase $cases 'facts: core.hooksPath of the checkout is read, another directory is not-ready' $true ($hooksOff.Code -eq 'not-ready' -and @($hooksOff.Failures | Where-Object { $_ -match "core\.hooksPath is '\.git/hooks'" }).Count -eq 1)
         Add-HarnessCase $cases 'facts: core.hooksPath written as the absolute path of this checkout is ready' $false ($hooksAbsolute.Code -ne 'ready')
+
+        # the facts layer: the answers of the commands decide (the routes change, not a copy of the facts)
+        $factsVerdict = { Get-MergeVerdict (Get-MergeFacts -Number 7) }
+        $failedWith = { param($r, $word) $r.Code -eq 'not-ready' -and @($r.Failures | Where-Object { $_ -match $word }).Count -ge 1 }
+        $clone.Dirty = $true
+        $routeDirty = & $factsVerdict
+        $clone.Dirty = $false
+        Add-HarnessCase $cases 'facts: git status of the checkout reports a change' $true (& $failedWith $routeDirty 'uncommitted changes')
+        $clone.Head = 'd' * 40
+        $routeHead = & $factsVerdict
+        $clone.Head = $tipSha
+        Add-HarnessCase $cases 'facts: HEAD of the checkout is not the fetched feature line' $true (& $failedWith $routeHead 'not on the freshly fetched')
+        $clone.Tip = 'e' * 40
+        $routeTip = & $factsVerdict
+        $clone.Tip = $tipSha
+        Add-HarnessCase $cases 'facts: the fetched feature line moved on' $true (& $failedWith $routeTip 'not on the freshly fetched')
+        $clone.PrRef = 'b' * 40
+        $routePrRef = & $factsVerdict
+        $clone.PrRef = $headSha
+        Add-HarnessCase $cases 'facts: the fetched ref of the PR differs from the API head' $true (& $failedWith $routePrRef 'fetched locally differs')
+        $savedChecks = $answers.Checks
+        $answers.Checks = Copy-HarnessObject $savedChecks
+        ($answers.Checks.check_runs | Where-Object name -eq 'harness-gate').conclusion = 'failure'
+        $routeFailed = & $factsVerdict
+        Add-HarnessCase $cases 'facts: a required check run that failed' $true (& $failedWith $routeFailed 'harness-gate is not success')
+        # the real shape of a failed PR run and a later dispatch on the same head: the dispatch has the bigger id and proves nothing
+        $answers.Checks = Copy-HarnessObject $savedChecks
+        ($answers.Checks.check_runs | Where-Object name -eq 'branch-gate').conclusion = 'failure'
+        $answers.Checks.check_runs = @($answers.Checks.check_runs) + @([pscustomobject]@{ id = 999; name = 'branch-gate'; status = 'completed'; conclusion = 'success'; head_sha = $headSha; details_url = 'https://github.com/synchain-oss/reaper-harness/actions/runs/5000000099/job/5000000991' })
+        $routeDispatch = & $factsVerdict
+        Add-HarnessCase $cases 'facts: a failed PR run with a successful dispatch of a bigger id on the same head is not success' $true (& $failedWith $routeDispatch 'branch-gate is not success')
+        $answers.Checks = $savedChecks
+        $goodRecord = $runLog.Text
+        $staleRecord = "claude-pr-review`tPost the review summary`t2026-11-01T10:01:10.0000000Z harness-review-posted id=1 sha256=$('0' * 64)"
+        $runLog.Text = "$staleRecord`n$goodRecord"
+        $routeLastGood = & $factsVerdict
+        $runLog.Text = "$goodRecord`n$staleRecord"
+        $routeLastBad = & $factsVerdict
+        $runLog.Text = $goodRecord
+        Add-HarnessCase $cases 'facts: two posted records in the log, the last one matches' $false ($routeLastGood.Code -ne 'ready')
+        Add-HarnessCase $cases 'facts: two posted records in the log, the last one does not match' $true (& $failedWith $routeLastBad 'posted record')
+        # a job of the run listed first: the log must still be the one of the review bot's job
+        $savedJobs = $answers.Jobs
+        $answers.Jobs = Copy-HarnessObject $savedJobs
+        $answers.Jobs.jobs = @([pscustomobject]@{ id = 5000000099; name = 'another-job'; status = 'completed'; conclusion = 'success'; head_sha = $headSha }) + @($answers.Jobs.jobs)
+        $log.Clear()
+        $routeDecoy = & $factsVerdict
+        $answers.Jobs = $savedJobs
+        Add-HarnessCase $cases 'facts: the log is read for the job of the review bot, not for the first job of the run' $false ($routeDecoy.Code -ne 'ready' -or -not @($log | Where-Object { $_ -match '--log --job 5000000011$' }).Count)
+        $answers.Jobs = Copy-HarnessObject $savedJobs
+        ($answers.Jobs.jobs | Where-Object name -eq 'claude-pr-review').conclusion = 'failure'
+        $routeJobFailed = & $factsVerdict
+        $answers.Jobs = $savedJobs
+        Add-HarnessCase $cases 'facts: the job of the review bot did not succeed' $true (& $failedWith $routeJobFailed 'job of the bot run did not succeed')
 
         Set-HarnessFake (New-HarnessFake -Routes ([ordered]@{}))
         $nameless =Read-Records -Number 7 -Path $null -Usable $true
@@ -835,6 +1027,9 @@ function Invoke-SelfTest {
         & $bad 'footer red=1' { param($f) $f.State.summary.red = 1 } 'not-ready' (& $failure 'Footer red=1')
         & $bad 'the bot verdict is unusable' { param($f) $f.State.summary.ok = $false; $f.State.summary.reason = 'more than one footer line' } 'not-ready' (& $failure 'unusable')
         & $bad 'two summaries of the same head with contradicting footers' { param($f) $x = Copy-HarnessObject $f.State.summaries[-1]; $x.important = 2; $f.State.summaries = @($f.State.summaries) + @($x) } 'not-ready' (& $failure 'contradict')
+        & $bad 'two summaries of the same head that differ only in the suggestions contradict nothing' { param($f) $x = Copy-HarnessObject $f.State.summaries[-1]; $x.suggest = 5; $f.State.summaries = @($f.State.summaries) + @($x) } 'ready'
+        & $bad 'GitHub reports more changed files than the list holds' { param($f) $f.Pull.changed_files = 3001 } 'not-ready' (& $failure 'changed_files=3001')
+        & $bad 'GitHub does not report changed_files at all' { param($f) $f.Pull.PSObject.Properties.Remove('changed_files') } 'not-ready' (& $failure 'changed_files= for the PR')
         & $bad 'the summary has no run link' { param($f) $f.State.summary.runId = $null } 'not-ready' (& $failure 'no run link')
         & $bad 'the run cannot be fetched' { param($f) $f.Run = $null } 'not-ready' (& $failure 'cannot be fetched')
         & $bad 'the run link points at another workflow' { param($f) $f.Run.path = '.github/workflows/compliance.yml' } 'not-ready' (& $failure 'not the review workflow')
@@ -855,6 +1050,20 @@ function Invoke-SelfTest {
         & $bad 'hash differs, the user registered a hash waiver for this head: passes with a warning' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = & $hashWaiver $true } 'ready' { param($r) @($r.Warnings | Where-Object { $_ -match 'hash waiver' }).Count -eq 1 }
         & $bad 'hash differs, the hash waiver is the string "false": still red' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = & $hashWaiver 'false' }
         & $bad 'hash differs, the hash waiver is not by the user: still red' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = & $hashWaiver $true 'orchestrator' }
+        & $bad 'hash differs, the hash waiver is the boolean false: still red' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = & $hashWaiver $false }
+        $hashWaived = & $copy
+        $hashWaived.State.summary.sha256 = '0' * 64
+        $hashWaived.Records.Waivers = & $hashWaiver $true
+        $hashWaivedVerdict = Get-MergeVerdict $hashWaived
+        Add-HarnessCase $cases 'the verdict prints the hash waiver it relies on, verbatim' $false (-not ($hashWaivedVerdict.Code -eq 'ready' -and @($hashWaivedVerdict.ReliedOn | Where-Object { $_.Kind -eq 'waiver' -and $_.Record.note -eq 'user skips the hash check' }).Count -eq 1))
+        # the user's records: one of a kind per head, which one was meant is never guessed
+        $userRecord = { param($h = $headSha, $noteText = 'a record') [pscustomobject]@{ head = $h; by = 'user'; red = 0; important = 0; deferred = $false; note = $noteText; comments = @() } }
+        & $bad 'two waivers for this head' { param($f) $f.Records.Waivers = @((& $userRecord), (& $userRecord)) } 'not-ready' (& $failure 'has 2 records of kind waivers for head')
+        & $bad 'two approvals for this head' { param($f) $f.Records.Approvals = @((& $userRecord), (& $userRecord)) } 'not-ready' (& $failure 'has 2 records of kind approvals for head')
+        & $bad 'two external-handled records for this head' { param($f) $f.Records.ExternalHandled = @((& $userRecord), (& $userRecord)) } 'not-ready' (& $failure 'has 2 records of kind external-handled for head')
+        & $bad 'the message about two records names the file' { param($f) $f.Records.Waivers = @((& $userRecord), (& $userRecord)) } 'not-ready' (& $failure ([regex]::Escape($recordsFile)))
+        & $bad 'records of other heads do not count as a second record' { param($f) $f.Records.Waivers = @((& $userRecord), (& $userRecord ('a' * 40))) } 'ready'
+        & $bad 'a record not by the user does not count as a second record' { param($f) $other = & $userRecord; $other.by = 'orchestrator'; $f.Records.Waivers = @((& $userRecord), $other) } 'ready'
         # pr-agent check: required to have finished only when the head already has it (any conclusion)
         $prAgent = 'pr-agent-claude / pr-agent'
         & $bad 'pr-agent check has not finished' { param($f) $f.Checks[$prAgent] = [pscustomobject]@{ name = $prAgent; status = 'in_progress'; conclusion = $null } } 'not-ready' (& $failure 'has not finished')
@@ -875,6 +1084,13 @@ function Invoke-SelfTest {
         & $bad 'Request changes lifted by a later APPROVED of the same person' { param($f) & $reitem $f { param($a) $a.Reviews += & $review 777 'CHANGES_REQUESTED'; $a.Reviews += & $review 778 'APPROVED' '' '2026-11-01T11:30:00Z' } } 'ready'
         & $bad 'Request changes answered by in-reply-to' { param($f) & $reitem $f { param($a) $a.Reviews += & $review 777 'CHANGES_REQUESTED'; $a.Issue += & $reply 1000 '777' '2026-11-01T11:10:00Z' } } 'ready'
         & $bad 'an empty COMMENTED review with no inline comments has no response' { param($f) & $reitem $f { param($a) $a.Reviews += & $review 779 'COMMENTED' } } 'not-ready' (& $failure 'without a response')
+        $reviewBy = { param($a, $id, $state, $text, $login) $a.Reviews += & $review $id $state $text; $a.Reviews[-1].user.login = $login }
+        & $bad 'an APPROVED review of an outside account with a body goes to the user' { param($f) & $reitem $f { param($a) & $reviewBy $a 781 'APPROVED' 'Fine, but look at the naming.' 'someone' } } 'needs-user' { param($r) @($r.Needs | Where-Object Kind -eq 'external').Count -eq 1 }
+        & $bad 'a DISMISSED review of an outside account with a body goes to the user' { param($f) & $reitem $f { param($a) & $reviewBy $a 782 'DISMISSED' 'I take that back.' 'someone' } } 'needs-user' { param($r) @($r.Needs | Where-Object Kind -eq 'external').Count -eq 1 }
+        & $bad 'an APPROVED review of the maintainer with a body has to be answered' { param($f) & $reitem $f { param($a) & $reviewBy $a 783 'APPROVED' 'One more thing.' 'DLsnows' } } 'not-ready' (& $failure 'without a response')
+        & $bad 'a DISMISSED review of the maintainer with a body has to be answered' { param($f) & $reitem $f { param($a) & $reviewBy $a 784 'DISMISSED' 'One more thing.' 'DLsnows' } } 'not-ready' (& $failure 'without a response')
+        & $bad 'an APPROVED review with a body, answered by in-reply-to' { param($f) & $reitem $f { param($a) & $reviewBy $a 783 'APPROVED' 'One more thing.' 'DLsnows'; $a.Issue += & $reply 1000 '783' '2026-11-01T11:10:00Z' } } 'ready'
+        & $bad 'an APPROVED or DISMISSED review of an outside account with an empty body is left out' { param($f) & $reitem $f { param($a) & $reviewBy $a 785 'APPROVED' '' 'someone'; & $reviewBy $a 786 'DISMISSED' '' 'someone' } } 'ready'
         & $bad 'a review body answered by in-reply-to' { param($f) & $reitem $f { param($a) $a.Reviews += & $review 780 'COMMENTED' 'Check the naming.'; $a.Issue += & $reply 1000 '780' '2026-11-01T11:10:00Z' } } 'ready'
         & $bad 'a review body edited after our reply' { param($f) & $reitem $f { param($a) $a.Reviews += & $review 780 'COMMENTED' 'Check the naming.'; $a.Reviews[-1].updated_at = '2026-11-01T12:00:00Z'; $a.Issue += & $reply 1000 '780' '2026-11-01T11:10:00Z' } } 'not-ready' (& $failure 'without a response')
         $userInline = {
@@ -900,7 +1116,10 @@ function Invoke-SelfTest {
         & $bad 'a pr-agent comment answered later than its updated_at' { param($f) & $reitem $f { param($a) & $prAgentComment $a 1201; $a.Issue += & $reply 1202 '1201' '2026-11-01T11:10:00Z' } } 'ready'
         & $bad 'a pr-agent comment whose answer predates its updated_at' { param($f) & $reitem $f { param($a) & $prAgentComment $a 1201 '2026-11-01T11:20:00Z'; $a.Issue += & $reply 1202 '1201' '2026-11-01T11:10:00Z' } } 'not-ready' (& $failure 'without a response')
         & $bad 'the two pr-agent notices are exempt' { param($f) & $reitem $f { param($a) $a.Issue += & $person 1203 'github-actions[bot]' "<!-- pr-agent:review:full -->`n**[Persistent review]** updated to latest commit abc1234" '2026-11-01T11:00:00Z' '2026-11-01T11:00:00Z'; $a.Issue += & $person 1204 'github-actions[bot]' "Failed to generate PR review: timeout`n<!-- pr-agent:improve:summary -->" '2026-11-01T11:00:00Z' '2026-11-01T11:00:00Z' } } 'ready'
-        & $bad 'a pr-agent marker below the first 5 lines (a quote) is a plain bot comment' { param($f) & $reitem $f { param($a) $a.Issue += & $person 1205 'github-actions[bot]' "one`ntwo`nthree`nfour`nfive`n<!-- pr-agent:review:full -->`n## PR Reviewer Guide" '2026-11-01T11:00:00Z' '2026-11-01T11:00:00Z' } } 'ready'
+        & $bad 'a pr-agent marker below the first 5 lines (a quote) is a plain bot comment, and that has to be answered too' { param($f) & $reitem $f { param($a) $a.Issue += & $person 1205 'github-actions[bot]' "one`ntwo`nthree`nfour`nfive`n<!-- pr-agent:review:full -->`n## PR Reviewer Guide" '2026-11-01T11:00:00Z' '2026-11-01T11:00:00Z' } } 'not-ready' (& $failure 'without a response')
+        $deepseekText = "### DeepSeek PR review (``some-model``, manual run)`n`nLooks mostly fine."
+        & $bad 'the output of the manual review bot has to be answered' { param($f) & $reitem $f { param($a) $a.Issue += & $person 1206 'github-actions[bot]' $deepseekText '2026-11-01T11:00:00Z' '2026-11-01T11:00:00Z' } } 'not-ready' (& $failure 'without a response')
+        & $bad 'the output of the manual review bot, answered by in-reply-to' { param($f) & $reitem $f { param($a) $a.Issue += & $person 1206 'github-actions[bot]' $deepseekText '2026-11-01T11:00:00Z' '2026-11-01T11:00:00Z'; $a.Issue += & $reply 1207 '1206' '2026-11-01T11:10:00Z' } } 'ready'
         # external comments go to the user; external-handled binds head, by = user and the comment's updated_at
         $external = { param($a, $updated = '2026-11-01T11:00:00Z') $a.Issue += & $person 998 'someone' 'lgtm' '2026-11-01T11:00:00Z' $updated }
         $handledRecord = { param($h = $headSha, $by = 'user', $listed = @([pscustomobject]@{ id = '998'; updated_at = '2026-11-01T11:00:00Z' })) @([pscustomobject]@{ head = $h; by = $by; comments = $listed; note = 'replied' }) }
@@ -934,19 +1153,59 @@ function Invoke-SelfTest {
         & $bad 'the deferral has a user waiver for this head' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '不改'); $f.Records.Waivers = @([pscustomobject]@{ head = $headSha; by = 'user'; red = 0; important = 0; deferred = $true; note = 'ok' }) } 'ready'
         & $bad 'the waiver does not say deferred: true' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '不改'); $f.Records.Waivers = @([pscustomobject]@{ head = $headSha; by = 'user'; red = 0; important = 0; deferred = $false; note = 'ok' }) } 'needs-user'
         foreach ($word in '**不改**', '__挂账__', '`不采纳`', '不采纳', '暂不改', '维持', '搁置', '未采纳', '不处理', '延后', '不修复', '未修复') {
-            & $bad "an important finding with the decision '$word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "$word d62c5dc") } 'needs-user'
+            & $bad "an important finding with the decision '$word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "$word abc1234") } 'needs-user'
         }
         & $bad 'the decision column is empty' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '') } 'needs-user'
-        & $bad '"adopted" is not a refusal' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '已采纳 d62c5dc') } 'ready'
-        & $bad '"adopt" is not a refusal' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '采纳 d62c5dc') } 'ready'
+        & $bad '"adopt" with a commit is handled' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '采纳 abc1234') } 'ready'
+        & $bad '"fixed" with a commit is handled' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '修复 abc1234') } 'ready'
+        & $bad 'a word that is neither on the handled list nor a refusal is not handled' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '已处理 abc1234') } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
+        foreach ($word in '待修复', '计划修复', '已采纳', '已改', '将修复', '部分修复', 'fixed', '见下') {
+            & $bad "a severe row whose decision does not start with a handled word: '$word'" { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' "$word abc1234") } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
+        }
+        & $bad 'a handled word with a refusal in the same cell is not handled' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '采纳 abc1234，其余不改') } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
+        & $bad 'a handled word without a commit is not handled' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '采纳') } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
+        foreach ($odd in 'important', '高', '严重', '重要度', '', '红旗 0') {
+            & $bad "a level the table does not know is read as severe: '$odd'" { param($f) & $addRow $f 1 (& $row $odd 'a.mjs:1' 'x' '不改') } 'needs-user' { param($r) @($r.Deferred).Count -eq 1 }
+        }
+        foreach ($mild in '建议', '【建议】', '总结', '【总结】', '信息', '【信息】') {
+            & $bad "a level that is not severe needs nothing: '$mild'" { param($f) & $addRow $f 1 (& $row $mild 'a.mjs:1' 'x' '不改') } 'ready'
+        }
         & $bad 'level column says important without the brackets' { param($f) & $addRow $f 1 (& $row '重要' 'a.mjs:1' 'x' '不改') } 'needs-user'
         & $bad 'a red flag finding judged "will not fix"' { param($f) & $addRow $f 1 (& $row '【红旗】' 'a.mjs:1' 'x' '不改') } 'needs-user'
         & $bad 'a suggestion judged "will not fix" needs no waiver' { param($f) & $addRow $f 1 (& $row '【建议】' 'a.mjs:1' 'x' '不改') } 'ready'
-        & $bad 'deferred first, fixed later (with a commit): no waiver needed' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '挂账'); & $addRow $f 3 (& $row '【重要】' 'a.mjs:1' 'x' '已修 d62c5dc') } 'ready'
-        & $bad 'fixed first, deferred later: the waiver is needed' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '已修 d62c5dc'); & $addRow $f 3 (& $row '【重要】' 'a.mjs:1' 'x' '挂账') } 'needs-user'
-        & $bad 'two findings at one location: one deferred, the other (other summary) fixed: the deferral stays' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'A' '挂账'); & $addRow $f 3 (& $row '【重要】' 'a.mjs:1' 'B' '已修 d62c5dc') } 'needs-user'
+        & $bad 'deferred first, fixed later (with a commit): no waiver needed' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '挂账'); & $addRow $f 3 (& $row '【重要】' 'a.mjs:1' 'x' '已修 abc1234') } 'ready'
+        & $bad 'fixed first, deferred later: the waiver is needed' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '已修 abc1234'); & $addRow $f 3 (& $row '【重要】' 'a.mjs:1' 'x' '挂账') } 'needs-user'
+        & $bad 'two findings at one location: one deferred, the other (other summary) fixed: the deferral stays' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'A' '挂账'); & $addRow $f 3 (& $row '【重要】' 'a.mjs:1' 'B' '已修 abc1234') } 'needs-user'
         & $bad 'the commit proof sits left of the decision column: the waiver is still needed' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '挂账'); & $addRow $f 3 (& $row '【重要】' 'abc1234' 'x' '已修') } 'needs-user'
         & $bad 'the "fixed" row has only a pure-digit number: the waiver is still needed' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '挂账'); & $addRow $f 3 (& $row '【重要】' 'a.mjs:1' 'x' '已修 7000000101') } 'needs-user'
+        & $bad 'the deferred waiver is the string "false"' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '不改'); $f.Records.Waivers = @([pscustomobject]@{ head = $headSha; by = 'user'; red = 0; important = 0; deferred = 'false'; note = 'ok' }) } 'needs-user'
+        $deferWaived = & $copy
+        & $addRow $deferWaived 1 (& $row '【重要】' 'a.mjs:1' 'x' '不改')
+        $deferWaived.Records.Waivers = @([pscustomobject]@{ head = $headSha; by = 'user'; red = 0; important = 0; deferred = $true; note = 'user accepts the deferral' })
+        $deferWaivedVerdict = Get-MergeVerdict $deferWaived
+        Add-HarnessCase $cases 'the verdict prints the deferred waiver it relies on, verbatim' $false (-not ($deferWaivedVerdict.Code -eq 'ready' -and @($deferWaivedVerdict.ReliedOn | Where-Object { $_.Kind -eq 'waiver' -and $_.Record.note -eq 'user accepts the deferral' }).Count -eq 1))
+        # one row per finding, counted per run and per level
+        $withFindings = { param($f, $levels) $f.State.summaries[-1].items = @($levels | ForEach-Object { [pscustomobject]@{ level = $_; text = 'a finding' } }) }
+        $fixedRow = { param($level = '【重要】', $what = 'x') & $row $level 'a.mjs:1' $what '已修 abc1234' }
+        & $bad 'a red flag of the summary has no row' { param($f) & $withFindings $f @('红旗') } 'not-ready' (& $failure 'run 5000000001 hold 0 【红旗】 row\(s\), the bot summary lists 1: 1 missing')
+        & $bad 'an important finding of the summary has no row' { param($f) & $withFindings $f @('重要') } 'not-ready' (& $failure 'run 5000000001 hold 0 【重要】 row\(s\), the bot summary lists 1: 1 missing')
+        & $bad 'three important findings, one row' { param($f) & $withFindings $f @('重要', '重要', '重要'); & $addRow $f 1 (& $fixedRow) } 'not-ready' (& $failure 'hold 1 【重要】 row\(s\), the bot summary lists 3: 2 missing')
+        & $bad 'one important finding, one row: enough' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 (& $fixedRow) } 'ready'
+        & $bad 'the level without brackets counts as that level' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 (& $fixedRow '重要') } 'ready'
+        & $bad 'a row of the other severe level does not count' { param($f) & $withFindings $f @('红旗'); & $addRow $f 1 (& $fixedRow '【重要】') } 'not-ready' (& $failure 'hold 0 【红旗】 row')
+        & $bad 'a suggestion row does not count for an important finding' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 (& $fixedRow '【建议】') } 'not-ready' (& $failure 'hold 0 【重要】 row')
+        & $bad 'a level the count does not know does not count for an important finding' { param($f) & $withFindings $f @('重要'); & $addRow $f 1 (& $fixedRow '高') } 'not-ready' (& $failure 'hold 0 【重要】 row')
+        & $bad 'suggestions of the summary need no rows' { param($f) & $withFindings $f @('建议', '建议', '建议') } 'ready'
+        $otherRunDisposition = { param($f, $text) $first = @($f.Items | Where-Object { $_.Kind -eq 'agent' -and (Get-AgentMarker $_.Body) -and (Get-AgentMarker $_.Body).Kind -eq 'disposition' })[0]; $later = Copy-HarnessObject $first; $later.Id = '9000000199'; $later.Body = ($first.Body -replace 'bot-run=\d+', 'bot-run=4999999999') + "`n$text"; $f.Items = @($f.Items) + @($later) }
+        & $bad 'a row in the disposition of another run does not count' { param($f) & $withFindings $f @('重要'); & $otherRunDisposition $f (& $fixedRow) } 'not-ready' (& $failure 'run 5000000001 hold 0 【重要】 row')
+        $foreignDisposition = { param($f, $text, $itemKind) $first = @($f.Items | Where-Object { $_.Kind -eq 'agent' -and (Get-AgentMarker $_.Body) -and (Get-AgentMarker $_.Body).Kind -eq 'disposition' })[0]; $later = Copy-HarnessObject $first; $later.Id = '9000000198'; $later.Kind = $itemKind; $later.Body = "$($first.Body)`n$text"; $f.Items = @($f.Items) + @($later) }
+        & $bad 'a table of an outsider under the mark of a disposition does not count' { param($f) & $withFindings $f @('重要'); & $foreignDisposition $f (& $fixedRow) 'external' } 'not-ready' (& $failure 'run 5000000001 hold 0 【重要】 row')
+        & $bad 'a table of a bot under the mark of a disposition does not count' { param($f) & $withFindings $f @('重要'); & $foreignDisposition $f (& $fixedRow) 'bot' } 'not-ready' (& $failure 'run 5000000001 hold 0 【重要】 row')
+        & $bad 'an older summary is counted as well, against its own run' { param($f) $older = Copy-HarnessObject $f.State.summaries[-1]; $older.runId = '4999999999'; $older.head = 'a' * 40; $older.items = @([pscustomobject]@{ level = '红旗'; text = 'old finding' }); $f.State.summaries = @($older) + @($f.State.summaries); $f.State.dispositionRuns = @($f.State.dispositionRuns) + @('4999999999'); & $otherRunDisposition $f '| 【建议】 | a | b | 不改 |' } 'not-ready' (& $failure 'run 4999999999 hold 0 【红旗】 row')
+        & $bad 'a summary without a run link cannot be referenced: its important finding is missing' { param($f) & $withFindings $f @('重要'); $f.State.summaries[-1].runId = $null } 'not-ready' (& $failure 'a bot summary without a run link hold 0 【重要】 row\(s\), the bot summary lists 1: 1 missing')
+        # the waiver is compared with the footer, level by level
+        & $bad 'footer red=2, the waiver covers red=1' { param($f) $f.State.summary.red = 2; $f.Records.Waivers = @([pscustomobject]@{ head = $headSha; by = 'user'; red = 1; important = 0; deferred = $false; note = 'covers one' }) } 'not-ready' (& $failure 'Footer red=2')
+        & $bad 'footer red=1, the waiver covers red=1' { param($f) $f.State.summary.red = 1; $f.Records.Waivers = @([pscustomobject]@{ head = $headSha; by = 'user'; red = 1; important = 0; deferred = $false; note = 'covers it' }) } 'ready'
         & $bad '"fixed" without a commit: the waiver is still needed' { param($f) & $addRow $f 1 (& $row '【重要】' 'a.mjs:1' 'x' '挂账'); & $addRow $f 3 (& $row '【重要】' 'a.mjs:1' 'x' '已修') } 'needs-user'
 
         # Get-DeferredSevere on its own: which rows are one finding, which round wins, whose tables count
@@ -955,15 +1214,20 @@ function Invoke-SelfTest {
         $deferredCount = { param($itemList) @(Get-DeferredSevere -Items @($itemList)).Count }
         $deferredRow = & $row '【重要】' 'abcdef1' 'x' '挂账'
         $headerless = "| 【重要】 | thing one | 不改 |`n| 【重要】 | thing two | 已修 abc1234 |"
-        Add-HarnessCase $cases 'deferred findings: rows without a header and without location or summary are different findings' $true ((& $deferredCount (& $dispItem 1 $headerless)) -eq 1)
+        Add-HarnessCase $cases 'deferred findings: rows without a header are different findings, and without a disposition column none of them is handled' $true ((& $deferredCount (& $dispItem 1 $headerless)) -eq 2)
+        Add-HarnessCase $cases 'deferred findings: a table without a disposition column handles nothing' $true ((& $deferredCount (& $dispItem 1 "| 级别 | 位置 | 摘要 |`n|---|---|---|`n| 【重要】 | a.mjs:1 | 已修 abc1234 |")) -eq 1)
+        Add-HarnessCase $cases 'deferred findings: a row cut short before the disposition column handles nothing' $true ((& $deferredCount (& $dispItem 1 (& $tableText '| 【重要】 | a.mjs:1 |'))) -eq 1)
+        Add-HarnessCase $cases 'deferred findings: a later row with an unknown word replaces an earlier "fixed"' $true ((& $deferredCount @((& $dispItem 1 (& $tableText (& $row '【重要】' 'a.mjs:1' 'x' '已修 abc1234'))), (& $dispItem 3 (& $tableText (& $row '【重要】' 'a.mjs:1' 'x' '另议'))))) -eq 1)
+        # the keys are text from the table: a finding called Values must not hide the others behind the member of the same name
+        Add-HarnessCase $cases 'deferred findings: a summary called Values does not hide another finding' $true ((& $deferredCount (& $dispItem 1 (& $tableText @((& $row '【重要】' '' 'Values' '已修 abc1234'), (& $row '【重要】' 'b.mjs:2' 'y' '挂账'))))) -eq 1)
         Add-HarnessCase $cases 'deferred findings: the commit proof in the location column is no proof' $true ((& $deferredCount @((& $dispItem 1 (& $tableText $deferredRow)), (& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修'))))) -eq 1)
-        Add-HarnessCase $cases 'deferred findings: the commit proof in the decision column clears the deferral' $false ((& $deferredCount @((& $dispItem 1 (& $tableText $deferredRow)), (& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修 d62c5dc'))))) -ne 0)
-        Add-HarnessCase $cases 'deferred findings: a later round posted first still wins over an earlier round posted last' $false ((& $deferredCount @((& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修 d62c5dc'))), (& $dispItem 1 (& $tableText $deferredRow)))) -ne 0)
-        Add-HarnessCase $cases 'deferred findings: a deferral of a later round stays even when an earlier round was posted last' $true ((& $deferredCount @((& $dispItem 3 (& $tableText $deferredRow)), (& $dispItem 1 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修 d62c5dc'))))) -eq 1)
+        Add-HarnessCase $cases 'deferred findings: the commit proof in the decision column clears the deferral' $false ((& $deferredCount @((& $dispItem 1 (& $tableText $deferredRow)), (& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修 abc1234'))))) -ne 0)
+        Add-HarnessCase $cases 'deferred findings: a later round posted first still wins over an earlier round posted last' $false ((& $deferredCount @((& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修 abc1234'))), (& $dispItem 1 (& $tableText $deferredRow)))) -ne 0)
+        Add-HarnessCase $cases 'deferred findings: a deferral of a later round stays even when an earlier round was posted last' $true ((& $deferredCount @((& $dispItem 3 (& $tableText $deferredRow)), (& $dispItem 1 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修 abc1234'))))) -eq 1)
         Add-HarnessCase $cases 'deferred findings: a table in a comment that is not a disposition counts for nothing' $false ((& $deferredCount (& $dispItem 1 (& $tableText $deferredRow) 'note')) -ne 0)
-        Add-HarnessCase $cases 'deferred findings: a disposition table of a comment that is not ours cannot clear a deferral' $true ((& $deferredCount @((& $dispItem 1 (& $tableText $deferredRow)), (& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修 d62c5dc')) 'disposition' 'user'))) -eq 1)
+        Add-HarnessCase $cases 'deferred findings: a disposition table of a comment that is not ours cannot clear a deferral' $true ((& $deferredCount @((& $dispItem 1 (& $tableText $deferredRow)), (& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已修 abc1234')) 'disposition' 'user'))) -eq 1)
         Add-HarnessCase $cases 'deferred findings: emphasis marks inside the decision word do not hide it' $true ((& $deferredCount (& $dispItem 1 (& $tableText (& $row '【重要】' 'a.mjs:1' 'x' '不**改**'))) ) -eq 1)
-        Add-HarnessCase $cases 'deferred findings: emphasis marks inside "fixed" do not hide it either' $false ((& $deferredCount @((& $dispItem 1 (& $tableText $deferredRow)), (& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已**修** d62c5dc'))))) -ne 0)
+        Add-HarnessCase $cases 'deferred findings: emphasis marks inside "fixed" do not hide it either' $false ((& $deferredCount @((& $dispItem 1 (& $tableText $deferredRow)), (& $dispItem 3 (& $tableText (& $row '【重要】' 'abcdef1' 'x' '已**修** abc1234'))))) -ne 0)
         Add-HarnessCase $cases 'table cells lose their emphasis and code marks' $false ((Clear-MdCell '**a_b`c`**') -cne 'abc')
 
         # CI, texts, infrastructure
@@ -975,7 +1239,7 @@ function Invoke-SelfTest {
         & $bad 'a local path in one of our comments' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`nlog in C:" + '\Users\someone\x.log' } 'not-ready' (& $failure 'Our comment .* public-text')
         & $bad 'a personal needle in one of our comments' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`n$(Get-HarnessFakeNeedle)" } 'not-ready' (& $failure 'Our comment .* public-text')
         & $bad 'a task-card number in the PR body' { param($f) $f.Pull.body = $f.Pull.body -replace '## 做了什么', ('## R' + 'H-02') } 'not-ready' (& $failure 'public-text check')
-        $infraFile = { param($f, $name = 'scripts/review-bot.mjs', $previous = $null) $f.Files = @([pscustomobject]@{ filename = $name; status = $(if ($previous) { 'renamed' } else { 'modified' }); previous_filename = $previous }) }
+        $infraFile = { param($f, $name = 'scripts/review-bot.mjs', $previous = $null) $f.Files = @([pscustomobject]@{ filename = $name; status = $(if ($previous) { 'renamed' } else { 'modified' }); previous_filename = $previous }); $f.Pull.changed_files = 1 }
         & $bad 'a change to an infrastructure path goes to the user' { param($f) & $infraFile $f } 'needs-user' { param($r) @($r.Needs | Where-Object Kind -eq 'infra').Count -eq 1 -and $r.Infra.Count -eq 1 }
         & $bad 'a workflow renamed away still counts' { param($f) & $infraFile $f 'old/x.yml' '.github/workflows/x.yml' } 'needs-user' { param($r) $r.Infra.Count -ge 1 }
         & $bad 'a change to this maintainer directory goes to the user' { param($f) & $infraFile $f 'scripts/maintainer/pr-merge.ps1' } 'needs-user'
@@ -1012,7 +1276,7 @@ function Invoke-SelfTest {
         $touch = { param($names, $status = 'modified') @(Get-InfraTouches -Files @($names | ForEach-Object { [pscustomobject]@{ filename = $_; status = $status } })).Count }
         Add-HarnessCase $cases 'infrastructure list: workflows, hooks, shared libs, CLAUDE.md, the maintainer scripts' $true ((& $touch @('.github/workflows/x.yml', 'scripts/hooks/pre-push', 'scripts/lib/privacy-needles.mjs', 'CLAUDE.md', 'scripts/maintainer/pr-merge.ps1')) -eq 5)
         Add-HarnessCase $cases 'infrastructure list: the review bot and check scripts (new ones too)' $true ((& $touch @('scripts/review-bot.mjs', 'scripts/check-new.mjs') 'added') -eq 2)
-        Add-HarnessCase $cases 'infrastructure list: tool pins, bot settings and nested instruction files' $true ((& $touch @('.node-version', '.gitleaks.toml', '.pr_agent.toml', 'docs/CLAUDE.md', '.claude/settings.json', 'sub/AGENTS.md')) -eq 6)
+        Add-HarnessCase $cases 'infrastructure list: tool pins, bot settings and nested instruction files' $true ((& $touch @('.node-version', '.gitleaks.toml', '.gitleaksignore', '.pr_agent.toml', 'docs/CLAUDE.md', '.claude/settings.json', 'sub/AGENTS.md')) -eq 7)
         Add-HarnessCase $cases 'infrastructure list: sources and docs do not count' $false ((& $touch @('src/tool/x.ts', 'docs/a.md', 'scripts/check-x/y.mjs', 'tests/check-x.mjs')) -gt 0)
         Set-HarnessInfraModule (Join-Path $tmp 'no-such-infra-paths.mjs')
         Add-HarnessCase $cases 'infrastructure list unavailable: no verdict, never a pass' $true (Test-Throws { Get-MergeVerdict $base })
@@ -1035,7 +1299,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'deferred findings: a refusal in a table with extra columns is found' $true ((& $deferredCount (& $dispItem 1 ($wideHeader + (& $wideRow '【重要】' '不改' '设计如此')))) -eq 1)
         Add-HarnessCase $cases 'deferred findings: the level comes from the level column, not from a word in another column' $false ((& $deferredCount (& $dispItem 1 ($wideHeader + (& $wideRow '【建议】' '不改' '设计如此' '非【重要】')))) -ne 0)
         Add-HarnessCase $cases 'deferred findings: a fix with the commit in a column right of the decision clears the refusal' $false (
-            (& $deferredCount @((& $dispItem 1 ($wideHeader + (& $wideRow '【重要】' '不改' '设计如此'))), (& $dispItem 3 ($wideHeader + (& $wideRow '【重要】' '已修' 'd62c5dc'))))) -ne 0)
+            (& $deferredCount @((& $dispItem 1 ($wideHeader + (& $wideRow '【重要】' '不改' '设计如此'))), (& $dispItem 3 ($wideHeader + (& $wideRow '【重要】' '已修' 'abc1234'))))) -ne 0)
         Add-HarnessCase $cases 'deferred findings: a fix whose commit is missing leaves the refusal' $true (
             (& $deferredCount @((& $dispItem 1 ($wideHeader + (& $wideRow '【重要】' '不改' '设计如此'))), (& $dispItem 3 ($wideHeader + (& $wideRow '【重要】' '已修' '见上'))))) -eq 1)
 
@@ -1047,9 +1311,23 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases 'squash message: the summary carries an AI session trailer' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ("x`n`nCla" + 'ude-Session: https://example.invalid/s') }) -match 'AI attribution trailers are not allowed')
         Add-HarnessCase $cases 'squash message: the summary is empty' $true (Test-Throws { New-MergeMessage -PrData $pull -Summary '  ' })
         Add-HarnessCase $cases 'squash message: a local path in the summary' $true (Test-Throws { New-MergeMessage -PrData $pull -Summary ('see C:' + '\Users\someone\x') })
+        $escape = [string][char]27
+        Add-HarnessCase $cases 'squash message: a local path split by an escape character is refused, the rules must not read around it' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ('see C:' + $escape + '\Users\someone\x') }) -match 'control character U\+001B')
+        $needleText = Get-HarnessFakeNeedle
+        Add-HarnessCase $cases 'squash message: a personal needle split by an escape character is refused' $true ((Get-ThrownMessage { New-MergeMessage -PrData $pull -Summary ($needleText.Substring(0, 5) + $escape + $needleText.Substring(5)) }) -match 'control character U\+001B')
+        Add-HarnessCase $cases 'squash message: an escape character in the PR title is refused' $true ((Get-ThrownMessage { $titled = Copy-HarnessObject $pull; $titled.title = "feat(x): a$($escape)b"; New-MergeMessage -PrData $titled -Summary 'x' }) -match 'control character U\+001B')
+        $crlfMessage = New-MergeMessage -PrData $pull -Summary "Line one.`r`nLine two.`r`n"
+        Add-HarnessCase $cases 'squash message: CRLF in the summary becomes LF' $false ($crlfMessage.Body -cnotmatch "^Line one\.`nLine two\.`n`nSigned-off-by: ")
         $squashOk = "feat(example): add the example module (#7)`n`nAdds it.`n`n$(Get-HarnessSignoff)"
-        $squashFor = { param($text) (@(Get-SquashProblems -Number '7' -AuthorName 'DLsnows' -AuthorEmail 'noreply@synchain.ca' -CommitterEmail 'noreply@github.com' -Message $text)) -join ' | ' }
+        # the shape GitHub really writes for a squash: the numbered noreply address of the account, committer the web flow
+        $squashAuthor = '140901583+DLsnows@users.noreply.github.com'
+        $squashFor = { param($text, $authorMail = $squashAuthor, $authorLabel = 'DLsnows') try { (@(Get-SquashProblems -Number '7' -AuthorName $authorLabel -AuthorEmail $authorMail -CommitterEmail 'noreply@github.com' -Message $text)) -join ' | ' } catch { "threw: $($_.Exception.Message)" } }
         Add-HarnessCase $cases 'squash commit: a clean message has no problem' $false ((& $squashFor $squashOk) -ne '')
+        Add-HarnessCase $cases 'squash commit: the local identity of the maintainer is on the list too' $false ((& $squashFor $squashOk 'noreply@synchain.ca') -ne '')
+        Add-HarnessCase $cases 'squash commit: the author email is compared without regard to case' $false ((& $squashFor $squashOk $squashAuthor.ToLowerInvariant()) -ne '')
+        Add-HarnessCase $cases 'squash commit: another author email' $true ((& $squashFor $squashOk 'someone@example.com') -match 'author is DLsnows <someone@example\.com>')
+        Add-HarnessCase $cases 'squash commit: the right email under another name' $true ((& $squashFor $squashOk $squashAuthor 'someone-else') -match 'author is someone-else')
+        Add-HarnessCase $cases 'squash commit: a control character in the merged message is one more problem, not a crash' $true ((& $squashFor "feat(example): add (#7)`n`nAd$([char]27)ds it.`n`n$(Get-HarnessSignoff)") -match 'could not be checked: .*control character')
         Add-HarnessCase $cases 'squash commit: a local path in the merged message is found by the public-text check' $true ((& $squashFor ("feat(example): add the example module (#7)`n`nsee C:" + '\Users\someone\x' + "`n`n$(Get-HarnessSignoff)")) -match 'failed the public-text check')
         $badTitle = Copy-HarnessObject $pull
         $badTitle.title = 'Add the example module'
@@ -1057,7 +1335,7 @@ function Invoke-SelfTest {
         $summaryPath = Join-Path $tmp 'summary.txt'
         Set-Content -LiteralPath $summaryPath -Value 'Adds the example module.' -Encoding utf8NoBOM
         $put = [System.Collections.Generic.List[object]]::new()
-        $readback = @{ Mode = ''; Author = 'DLsnows'; AuthorEmail = 'noreply@synchain.ca'; CommitterEmail = 'noreply@github.com' }
+        $readback = @{ Mode = ''; Author = 'DLsnows'; AuthorEmail = '140901583+DLsnows@users.noreply.github.com'; CommitterEmail = 'noreply@github.com' }
         $putMode = @{ Refuse = $false }
         $routes.Insert(0, 'api -X PUT \S+/pulls/7/merge --input', {
                 param($argv)
@@ -1078,7 +1356,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases '-Check takes the git lock, not the merge lock' $false ($lockLog -contains 'merge' -or -not ($lockLog -contains 'git'))
         $lockLog.Clear()
         $log.Clear()
-        $done = Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile
+        $done = try { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile } catch { "threw: $($_.Exception.Message)" }
         Add-HarnessCase $cases '-Merge holds the merge lock for its whole run (merge first, then git)' $false (-not ($lockLog.Count -ge 2 -and $lockLog[0] -eq 'merge' -and $lockLog -contains 'git'))
         $sent = $put[-1]
         Add-HarnessCase $cases '-Merge: squash, sha = the checked head, subject (#7), the body ends with the one sign-off' $false (-not (
@@ -1087,6 +1365,9 @@ function Invoke-SelfTest {
         $putAt = @(0..($log.Count - 1) | Where-Object { $log[$_] -match 'X PUT \S+/pulls/7/merge' })
         $readAt = @(0..($log.Count - 1) | Where-Object { $log[$_] -match 'api repos/\S+/commits/f{40}$' })
         Add-HarnessCase $cases '-Merge: one merge request, and the merge commit is read back after it' $false (-not ($putAt.Count -eq 1 -and $readAt.Count -eq 1 -and $readAt[0] -gt $putAt[0]))
+        $crlfSummary = Join-Path $tmp 'crlf.txt'
+        [IO.File]::WriteAllText($crlfSummary, "Line one.`r`nLine two.`r`n", [Text.UTF8Encoding]::new($false))
+        Add-HarnessCase $cases '-Merge: a summary file with CRLF passes the read-back' $false ([bool](& $messageOf { Invoke-Merge -Number 7 -SummaryFile $crlfSummary -RecordsPath $recordsFile }))
         $n = $put.Count
         foreach ($mode in 'title', 'body') {
             $readback.Mode = $mode
@@ -1110,11 +1391,20 @@ function Invoke-SelfTest {
         $selfSigned = Join-Path $tmp 'signed.txt'
         Set-Content -LiteralPath $selfSigned -Value "Adds it.`n`n$(Get-HarnessSignoff)" -Encoding utf8NoBOM
         Add-HarnessCase $cases '-Merge: a summary that carries its own Signed-off-by is refused before anything is sent' $true ((Test-Throws { Invoke-Merge -Number 7 -SummaryFile $selfSigned -RecordsPath $recordsFile }) -and $put.Count -eq $n)
+        $escaped = Join-Path $tmp 'escaped.txt'
+        [IO.File]::WriteAllText($escaped, ('see C:' + $escape + '\Users\someone\x'), [Text.UTF8Encoding]::new($false))
+        Add-HarnessCase $cases '-Merge: a summary with a control character is refused before anything is sent' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $escaped -RecordsPath $recordsFile }) -match 'control character') -and $put.Count -eq $n)
         $titleRoutes = $routes
         $moved = @{ Seen = 0 }
         $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge 3) { $p.title = "$($p.title) (edited)" }; $p }
         Set-HarnessFake (New-HarnessFake -Routes $titleRoutes -Log $log)
         Add-HarnessCase $cases '-Merge: the PR title changed after the squash message was built' $true ((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'title changed' -and $put.Count -eq $n)
+        $moved.Seen = 0
+        $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge 3) { $p.base.ref = 'dev' }; $p }
+        Add-HarnessCase $cases '-Merge: the base of the PR changed right before the merge request' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'changed after the check \(base dev') -and $put.Count -eq $n)
+        $moved.Seen = 0
+        $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge 3) { $p.state = 'closed' }; $p }
+        Add-HarnessCase $cases '-Merge: the PR was closed right before the merge request' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'changed after the check \(base feature/v1, state closed') -and $put.Count -eq $n)
         $moved.Seen = -100
         $titleRoutes['pulls/7$'] = { $moved.Seen++; $p = Copy-HarnessObject $prFixture; if ($moved.Seen -ge -97) { $p.head.sha = 'a' * 40 }; $p }
         Add-HarnessCase $cases '-Merge: the PR head moved after the check' $true (((& $messageOf { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile }) -match 'head moved|Cannot merge') -and $put.Count -eq $n)
@@ -1129,6 +1419,8 @@ function Invoke-SelfTest {
         # an infrastructure PR is only merged with the user's approval of this very head
         $savedPrFiles = $prFiles
         $prFiles = @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' })
+        $savedChanged = $prFixture.changed_files
+        $prFixture.changed_files = 1
         $n = $put.Count
         Add-HarnessCase $cases '-Merge: an infrastructure PR without an approval record is not merged' $true ((Test-Throws { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile | Out-Null }) -and $put.Count -eq $n)
         Set-Content -LiteralPath $recordsFile -Value (ConvertTo-Json -Depth 10 @{ approvals = @{ '7' = @(@{ head = 'a' * 40; by = 'user'; note = 'approved H' }) } })
@@ -1140,14 +1432,86 @@ function Invoke-SelfTest {
         $prFixture.mergeable_state = 'dirty'
         Add-HarnessCase $cases '-Merge: not ready, an approval record does not help' $true ((Test-Throws { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile | Out-Null }) -and $put.Count -eq $n + 1)
         $prFixture.mergeable_state = 'clean'
+        $prFixture.changed_files = $savedChanged
         $prFiles = $savedPrFiles
         Set-Content -LiteralPath $recordsFile -Value '{}'
+
+        # a PR other than #7: the number comes from the arguments everywhere
+        $otherPull = Copy-HarnessObject $pull
+        $otherPull.number = 42
+        $otherRoutes = [ordered]@{}
+        foreach ($routeKey in $routes.get_Keys()) { $otherRoutes[($routeKey -replace 'pulls/7', 'pulls/42' -replace 'issues/7', 'issues/42' -replace 'origin/pr/7', 'origin/pr/42')] = $routes[$routeKey] }
+        $otherRoutes['pulls/42$'] = { $otherPull }
+        Set-HarnessFake (New-HarnessFake -Routes $otherRoutes -Log $log)
+        $answers.PrNumber = 42
+        $log.Clear()
+        $n = $put.Count
+        $otherDone = & $messageOf { $otherLine = Invoke-Merge -Number 42 -SummaryFile $summaryPath -RecordsPath $recordsFile; if ($otherLine -notmatch 'Merged #42') { throw "unexpected: $otherLine" } }
+        $answers.PrNumber = 7
+        Set-HarnessFake (New-HarnessFake -Routes $routes -Log $log)
+        Add-HarnessCase $cases 'a PR other than #7: facts, check and merge all use its number' $false (-not (
+                -not $otherDone -and $put.Count -eq $n + 1 -and $put[-1].commit_title -match '\(#42\)$' -and
+                @($log | Where-Object { $_ -match 'fetch .*\+refs/pull/42/head:refs/remotes/origin/pr/42' }).Count -ge 1 -and
+                @($log | Where-Object { $_ -match 'pulls/7|issues/7|pr/7' }).Count -eq 0))
+
+        # ---- the command line ------------------------------------------------------------------
+        $entryRun = {
+            param([hashtable]$entryArgs)
+            $log.Clear()
+            $putBefore = $put.Count
+            $said = & { try { @(Invoke-Entry @entryArgs) } catch { "threw: $($_.Exception.Message)" } }
+            [pscustomobject]@{ Said = @($said) -join "`n"; Code = $script:EntryCode; Sent = $put.Count - $putBefore; Gh = @($log | Where-Object { $_ -match '^gh ' }) }
+        }
+        $identityFirst = { param($entryResult) $entryResult.Gh.Count -gt 2 -and $entryResult.Gh[0] -ceq 'gh auth token --user DLsnows' -and $entryResult.Gh[1] -ceq 'gh api user --jq .login' }
+        $checkArgs = @{ Check = $true; Pr = 7; WaiverFile = $recordsFile }
+        $checked = & $entryRun $checkArgs
+        Add-HarnessCase $cases 'entry: -Check: the first gh calls are the identity check, one JSON line, exit 0' $false (-not ((& $identityFirst $checked) -and $checked.Code -eq 0 -and (ConvertFrom-Json -InputObject $checked.Said -Depth 100).Code -eq 'ready'))
+        $identity.Login = 'someone-else'
+        $checkWrong = & $entryRun $checkArgs
+        $identity.Login = 'DLsnows'
+        Add-HarnessCase $cases 'entry: -Check with another account: refused, GitHub is not asked anything else' $true ($checkWrong.Said -match 'resolves to someone-else' -and $checkWrong.Gh.Count -eq 2)
+        $prFixture.draft = $true
+        $checkNotReady = & $entryRun $checkArgs
+        $prFixture.draft = $false
+        Add-HarnessCase $cases 'entry: -Check, not ready: exit 1' $true ($checkNotReady.Code -eq 1 -and (ConvertFrom-Json -InputObject $checkNotReady.Said -Depth 100).Code -eq 'not-ready')
+        $savedPrFiles = $prFiles
+        $prFiles = @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' })
+        $prFixture.changed_files = 1
+        $checkNeeds = & $entryRun $checkArgs
+        $prFixture.changed_files = $savedChanged
+        $prFiles = $savedPrFiles
+        Add-HarnessCase $cases 'entry: -Check, needs the user: exit 2' $true ($checkNeeds.Code -eq 2 -and (ConvertFrom-Json -InputObject $checkNeeds.Said -Depth 100).Code -eq 'needs-user')
+        $mergeArgs = @{ Merge = $true; Pr = 7; SummaryFile = $summaryPath; WaiverFile = $recordsFile }
+        $merged = & $entryRun $mergeArgs
+        Add-HarnessCase $cases 'entry: -Merge: the identity check comes first, then the merge request, exit 0' $false (-not ((& $identityFirst $merged) -and $merged.Sent -eq 1 -and $merged.Code -eq 0 -and $merged.Said -match 'Merged #7'))
+        $identity.Login = 'someone-else'
+        $mergeWrong = & $entryRun $mergeArgs
+        $identity.Login = 'DLsnows'
+        Add-HarnessCase $cases 'entry: -Merge with another account: refused, nothing sent' $true ($mergeWrong.Said -match 'resolves to someone-else' -and $mergeWrong.Sent -eq 0 -and $mergeWrong.Gh.Count -eq 2)
+        $noSummary = & $entryRun @{ Merge = $true; Pr = 7 }
+        Add-HarnessCase $cases 'entry: -Merge hands -SummaryFile on' $true ($noSummary.Said -match '-Merge needs -SummaryFile' -and $noSummary.Sent -eq 0)
+        $waiverAnswer = Join-Path $elsewhere 'entry-waivers.json'
+        Set-Content -LiteralPath $waiverAnswer -Value (ConvertTo-Json -Depth 10 @{ approvals = @{ '7' = @(@{ head = $headSha; by = 'user'; note = 'entry approval' }) } })
+        $prFiles = @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' })
+        $prFixture.changed_files = 1
+        $checkWaiverFile = & $entryRun @{ Check = $true; Pr = 7; WaiverFile = $waiverAnswer }
+        $mergeWaiverFile = & $entryRun @{ Merge = $true; Pr = 7; SummaryFile = $summaryPath; WaiverFile = $waiverAnswer }
+        $prFixture.changed_files = $savedChanged
+        $prFiles = $savedPrFiles
+        Add-HarnessCase $cases 'entry: -Check hands -WaiverFile on' $false ($checkWaiverFile.Code -ne 0)
+        Add-HarnessCase $cases 'entry: -Merge hands -WaiverFile on' $false ($mergeWaiverFile.Sent -ne 1)
+        foreach ($usage in @(@{ label = 'no mode'; args = @{ Pr = 7 } }, @{ label = 'two modes'; args = @{ Check = $true; Merge = $true; Pr = 7 } })) {
+            $refused = & $entryRun $usage.args
+            Add-HarnessCase $cases "entry: $($usage.label): refused before anything is asked" $true ($refused.Said -match 'exactly one' -and $log.Count -eq 0)
+        }
+        $noPr = & $entryRun @{ Check = $true }
+        Add-HarnessCase $cases 'entry: no -Pr: refused before anything is asked' $true ($noPr.Said -match '-Pr <n> is required' -and $log.Count -eq 0)
 
         # ---- -After ------------------------------------------------------------------------------
         $mergedPull = Copy-HarnessObject $pull
         $mergedPull.merged = $true; $mergedPull.state = 'closed'; $mergedPull.merge_commit_sha = 'f' * 40
         $sep = [string][char]0x1f
-        $squash = @{ Author = 'DLsnows'; AuthorEmail = 'noreply@synchain.ca'; CommitterEmail = 'noreply@github.com'
+        $squash = @{ Author = 'DLsnows'; AuthorEmail = '140901583+DLsnows@users.noreply.github.com'; CommitterEmail = 'noreply@github.com'
             Message = "feat(example): add the example module (#7)`n`nAdds it.`n`n$(Get-HarnessSignoff)"; Raw = $null }
         $wtBranch = @{ Name = 'feat/example' }
         $onFeatureLine = @{ Yes = $true }
@@ -1156,13 +1520,18 @@ function Invoke-SelfTest {
         Set-Content -LiteralPath (Join-Path $exampleTree '.git') -Value 'gitdir: x'
         $locks = [System.Collections.Generic.List[string]]::new()
         Set-HarnessLockImpl { param($name, $block) $locks.Add($name); & $block }
+        $remoteLine = "$headSha`trefs/heads/feat/example"
+        $afterState = @{ Remote = $remoteLine; Local = $headSha; Status = ''; Push = '' }
         $afterRoutes = [ordered]@{
+            '^gh auth token --user DLsnows$' = { 'tok-selftest' }
+            '^gh api user --jq \.login$'     = { $identity.Login }
             'pulls/7$'                       = { $mergedPull }
             'merge-base --is-ancestor'       = { if ($onFeatureLine.Yes) { '' } else { @{ Code = 1; Out = ''; Err = '' } } }
             ' log -1 --format='              = { if ($null -ne $squash.Raw) { $squash.Raw } else { "$($squash.Author)$sep$($squash.AuthorEmail)$sep$($squash.CommitterEmail)$sep$($squash.Message)" } }
             ' symbolic-ref --quiet --short HEAD' = { $wtBranch.Name }
-            'ls-remote --exit-code'          = { "$('a' * 40)`trefs/heads/feat/example" }
-            ' push origin --delete refs/heads/feat/example' = { '' }
+            'ls-remote --exit-code --heads origin refs/heads/feat/example$' = { $afterState.Remote }
+            ' status --porcelain --untracked-files=normal$' = { $afterState.Status }
+            ' push origin --delete refs/heads/feat/example' = { $afterState.Push }
             ' worktree list --porcelain'     = { & $worktreeText }
             # fake worktree remove: moves the directory into the self-test's temp directory (never deletes), and only when the path is inside it
             ' worktree remove '              = {
@@ -1171,13 +1540,14 @@ function Invoke-SelfTest {
                 if (-not $target.StartsWith($tmp + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw "the fake worktree remove only moves paths inside the self-test directory: $target" }
                 Move-Item -LiteralPath $target -Destination (Join-Path $tmp "removed-$([guid]::NewGuid().ToString('N'))"); ''
             }
-            'rev-parse --verify --quiet refs/heads/feat/example' = { '' }
+            'rev-parse --verify --quiet refs/heads/feat/example' = { $afterState.Local }
             ' branch -D feat/example'        = { '' }
             '^git .* fetch '                 = { '' }
         }
         $log.Clear()
         Set-HarnessFake (New-HarnessFake -Routes $afterRoutes -Log $log)
-        $line = Invoke-After -Number 7 -WorktreePath $exampleTree
+        $afterLine = { try { Invoke-After -Number 7 -WorktreePath $exampleTree } catch { "threw: $($_.Exception.Message)" } }
+        $line = & $afterLine
         Add-HarnessCase $cases '-After: merge lock first; read-back passes, remote branch deleted, worktree and local branch removed under the git lock' $false (-not (
                 $line -match 'merged as fffffff' -and @($log | Where-Object { $_ -match 'push origin --delete refs/heads/feat/example' }).Count -eq 1 -and
                 @($log | Where-Object { $_ -match "worktree remove $([regex]::Escape($exampleTree))$" }).Count -eq 1 -and
@@ -1191,6 +1561,38 @@ function Invoke-SelfTest {
             $log.Clear()
         }
         $removed = { @($log | Where-Object { $_ -match ' worktree remove ' }).Count }
+        $nothingDeleted = { @($log | Where-Object { $_ -match 'push origin --delete| worktree remove | branch -D ' }).Count -eq 0 -and (Test-Path -LiteralPath $exampleTree) }
+        $afterCase = {
+            param([string]$label, [string]$stateKey, $stateAnswer, [string]$word)
+            & $reset
+            $saved = $afterState[$stateKey]
+            $afterState[$stateKey] = $stateAnswer
+            $said = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+            $afterState[$stateKey] = $saved
+            Add-HarnessCase $cases $label $true ($said -match $word -and (& $nothingDeleted))
+        }
+        & $afterCase '-After: git ls-remote fails: an error, nothing is deleted' 'Remote' @{ Code = 128; Out = ''; Err = 'fatal: unable to access the remote' } 'ls-remote origin failed \(exit code 128\).*unable to access'
+        & $afterCase '-After: git ls-remote answers without naming the branch: an error, nothing is deleted' 'Remote' "$headSha`trefs/heads/feat/example-two" 'did not name refs/heads/feat/example'
+        & $afterCase '-After: the remote branch has commits the merge does not have: nothing is deleted' 'Remote' "$('a' * 40)`trefs/heads/feat/example" 'remote feat/example is at a{40}'
+        & $afterCase '-After: the local branch has commits the merge does not have: nothing is deleted' 'Local' ('b' * 40) 'local feat/example is at b{40}'
+        & $afterCase '-After: the local branch cannot be read: an error, nothing is deleted' 'Local' @{ Code = 128; Out = ''; Err = 'fatal: bad object' } 'rev-parse failed \(exit code 128\).*bad object'
+        & $afterCase '-After: the worktree has an untracked file: nothing is deleted' 'Status' '?? notes.txt' 'has changes or untracked files.*notes\.txt'
+        & $afterCase '-After: the worktree has a changed file: nothing is deleted' 'Status' ' M a.txt' 'has changes or untracked files.* M a\.txt|has changes or untracked files.*M a\.txt'
+        & $reset
+        $afterState.Remote = @{ Code = 2; Out = ''; Err = '' }
+        $remoteGone = & $afterLine
+        $afterState.Remote = $remoteLine
+        Add-HarnessCase $cases '-After: the remote branch is already gone: not pushed, and the last line says so' $false (-not ($remoteGone -match 'remote sub-branch was already gone, worktree removed, local branch removed' -and @($log | Where-Object { $_ -match 'push origin --delete' }).Count -eq 0))
+        & $reset
+        $afterState.Local = @{ Code = 1; Out = ''; Err = '' }
+        $localGone = & $afterLine
+        $afterState.Local = $headSha
+        Add-HarnessCase $cases '-After: the local branch is already gone: not deleted, and the last line says so' $false (-not ($localGone -match 'remote sub-branch deleted, worktree removed, local branch was already gone' -and @($log | Where-Object { $_ -match 'branch -D' }).Count -eq 0))
+        & $reset
+        $afterState.Push = @{ Code = 1; Out = ''; Err = 'remote: refused' }
+        $pushRefused = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
+        $afterState.Push = ''
+        Add-HarnessCase $cases '-After: the remote branch cannot be deleted: an error, the worktree and the local branch stay' $true ($pushRefused -match 'git push origin failed.*remote: refused' -and (& $removed) -eq 0 -and -not @($log | Where-Object { $_ -match 'branch -D' }).Count -and (Test-Path -LiteralPath $exampleTree))
         & $reset
         $wtBranch.Name = 'feat/other'
         Add-HarnessCase $cases '-After: the worktree is on another branch (wrong path): nothing is cleaned up' $true (((& $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }) -match "not on feat/example") -and (Test-Path -LiteralPath $exampleTree) -and (& $removed) -eq 0)
@@ -1252,18 +1654,125 @@ function Invoke-SelfTest {
             Add-HarnessCase $cases '-After: a junction given as -Worktree leaves the target untouched' $true ($viaLink -and (Test-Path -LiteralPath (Join-Path $away 'keep.txt')) -and (Test-Path -LiteralPath $toAway))
             [IO.Directory]::Delete($toAway)
         }
+        # the command line of -After
+        & $reset
+        $afterEntry = @{ After = $true; Pr = 7; Worktree = $exampleTree }
+        $identity.Login = 'someone-else'
+        $afterWrong = & $entryRun $afterEntry
+        $identity.Login = 'DLsnows'
+        Add-HarnessCase $cases 'entry: -After with another account: refused, nothing is deleted' $true ($afterWrong.Said -match 'resolves to someone-else' -and $afterWrong.Gh.Count -eq 2 -and (& $nothingDeleted))
+        $afterDone = & $entryRun $afterEntry
+        Add-HarnessCase $cases 'entry: -After: the identity check comes first, the given worktree is what gets removed' $false (-not ((& $identityFirst $afterDone) -and $afterDone.Code -eq 0 -and @($log | Where-Object { $_ -match "worktree remove $([regex]::Escape($exampleTree))$" }).Count -eq 1))
+
+        # -After for real: a bare origin, a main clone and a real worktree in the temp directory; only gh is faked
+        $e2eRoot = Join-Path $tmp 'e2e'
+        $e2eOrigin = Join-Path $e2eRoot 'origin.git'
+        $e2eMain = Join-Path $e2eRoot 'main'
+        $e2eTree = Join-Path $e2eRoot 'tree'
+        New-Item -ItemType Directory -Force -Path $e2eRoot | Out-Null
+        $gitConfigFile = Join-Path $e2eRoot 'gitconfig'
+        Set-Content -LiteralPath $gitConfigFile -Value "[user]`n`tname = DLsnows`n`temail = noreply@synchain.ca`n" -Encoding utf8NoBOM
+        $gitEnvironment = @{ GIT_CONFIG_GLOBAL = $gitConfigFile; GIT_CONFIG_NOSYSTEM = '1'; GIT_DIR = $null; GIT_WORK_TREE = $null; GIT_INDEX_FILE = $null }
+        $gitEnvironmentSaved = @{}
+        # [NullString]::Value: a plain $null reaches .NET as an empty string, and an empty variable is still a variable to git
+        $setVariable = { param($variableName, $variableText) [Environment]::SetEnvironmentVariable($variableName, $(if ($null -eq $variableText) { [NullString]::Value } else { $variableText })) }
+        foreach ($variableName in $gitEnvironment.get_Keys()) {
+            $gitEnvironmentSaved[$variableName] = [Environment]::GetEnvironmentVariable($variableName)
+            & $setVariable $variableName $gitEnvironment[$variableName]
+        }
+        try {
+            $repoRootNow = Get-HarnessRepoRoot
+            $e2e = @{ Pull = $null; Line = '' }
+            # gh is answered here; git runs for real, and a command addressed to this repository goes to the temporary main clone instead
+            Set-HarnessFake {
+                param($cmd, $argv, $opts)
+                if ($cmd -ceq 'gh') {
+                    if (($argv -join ' ') -match 'pulls/7$') { return @{ Code = 0; Out = (ConvertTo-Json -InputObject $e2e.Pull -Depth 100 -Compress); Err = '' } }
+                    return @{ Code = 1; Out = ''; Err = "no fixture for: gh $($argv -join ' ')" }
+                }
+                if ($cmd -ceq 'git' -and $argv[0] -ceq '-C' -and $argv[1] -ceq $repoRootNow -and $argv[2] -cne 'config') { $argv[1] = $e2eMain }
+                $null
+            }
+            $realGit = { param([string[]]$gitArgs) (Invoke-HarnessExternal git $gitArgs).Out.Trim() }
+            $hasRef = { param($gitDir, $refName) (Invoke-HarnessExternal git @('--git-dir', $gitDir, 'rev-parse', '--verify', '--quiet', $refName) -AllowFail).Code -eq 0 }
+            $mainGitDir = Join-Path $e2eMain '.git'
+            $branchRefName = 'refs/heads/feat/example'
+            $intact = { (Test-Path -LiteralPath (Join-Path $e2eTree '.git')) -and (& $hasRef $e2eOrigin $branchRefName) -and (& $hasRef $mainGitDir $branchRefName) }
+            & $realGit @('init', '--quiet', '--bare', '--initial-branch=feature/v1', $e2eOrigin) | Out-Null
+            & $realGit @('init', '--quiet', '--initial-branch=feature/v1', $e2eMain) | Out-Null
+            & $realGit @('-C', $e2eMain, 'remote', 'add', 'origin', $e2eOrigin) | Out-Null
+            Set-Content -LiteralPath (Join-Path $e2eMain 'a.txt') -Value 'base'
+            & $realGit @('-C', $e2eMain, 'add', 'a.txt') | Out-Null
+            & $realGit @('-C', $e2eMain, 'commit', '--quiet', '-m', 'chore(example): base') | Out-Null
+            & $realGit @('-C', $e2eMain, 'push', '--quiet', 'origin', 'feature/v1') | Out-Null
+            & $realGit @('-C', $e2eMain, 'worktree', 'add', '--quiet', '-b', 'feat/example', $e2eTree) | Out-Null
+            Set-Content -LiteralPath (Join-Path $e2eTree 'b.txt') -Value 'work'
+            & $realGit @('-C', $e2eTree, 'add', 'b.txt') | Out-Null
+            & $realGit @('-C', $e2eTree, 'commit', '--quiet', '-m', 'feat(example): work') | Out-Null
+            & $realGit @('-C', $e2eTree, 'push', '--quiet', 'origin', 'feat/example') | Out-Null
+            $treeTip = & $realGit @('-C', $e2eTree, 'rev-parse', 'HEAD')
+            # the squash on the feature line, the way a merge writes it
+            & $realGit @('-C', $e2eMain, 'merge', '--quiet', '--squash', 'feat/example') | Out-Null
+            & $realGit @('-C', $e2eMain, 'commit', '--quiet', '-m', 'feat(example): add the example module (#7)', '-m', 'Adds it.', '-m', (Get-HarnessSignoff)) | Out-Null
+            & $realGit @('-C', $e2eMain, 'push', '--quiet', 'origin', 'feature/v1') | Out-Null
+            $squashOnLine = & $realGit @('-C', $e2eMain, 'rev-parse', 'HEAD')
+            $e2e.Pull = Copy-HarnessObject $pull
+            $e2e.Pull.merged = $true; $e2e.Pull.state = 'closed'; $e2e.Pull.merge_commit_sha = $squashOnLine; $e2e.Pull.head.sha = $treeTip; $e2e.Pull.head.ref = 'feat/example'
+            $e2eRun = { & $messageOf { $e2e.Line = Invoke-After -Number 7 -WorktreePath $e2eTree } }
+
+            # a commit in the worktree that was never pushed
+            Set-Content -LiteralPath (Join-Path $e2eTree 'c.txt') -Value 'local only'
+            & $realGit @('-C', $e2eTree, 'add', 'c.txt') | Out-Null
+            & $realGit @('-C', $e2eTree, 'commit', '--quiet', '-m', 'feat(example): local only') | Out-Null
+            $localAhead = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: an unmerged local commit: refused, nothing is deleted' $true ($localAhead -match 'local feat/example is at' -and (& $intact) -and (Test-Path -LiteralPath (Join-Path $e2eTree 'c.txt')))
+            & $realGit @('-C', $e2eTree, 'reset', '--quiet', '--hard', $treeTip) | Out-Null
+
+            # a commit on the remote branch that the merge does not have
+            $remoteExtra = & $realGit @('-C', $e2eTree, 'commit-tree', "$treeTip^{tree}", '-p', $treeTip, '-m', 'feat(example): remote only')
+            & $realGit @('-C', $e2eTree, 'push', '--quiet', 'origin', "${remoteExtra}:$branchRefName") | Out-Null
+            $remoteAhead = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: an unmerged remote commit: refused, nothing is deleted' $true ($remoteAhead -match 'remote feat/example is at' -and (& $intact) -and (& $realGit @('--git-dir', $e2eOrigin, 'rev-parse', $branchRefName)) -ceq $remoteExtra)
+            & $realGit @('--git-dir', $e2eOrigin, 'update-ref', $branchRefName, $treeTip) | Out-Null
+
+            # an untracked file in the worktree
+            Set-Content -LiteralPath (Join-Path $e2eTree 'notes.txt') -Value 'not committed'
+            $untracked = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: an untracked file: refused, nothing is deleted' $true ($untracked -match 'has changes or untracked files' -and (& $intact) -and (Test-Path -LiteralPath (Join-Path $e2eTree 'notes.txt')))
+            Remove-Item -LiteralPath (Join-Path $e2eTree 'notes.txt')
+
+            # the clean case deletes all three
+            $cleanRun = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: tips equal and the worktree clean: remote branch, worktree and local branch are gone' $false (
+                [bool]$cleanRun -or $e2e.Line -notmatch 'remote sub-branch deleted, worktree removed, local branch removed' -or (Test-Path -LiteralPath $e2eTree) -or (& $hasRef $e2eOrigin $branchRefName) -or (& $hasRef $mainGitDir $branchRefName))
+
+            # the same again with the remote branch already gone: GitHub deletes merged branches when the repository says so
+            & $realGit @('-C', $e2eMain, 'worktree', 'add', '--quiet', '-b', 'feat/example', $e2eTree, $treeTip) | Out-Null
+            $goneRun = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: the remote branch was already gone: the last line says so, the rest is removed' $false (
+                [bool]$goneRun -or $e2e.Line -notmatch 'remote sub-branch was already gone, worktree removed, local branch removed' -or (Test-Path -LiteralPath $e2eTree) -or (& $hasRef $mainGitDir $branchRefName))
+        } finally {
+            Set-HarnessFake (New-HarnessFake -Routes $afterRoutes -Log $log)
+            foreach ($variableName in $gitEnvironmentSaved.get_Keys()) { & $setVariable $variableName $gitEnvironmentSaved[$variableName] }
+        }
+
         $fakeRemove = $afterRoutes[' worktree remove ']
         Add-HarnessCase $cases 'the fake worktree remove refuses a path outside the self-test directory' $true (Test-Throws { & $fakeRemove @('git', 'worktree', 'remove', (Join-Path ([IO.Path]::GetTempPath()) 'outside-the-selftest')) })
 
         # ---- source hygiene ----------------------------------------------------------------------
         $selfText = Get-Content -Raw -LiteralPath $PSCommandPath
         Add-HarnessCase $cases 'source hygiene: pr-merge.ps1' $false (@(Get-HarnessSourceProblems -Text $selfText -Name 'pr-merge.ps1').Count -gt 0)
+    } catch {
+        # a crash does not hide what already turned red by name
+        Write-HarnessFailedCases $cases
+        throw
     } finally {
         Set-HarnessFake $null
         Set-HarnessLockImpl $null
         Set-HarnessInfraModule $null
         Set-HarnessNeedles
         Clear-HarnessPermCache
+        if (Test-Path -LiteralPath variable:savedToken) { $env:GH_TOKEN = $savedToken }
         # the temp directories are this process's own: name prefix and parent checked before the recursive delete
         $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
         foreach ($dir in @($tmp, $away) | Where-Object { $_ }) {
@@ -1282,16 +1791,5 @@ function Invoke-SelfTest {
 
 # only the last value is the exit code: a stray object from the self-test would turn exit into an array and report 0
 if ($SelfTest) { exit [int]@(Invoke-SelfTest)[-1] }
-if (@($Check, $Merge, $After | Where-Object { $_ }).Count -ne 1) { throw 'Usage: -Check | -Merge | -After, exactly one (or -SelfTest)' }
-if ($Pr -le 0) { throw '-Pr <n> is required' }
-Initialize-HarnessIdentity
-if ($Check) {
-    $verdict = Invoke-MergeCheck -Number $Pr -RecordsPath $WaiverFile
-    Write-Output (ConvertTo-HarnessJsonText $verdict)
-    exit (Get-CheckExitCode $verdict.Code)
-}
-if ($Merge) {
-    Invoke-Merge -Number $Pr -SummaryFile $SummaryFile -RecordsPath $WaiverFile
-    exit 0
-}
-Invoke-After -Number $Pr -WorktreePath $Worktree
+Invoke-Entry @PSBoundParameters
+exit $script:EntryCode

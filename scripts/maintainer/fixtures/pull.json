@@ -9,6 +9,7 @@
   "mergeable": true,
   "mergeable_state": "clean",
   "merge_commit_sha": null,
+  "changed_files": 2,
   "user": { "login": "DLsnows", "type": "User" },
   "head": {
     "ref": "feat/example",

@@ -94,7 +94,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          "$HARNESS_GITLEAKS" git . --no-banner --redact --log-opts="$BASE_SHA..$HEAD_SHA --no-ext-diff --no-textconv"
+          "$HARNESS_GITLEAKS" git . --no-banner --redact --log-opts="$BASE_SHA..$HEAD_SHA --no-ext-diff --no-textconv --diff-merges=first-parent"
       - name: Pull request commits (privacy)
         if: github.event_name == 'pull_request'
         env:
@@ -109,7 +109,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         run: |
-          "$HARNESS_GITLEAKS" git . --no-banner --redact --log-opts="$BEFORE..$AFTER --no-ext-diff --no-textconv"
+          "$HARNESS_GITLEAKS" git . --no-banner --redact --log-opts="$BEFORE..$AFTER --no-ext-diff --no-textconv --diff-merges=first-parent"
       - name: Pushed commits (privacy and commit check, push tier)
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         env:

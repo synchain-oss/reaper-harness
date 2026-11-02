@@ -20,6 +20,7 @@ export const INFRA_PATHS = [
     ".*-version",
     ".gitattributes",
     ".gitleaks.toml",
+    ".gitleaksignore",
     // pr-agent and other bots read these from the default branch and reconfigure themselves
     ".pr_agent.toml",
     "**/.pr_agent.toml",
@@ -78,6 +79,8 @@ export function selfTestCases() {
         ".node-version",
         ".gitleaks-version",
         ".gitattributes",
+        ".gitleaks.toml",
+        ".gitleaksignore",
         "CLAUDE.md",
         "docs/CLAUDE.md",
         "AGENTS.md",
