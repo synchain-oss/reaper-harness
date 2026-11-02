@@ -7,8 +7,9 @@
 // The exit code of gitleaks alone proves nothing: when git fails underneath it (an unknown revision, an option this git does
 // not know, a directory that is not a repository) it logs the error, scans nothing and still exits 0. So clean means all of:
 // exit code 0, no error line in its log, its count line present, and that count above 0 whenever git itself lists added lines
-// in the range. A count of 0 is right for a range with nothing to read: no commits, or commits that only delete, rename or add
-// binary files. git has to know --diff-merges=first-parent (git 2.31 or newer); an older git makes the scan fail, never pass.
+// in the range (--numstat does not list the lines of a binary file under any option). A count of 0 is right for a range with nothing
+// to read: no commits, or commits that only delete or rename files.
+// git has to know --diff-merges=first-parent (git 2.31 or newer); an older git makes the scan fail, never pass.
 // gitleaks comes from HARNESS_GITLEAKS or git config harness.gitleaks; its version must equal .gitleaks-version.
 // Exit codes: 0 clean, 1 findings or a scan that did not finish, 64 usage error.
 
@@ -21,9 +22,10 @@ import { cleanupTempDir, makeTempDir } from "./lib/safe-rm.mjs";
 
 const { ROOT, UsageError, caseResult, git, j, localSetting, tempRepo } = kit;
 
-// gitleaks runs git log -p itself; external diff and textconv drivers would rewrite the patches, and without first-parent diffs
-// a merge commit shows no patch, so content that only the merge adds would not be scanned
-const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--diff-merges=first-parent"];
+// gitleaks runs git log -p itself; external diff and textconv drivers would rewrite the patches. Without --text a file with a NUL byte
+// or a -diff attribute shows as "Binary files differ", and without first-parent diffs a merge commit shows no patch: in both cases the
+// content would not be scanned
+const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--text", "--diff-merges=first-parent"];
 const SAID_MAX = 4096;
 
 /** The output of `gitleaks version` must be exactly the pinned version (a leading v aside). */
@@ -149,12 +151,24 @@ export function selfTest() {
         t("real: a commit that only deletes is clean: gitleaks counts 0 and that is right", false, !scanOf(`${empty}..${deleted}`).ok);
         const binary = commit("binary", { "c.bin": Buffer.from([0, 1, 2, 3]) });
         t("real: a commit that only adds a binary file is clean", false, !scanOf(`${deleted}..${binary}`).ok);
+        const image = commit("image", { "f.png": Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0xff, 0xfe, 0x0a, 0x80, 0]) });
+        t("real: a commit with bytes that are no text at all is clean", false, !scanOf(`${binary}..${image}`).ok);
+        repo.git(["reset", "-q", "--hard", binary]);
 
         const dirty = commit("credential", { "d.txt": `auth = "${leak}"\n` });
         const caught = scanOf(`${binary}..${dirty}`);
         t("real: a credential is a finding", true, caught.finding && !caught.ok);
         t("real: the message does not show the credential", true, !caught.message.includes(leak));
         t("real: a credential behind --not, as the hook asks", true, scanOf(dirty, "--not", binary).finding);
+        // git calls these files binary: without --text the patch only says "Binary files differ" and gitleaks reads nothing
+        const withNul = commit("credential next to a NUL byte", { "n.txt": Buffer.concat([Buffer.from([0]), Buffer.from(`\nauth = "${leak}"\n`)]) });
+        t("real: a credential in a file with a NUL byte", true, scanOf(`${dirty}..${withNul}`).finding);
+        const attributes = commit("attributes", { ".gitattributes": "*.cfg -diff\n" });
+        const noDiff = commit("credential in a file marked -diff", { "s.cfg": `auth = "${leak}"\n` });
+        t("real: a credential in a file marked -diff", true, scanOf(`${attributes}..${noDiff}`).finding);
+        const covered = commit("the file changes again", { "s.cfg": "clean\n" });
+        t("real: a credential in a file marked -diff, gone again at the end of the range", true, scanOf(`${attributes}..${covered}`).finding);
+        repo.git(["reset", "-q", "--hard", dirty]);
         const after = commit("after", { "e.txt": "clean\n" });
         t("real: only the range is scanned, a credential before it is not its finding", false, !scanOf(`${dirty}..${after}`).ok);
         repo.git(["reset", "-q", "--hard", binary]);
