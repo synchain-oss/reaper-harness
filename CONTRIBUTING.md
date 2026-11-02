@@ -119,6 +119,13 @@ not change; a new format would get a new version number.
   `级别 | 位置 | 摘要 | 处置` (in Chinese, like the comments). The `处置` cell starts with one of `已修`, `修复`,
   `采纳`, `不改`, `不采纳`, `挂账`, `暂不`, `维持`. A 【红旗】 or 【重要】 row whose `处置` starts with `不改`,
   `不采纳`, `挂账`, `暂不` or `维持` needs a waiver recorded by the maintainer before the pull request is merged.
+  The table has one row for every 【红旗】 and 【重要】 finding; rows with the same `位置` and `摘要` count once. The table is read
+  the way Markdown renders it: a row in a code fence or an HTML comment, or indented by four columns, does not count, and a
+  header row needs the delimiter row right below it. Such a row whose `处置` does not start with `已修`, `修复` or `采纳`, that goes on to say the
+  fix is not done (`修复中`, `采纳但不修`, `采纳，后续再做`), or that has no commit hash in that cell or to its right, also
+  needs a maintainer waiver. A commit hash stands on its own, not as part of a longer word, of a file name or of a link other than
+  `/commit/`, and has both a letter and a digit: write a short hash that happens to be only digits or only letters longer.
+  For one finding, the row of the highest round and the row posted last must both show it as handled.
 - Text written by a model never carries these markers: before posting, the bot breaks up any `<!--` in the summary.
 
 ### 6.3 Merge criteria

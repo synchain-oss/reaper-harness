@@ -68,7 +68,7 @@
   <gitleaks> dir . --no-banner --redact
   ```
 
-- hooks 在 `scripts/hooks/`：`commit-msg`（身份、恰好一个签名、零 AI 署名、隐私）与 `pre-push`（只推 `feat/*`、只快进、提交身份与隐私、gitleaks、gh 登录核对）。启用方式只用本仓的 git config，不改全局：
+- hooks 在 `scripts/hooks/`：`commit-msg`（身份、恰好一个签名、零 AI 署名、隐私）与 `pre-push`（只推 `feat/*`、只快进、提交身份与隐私、gitleaks、gh 登录核对）。我方提交的标题行与签名行不得含不可见字符（`branch-gate` 同样判红，外部贡献和合并提交不受此条约束）。启用方式只用本仓的 git config，不改全局：
 
   ```sh
   git config core.hooksPath scripts/hooks
@@ -79,6 +79,7 @@
   ```
 
   同名环境变量 `HARNESS_NODE`、`HARNESS_PRIVACY_LOCAL`、`HARNESS_GITLEAKS`、`HARNESS_ACTIONLINT` 优先于 git config。推长期分支要显式设 `HARNESS_ALLOW_LONGLIVED_PUSH=1`，推 tag 要设 `HARNESS_ALLOW_TAG_PUSH=1`，只在维护者明确授权时用。
+- 对提交范围的 gitleaks 扫描只走 `scripts/check-secrets.mjs`（`pre-push`、`push.ps1`、CI 共用）：gitleaks 在 git 失败时照样退出 0，什么算扫过了写在该脚本头部。git 要认识 `--diff-merges=first-parent`（2.31 起），更旧的 git 让扫描失败，不会放行。
 - CI（`ci.yml`）不编译、不起 REAPER：`compliance` 跑上面这些检查与提交范围扫描，`harness-gate` 汇总全部 job。工具自己的 Windows 自测 job 接进 `harness-gate` 的 needs。
 
 ## §4 工具的安全不变量

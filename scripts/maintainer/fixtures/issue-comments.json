@@ -1,0 +1,20 @@
+[
+  {
+    "id": 9000000001,
+    "user": { "login": "github-actions[bot]", "type": "Bot" },
+    "author_association": "NONE",
+    "created_at": "2026-11-01T10:02:10Z",
+    "updated_at": "2026-11-01T10:02:10Z",
+    "html_url": "https://github.com/synchain-oss/reaper-harness/pull/7#issuecomment-9000000001",
+    "body": "<!-- harness-review-head sha=3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72 bot=claude -->\n_审查对象：`3f9c2e1` · [运行记录](https://github.com/synchain-oss/reaper-harness/actions/runs/5000000001)_\n\n## 结论\n示例模块没有发现阻塞问题。\n\n## 【红旗】\n- 无\n\n## 【重要】\n- 无\n\n## 【建议】\n- docs/example.md:3 示例里的步骤可以补一句前置条件。\n\n<!-- harness-review v1 red=0 important=0 suggest=1 -->"
+  },
+  {
+    "id": 9000000002,
+    "user": { "login": "DLsnows", "type": "User" },
+    "author_association": "OWNER",
+    "created_at": "2026-11-01T10:20:00Z",
+    "updated_at": "2026-11-01T10:20:00Z",
+    "html_url": "https://github.com/synchain-oss/reaper-harness/pull/7#issuecomment-9000000002",
+    "body": "<!-- harness-agent v1 role=impl kind=disposition round=1 head=3f9c2e1 bot-run=5000000001 -->\n## 评审处置汇总\n\n| 级别 | 位置 | 摘要 | 处置 |\n|---|---|---|---|\n| 【建议】 | docs/example.md:3 | 补前置条件 | 已采纳，见 3f9c2e1 |"
+  }
+]
