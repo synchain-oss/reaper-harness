@@ -238,7 +238,7 @@
 > if ($true) { $warn.Add("Touches
 @@ pr-merge.ps1 | approval not bound to the head
 < $approval = Get-HeadRecord $recs.Approvals $sha
-> $approval = @($recs.Approvals)[0]
+> $approval = @($recs.Approvals) | Select-Object -First 1
 @@ pr-merge.ps1 | infrastructure paths ignored
 < if ($infra.Count -gt 0) {
 > if ($false) {

@@ -352,17 +352,19 @@ function Invoke-SelfTest {
 
         $f = Get-FooterResult 7 $sha
         Add-HarnessCase $cases '-Footer: parses the footer' $false (-not ($f.Ok -and $f.Red -eq 0 -and $f.Important -eq 0 -and $f.Suggest -eq 1 -and $f.Run -eq '5000000001'))
-        Add-HarnessCase $cases '-Footer: the summary reviewed another head' $true (-not (Get-FooterResult 7 ('a' * 40)).Ok)
+        # a refusal is an answer with Ok = false; an exception is no refusal, so the case turns red under its own name
+        $footerRefused = { param($askedHead) try { -not (Get-FooterResult 7 $askedHead).Ok } catch { $false } }
+        Add-HarnessCase $cases '-Footer: the summary reviewed another head' $true (& $footerRefused ('a' * 40))
         $summary = $issue[0]
         $orig = $summary.body
         $summary.body = "$orig`n<!-- harness-review v1 red=0 important=0 suggest=1 -->"
-        Add-HarnessCase $cases '-Footer: footer on more than one line is unusable' $true (-not (Get-FooterResult 7 $sha).Ok)
+        Add-HarnessCase $cases '-Footer: footer on more than one line is unusable' $true (& $footerRefused $sha)
         $summary.body = ($orig -split "`n" | Select-Object -SkipLast 1) -join "`n"
-        Add-HarnessCase $cases '-Footer: footer missing is unusable' $true (-not (Get-FooterResult 7 $sha).Ok)
+        Add-HarnessCase $cases '-Footer: footer missing is unusable' $true (& $footerRefused $sha)
         $summary.body = $orig -replace 'suggest=1 -->$', 'suggest=5 -->'
-        Add-HarnessCase $cases '-Footer: counts that do not match the body are unusable' $true (-not (Get-FooterResult 7 $sha).Ok)
+        Add-HarnessCase $cases '-Footer: counts that do not match the body are unusable' $true (& $footerRefused $sha)
         $summary.body = $orig -replace '(?s)^<!-- harness-review-head[^\n]*\n', ''
-        Add-HarnessCase $cases '-Footer: summary without the head marker is no summary' $true (-not (Get-FooterResult 7 $sha).Ok)
+        Add-HarnessCase $cases '-Footer: summary without the head marker is no summary' $true (& $footerRefused $sha)
         $summary.body = $orig
 
         $savedChecks = Copy-HarnessObject $checks

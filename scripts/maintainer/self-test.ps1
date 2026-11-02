@@ -195,7 +195,8 @@ function Test-ModuleRules {
 
         # ---- commit messages and PR texts: the rules are those of scripts/check-commits.mjs, answers are matched by their reason
         $modOk = "feat(example): add it`n`nBody text.`n`n$modSign"
-        $modErr = { param($text, $merge = $false, $exactly = $false) (@(Get-MessageErrors $text -Merge:$merge -ExactlyOne:$exactly)) -join ' | ' }
+        # a tool that falls over gives no answer to any of these cases: each one turns red under its own name instead of ending the self-test
+        $modErr = { param($text, $merge = $false, $exactly = $false) try { (@(Get-MessageErrors $text -Merge:$merge -ExactlyOne:$exactly)) -join ' | ' } catch { "threw: $($_.Exception.Message)" } }
         Add-HarnessCase $modCases 'message: a clean message has no problem' $false ((& $modErr $modOk) -ne '')
         Add-HarnessCase $modCases 'message: an AI attribution trailer' $true ((& $modErr "$modOk`n$modAi") -match 'AI attribution trailers are not allowed')
         Add-HarnessCase $modCases 'message: an AI session trailer' $true ((& $modErr "$modOk`n$modSession") -match 'AI attribution trailers are not allowed')
@@ -215,7 +216,7 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'message: a personal needle of the needle file' $true ((& $modErr "feat(example): add it`n`n$(Get-HarnessFakeNeedle)`n`n$modSign") -match '\[personal\]')
         Add-HarnessCase $modCases 'message: a local path' $true ((& $modErr ("feat(example): add it`n`nsee C:" + "\Users\someone\x`n`n$modSign")) -match '\[win-user-path\]')
         Add-HarnessCase $modCases 'message: a card number' $true ((& $modErr ("feat(example): add it`n`nsee R" + "H-04`n`n$modSign")) -match '\[card-id\]')
-        $modPrErr = { param($title, $body) (@(Get-PrTextErrors -Title $title -Body $body)) -join ' | ' }
+        $modPrErr = { param($title, $body) try { (@(Get-PrTextErrors -Title $title -Body $body)) -join ' | ' } catch { "threw: $($_.Exception.Message)" } }
         Add-HarnessCase $modCases 'PR text: a clean title and body' $false ((& $modPrErr 'feat(example): add it' "Body.`n`n$modSign") -ne '')
         Add-HarnessCase $modCases 'PR text: the type of the title in upper case' $true ((& $modPrErr 'Feat(example): add it' "Body.`n`n$modSign") -match 'PR title must be')
         Add-HarnessCase $modCases 'PR text: the sign-off on the last line in lower case' $true ((& $modPrErr 'feat(example): add it' "Body.`n`nsigned-off-by: DLsnows <noreply@synchain.ca>") -match 'last line must be')
@@ -467,9 +468,10 @@ function Test-ModuleRules {
         $null = Get-ThrownMessage { Invoke-WithHarnessLock -Name merge -ScriptBlock { throw 'inside the lock' } }
         Add-HarnessCase $modCases 'lock: released after a block that threw' $false (-not (& $modFree))
         # a real process holds the lock and is killed (this child only). With no other handle on the mutex the kernel drops it; with the handle of a waiter open the next one gets it as abandoned
+        # The child waits a bounded time: when this process still holds the lock (a lock that is not released) it says so, and the case turns red instead of the self-test hanging for ever
         foreach ($modWaiterOpen in @($false, $true)) {
             $modChildStart = [System.Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
-            foreach ($modChildArg in @('-NoProfile', '-NonInteractive', '-Command', "`$held = [System.Threading.Mutex]::new(`$false, '$modLockName'); [void]`$held.WaitOne(); [Console]::Out.WriteLine('held'); [Console]::Out.Flush(); Start-Sleep -Seconds 120")) { $modChildStart.ArgumentList.Add($modChildArg) }
+            foreach ($modChildArg in @('-NoProfile', '-NonInteractive', '-Command', "`$held = [System.Threading.Mutex]::new(`$false, '$modLockName'); if (`$held.WaitOne(15000)) { [Console]::Out.WriteLine('held'); [Console]::Out.Flush(); Start-Sleep -Seconds 120 } else { [Console]::Out.WriteLine('not held'); [Console]::Out.Flush() }")) { $modChildStart.ArgumentList.Add($modChildArg) }
             $modChildStart.RedirectStandardOutput = $true
             $modChildStart.UseShellExecute = $false
             $modChild = [System.Diagnostics.Process]::Start($modChildStart)

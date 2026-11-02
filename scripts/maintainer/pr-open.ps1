@@ -192,7 +192,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases '-Update: last line is not the sign-off' $true (-not (& $upd "$good`nmore"))
         Add-HarnessCase $cases '-Update: new title with a card number' $true (-not (& $upd $good ('ci(example): finish R' + 'H-03')))
         Add-HarnessCase $cases '-Update: nothing was sent while checks failed' $true ($patched.Count -eq $n)
-        Add-HarnessCase $cases '-Update: a new title is sent with the body' $false (-not ((& $upd $good 'ci(example): another title') -and $patched[-1].title -eq 'ci(example): another title'))
+        Add-HarnessCase $cases '-Update: a new title is sent with the body' $false (-not ((& $upd $good 'ci(example): another title') -and (Get-HarnessProp $patched[-1] 'title') -eq 'ci(example): another title'))
         $existing.state = 'closed'
         Add-HarnessCase $cases '-Update: closed PR' $true (-not (& $upd $good))
         $existing.state = 'open'; $existing.base.ref = 'dev'

@@ -829,7 +829,8 @@ function Invoke-SelfTest {
         $roots = @($fakeClone, $workDir)
         $recordsFile = Join-Path $elsewhere 'waivers.json'
         Set-Content -LiteralPath $recordsFile -Value '{}'
-        $locate = { param($p) @(Test-RecordsLocation -Path $p -ExcludedRoots $roots) }
+        # an exception is no answer: the case that asked turns red under its own name
+        $locate = { param($p) try { @(Test-RecordsLocation -Path $p -ExcludedRoots $roots) } catch { @("threw: $($_.Exception.Message)") } }
         $hit = { param($found, $word) @($found | Where-Object { $_ -match $word }).Count -eq 1 }
         Add-HarnessCase $cases 'records location: a file outside the repository and the worktrees' $false (@(& $locate $recordsFile).Count -ne 0)
         Add-HarnessCase $cases 'records location: a relative path' $true (& $hit (& $locate 'waivers.json') 'absolute path')
@@ -1454,7 +1455,7 @@ function Invoke-SelfTest {
             })
         $routes.Insert(1, "repos/\S+/commits/f{40}$", {
                 $sent = $put[-1]
-                $text = "$($sent.commit_title)`n`n$($sent.commit_message)"
+                $text = "$(Get-HarnessProp $sent 'commit_title')`n`n$(Get-HarnessProp $sent 'commit_message')"
                 if ($readback.Mode -eq 'title') { $text = $text -replace '^[^\n]+', 'something else (#7)' }
                 if ($readback.Mode -eq 'body') { $text = $text -replace 'Adds the example module\.', 'Adds something else.' }
                 @{ sha = 'f' * 40; commit = @{ message = $text; author = @{ name = $readback.Author; email = $readback.AuthorEmail }; committer = @{ name = 'GitHub'; email = $readback.CommitterEmail } } }
@@ -1469,8 +1470,8 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases '-Merge holds the merge lock for its whole run (merge first, then git)' $false (-not ($lockLog.Count -ge 2 -and $lockLog[0] -eq 'merge' -and $lockLog -contains 'git'))
         $sent = $put[-1]
         Add-HarnessCase $cases '-Merge: squash, sha = the checked head, subject (#7), the body ends with the one sign-off' $false (-not (
-                $sent.merge_method -eq 'squash' -and $sent.sha -eq $headSha -and $sent.commit_title -match '\(#7\)$' -and
-                $sent.commit_message -match "^Adds the example module\.`n`nSigned-off-by: [^\n]+$" -and ([string]$done -match 'Merged #7')))
+                (Get-HarnessProp $sent 'merge_method') -eq 'squash' -and (Get-HarnessProp $sent 'sha') -eq $headSha -and (Get-HarnessProp $sent 'commit_title') -match '\(#7\)$' -and
+                (Get-HarnessProp $sent 'commit_message') -match "^Adds the example module\.`n`nSigned-off-by: [^\n]+$" -and ([string]$done -match 'Merged #7')))
         $putAt = @(0..($log.Count - 1) | Where-Object { $log[$_] -match 'X PUT \S+/pulls/7/merge' })
         $readAt = @(0..($log.Count - 1) | Where-Object { $log[$_] -match 'api repos/\S+/commits/f{40}$' })
         Add-HarnessCase $cases '-Merge: one merge request, and the merge commit is read back after it' $false (-not ($putAt.Count -eq 1 -and $readAt.Count -eq 1 -and $readAt[0] -gt $putAt[0]))
@@ -1536,7 +1537,7 @@ function Invoke-SelfTest {
         Add-HarnessCase $cases '-Merge: approval for H, the PR is at H2: not merged' $true ((Test-Throws { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile | Out-Null }) -and $put.Count -eq $n)
         Set-Content -LiteralPath $recordsFile -Value (ConvertTo-Json -Depth 10 @{ approvals = @{ '7' = @(@{ head = $headSha; by = 'user'; note = 'approved exactly this head' }) } })
         $mout = @(Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile)
-        Add-HarnessCase $cases '-Merge: with an approval for the current head, merged with sha pinned to it' $false (-not ($put.Count -eq $n + 1 -and $put[-1].sha -eq $headSha))
+        Add-HarnessCase $cases '-Merge: with an approval for the current head, merged with sha pinned to it' $false (-not ($put.Count -eq $n + 1 -and (Get-HarnessProp $put[-1] 'sha') -eq $headSha))
         Add-HarnessCase $cases '-Merge: prints the approval record it relies on, verbatim' $false (-not (@($mout | Where-Object { $_ -match '^User record relied on \(approval' -and $_ -match 'approved exactly this head' -and $_ -match $headSha }).Count -eq 1))
         $prFixture.mergeable_state = 'dirty'
         Add-HarnessCase $cases '-Merge: not ready, an approval record does not help' $true ((Test-Throws { Invoke-Merge -Number 7 -SummaryFile $summaryPath -RecordsPath $recordsFile | Out-Null }) -and $put.Count -eq $n + 1)
@@ -1559,7 +1560,7 @@ function Invoke-SelfTest {
         $answers.PrNumber = 7
         Set-HarnessFake (New-HarnessFake -Routes $routes -Log $log)
         Add-HarnessCase $cases 'a PR other than #7: facts, check and merge all use its number' $false (-not (
-                -not $otherDone -and $put.Count -eq $n + 1 -and $put[-1].commit_title -match '\(#42\)$' -and
+                -not $otherDone -and $put.Count -eq $n + 1 -and (Get-HarnessProp $put[-1] 'commit_title') -match '\(#42\)$' -and
                 @($log | Where-Object { $_ -match 'fetch .*\+refs/pull/42/head:refs/remotes/origin/pr/42' }).Count -ge 1 -and
                 @($log | Where-Object { $_ -match 'pulls/7|issues/7|pr/7' }).Count -eq 0))
 
