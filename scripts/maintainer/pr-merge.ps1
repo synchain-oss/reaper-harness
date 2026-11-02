@@ -177,7 +177,7 @@ function Read-Records {
 function Get-HeadRecords {
     param([object[]]$List, [string]$ForHead)
     @(@($List) | Where-Object {
-            $_ -and [string](Get-HarnessProp $_ 'head') -eq $ForHead -and $ForHead -match '^[0-9a-f]{40}$' -and [string](Get-HarnessProp $_ 'by') -eq 'user'
+            $_ -and (Test-HarnessSameText ([string](Get-HarnessProp $_ 'head')) $ForHead) -and $ForHead -match '^[0-9a-f]{40}$' -and (Test-HarnessSameText ([string](Get-HarnessProp $_ 'by')) 'user')
         })
 }
 
@@ -191,7 +191,7 @@ function Get-HeadRecord {
 function Test-HandledComment {
     param($Record, [Parameter(Mandatory)]$Comment)
     foreach ($c in @(Get-HarnessProp $Record 'comments')) {
-        if ([string](Get-HarnessProp $c 'id') -ne $Comment.Id) { continue }
+        if (-not (Test-HarnessSameText ([string](Get-HarnessProp $c 'id')) $Comment.Id)) { continue }
         $at = [string](Get-HarnessProp $c 'updated_at')
         try { if ($at -and (ConvertTo-HarnessUtc $at) -eq (ConvertTo-HarnessUtc $Comment.Updated)) { return $true } } catch { }
     }
@@ -1321,6 +1321,7 @@ function Invoke-SelfTest {
         & $bad 'an external comment the user handled for this head passes' { param($f) & $reitem $f { param($a) & $external $a }; $f.Records.ExternalHandled = & $handledRecord } 'ready'
         & $bad 'the handled record is for another head' { param($f) & $reitem $f { param($a) & $external $a }; $f.Records.ExternalHandled = & $handledRecord ('e' * 40) } 'needs-user'
         & $bad 'the handled record is not by the user' { param($f) & $reitem $f { param($a) & $external $a }; $f.Records.ExternalHandled = & $handledRecord $headSha 'orchestrator' } 'needs-user'
+        & $bad 'the handled record names the comment with an invisible character' { param($f) & $reitem $f { param($a) & $external $a }; $f.Records.ExternalHandled = & $handledRecord $headSha 'user' @([pscustomobject]@{ id = "998$zeroWidth"; updated_at = '2026-11-01T11:00:00Z' }) } 'needs-user'
         & $bad 'the external comment was edited after the user handled it' { param($f) & $reitem $f { param($a) & $external $a '2026-11-01T13:00:00Z' }; $f.Records.ExternalHandled = & $handledRecord } 'needs-user' { param($r) @($r.Needs | Where-Object { $_.Reason -match 'edited after the user handled' }).Count -eq 1 }
         & $bad 'the handled record lists only an id, no updated_at' { param($f) & $reitem $f { param($a) & $external $a }; $f.Records.ExternalHandled = & $handledRecord $headSha 'user' @('998') } 'needs-user'
         & $bad 'the handled record names another comment (right updated_at, wrong id)' { param($f) & $reitem $f { param($a) & $external $a }; $f.Records.ExternalHandled = & $handledRecord $headSha 'user' @([pscustomobject]@{ id = '997'; updated_at = '2026-11-01T11:00:00Z' }) } 'needs-user'
@@ -1500,6 +1501,8 @@ function Invoke-SelfTest {
         & $bad 'an approval for an older head' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = 'a' * 40; by = 'user'; note = '' }) } 'needs-user'
         & $bad 'an approval with a 7-character head' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = $headSha.Substring(0, 7); by = 'user'; note = '' }) } 'needs-user'
         & $bad 'an approval not made by the user' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = $headSha; by = 'orchestrator'; note = '' }) } 'needs-user'
+        & $bad 'an approval whose head holds an invisible character' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = "$headSha$zeroWidth"; by = 'user'; note = '' }) } 'needs-user'
+        & $bad 'an approval by a USER in capitals' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = $headSha; by = 'USER'; note = '' }) } 'needs-user'
         # the 40-character rule lives in the record lookup itself: an abbreviated head on both sides is still no record
         $shortHead = $headSha.Substring(0, 7)
         Add-HarnessCase $cases 'a user record never matches an abbreviated head, even when both sides are abbreviated' $true ($null -eq (Get-HeadRecord -List @([pscustomobject]@{ head = $shortHead; by = 'user' }) -ForHead $shortHead))

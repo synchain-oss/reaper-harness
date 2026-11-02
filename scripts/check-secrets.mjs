@@ -6,7 +6,7 @@
 //   node scripts/check-secrets.mjs --self-test
 // The exit code of gitleaks alone proves nothing: when git fails underneath it (an unknown revision, an option this git does
 // not know, a directory that is not a repository) it logs the error, scans nothing and still exits 0. So clean means all of:
-// exit code 0, no error line in its log, its count line present, and that count above 0 whenever git itself lists added lines
+// exit code 0, no error line and no finding line in its log, its count line present, and that count above 0 whenever git itself lists added lines
 // in the range (--numstat does not list the lines of a binary file under any option). A count of 0 is right for a range with nothing
 // to read: no commits, or commits that only delete or rename files.
 // git has to know --diff-merges=first-parent (git 2.31 or newer); an older git makes the scan fail, never pass.
@@ -42,14 +42,14 @@ export function addedLines(revArgs, cwd, env) {
 }
 
 /**
- * What a gitleaks run says: { ok, finding, message }. A finding is exit code 1 with its own "leaks found" line; everything that
+ * What a gitleaks run says: { ok, finding, message }. A finding is exit code 0 or 1 with its own "leaks found" line (the words count under 0 too: the exit code alone proves nothing); everything that
  * is neither a finding nor a proven clean scan means the range was not scanned. The output is safe to show: it runs with --redact.
  */
 export function judgeScan({ status, output, added }) {
     const text = output.replace(/\x1b\[[0-9;]*m/g, "").trim();
     const said = text.length > SAID_MAX ? `${text.slice(0, SAID_MAX)}... (output cut at ${SAID_MAX} characters)` : text;
     const notFinished = (why) => ({ ok: false, finding: false, message: `gitleaks did not finish normally (${why}): ${said}` });
-    if (status === 1 && /(?<!no )leaks found/.test(text)) return { ok: false, finding: true, message: `gitleaks reported findings: ${said}` };
+    if ((status === 0 || status === 1) && /(?<!no )leaks found/.test(text)) return { ok: false, finding: true, message: `gitleaks reported findings: ${said}` };
     if (status !== 0) return notFinished(`exit code ${status}`);
     if (/^(?:\S+\s+)?(?:ERR|FTL)\s/m.test(text)) return notFinished("it logged an error under exit code 0, the range was not scanned");
     const count = /^(?:\S+\s+)?INF (\d+) commits? scanned/m.exec(text);
@@ -99,6 +99,9 @@ export function selfTest() {
     const found = judged(1, "Finding:     REDACTED\n5:00AM WRN leaks found: 1\n", 1);
     t("verdict: exit 1 with its finding line is a finding", true, found.finding && !found.ok && /^gitleaks reported findings/.test(found.message));
     t("verdict: a finding carries the output of gitleaks", true, /REDACTED/.test(found.message));
+    t("verdict: exit 0 with a finding line is a finding", true, judged(0, `Finding:     REDACTED
+5:00AM WRN leaks found: 1
+${log(1)}`, 1).finding);
     for (const [label, status, output] of [
         ["exit 1 without a finding line", 1, "5:00AM FTL CreateFile wt: cannot find the file"],
         ["exit 1 that says no leaks", 1, "5:00AM INF no leaks found"],

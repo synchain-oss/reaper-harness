@@ -32,16 +32,16 @@
 
 # ===================================================== pr-merge.ps1: records bound to head and user
 @@ pr-merge.ps1 | record accepted without by = user
-< -and [string](Get-HarnessProp $_ 'by') -eq 'user'
+< -and (Test-HarnessSameText ([string](Get-HarnessProp $_ 'by')) 'user')
 >
 @@ pr-merge.ps1 | record accepted with an abbreviated head
 < $ForHead -match '^[0-9a-f]{40}$' -and
 >
 @@ pr-merge.ps1 | record accepted for another head
-< [string](Get-HarnessProp $_ 'head') -eq $ForHead -and
+< (Test-HarnessSameText ([string](Get-HarnessProp $_ 'head')) $ForHead) -and
 > $true -and
 @@ pr-merge.ps1 | handled record: comment id not compared
-< if ([string](Get-HarnessProp $c 'id') -ne $Comment.Id) { continue }
+< if (-not (Test-HarnessSameText ([string](Get-HarnessProp $c 'id')) $Comment.Id)) { continue }
 > if ($false) { continue }
 @@ pr-merge.ps1 | handled record: updated_at not compared
 < if ($at -and (ConvertTo-HarnessUtc $at) -eq (ConvertTo-HarnessUtc $Comment.Updated)) { return $true }
@@ -1667,11 +1667,11 @@
 > throw 'Secret scan failed, nothing is pushed'
 @@ ../check-secrets.mjs | any exit code 1 of gitleaks is a finding
 % run=check-secrets
-< if (status === 1 && /(?<!no )leaks found/.test(text)) return
+< if ((status === 0 || status === 1) && /(?<!no )leaks found/.test(text)) return
 > if (status === 1) return
 @@ ../check-secrets.mjs | the words alone make a finding
 % run=check-secrets
-< if (status === 1 && /(?<!no )leaks found/.test(text)) return
+< if ((status === 0 || status === 1) && /(?<!no )leaks found/.test(text)) return
 > if (/(?<!no )leaks found/.test(text)) return
 @@ ../check-secrets.mjs | colour codes of gitleaks left in the message
 % run=check-secrets
@@ -2553,3 +2553,19 @@
 >     if (!fork && hiddenInFormatLines(message)) errors.push("x");
 >     if (merge) return { errors, warns };
 >     if (false) errors.push(
+@@ ../check-secrets.mjs | the words of a finding under exit code 0 read as clean
+% run=check-secrets
+< if ((status === 0 || status === 1) && /(?<!no )leaks found/.test(text)) return
+> if (status === 1 && /(?<!no )leaks found/.test(text)) return
+@@ pr-merge.ps1 | record: head compared with culture rules
+< (Test-HarnessSameText ([string](Get-HarnessProp $_ 'head')) $ForHead) -and
+> [string](Get-HarnessProp $_ 'head') -eq $ForHead -and
+@@ pr-merge.ps1 | record: by compared with culture rules
+< -and (Test-HarnessSameText ([string](Get-HarnessProp $_ 'by')) 'user')
+> -and [string](Get-HarnessProp $_ 'by') -eq 'user'
+@@ pr-merge.ps1 | handled record: comment id compared with culture rules
+< if (-not (Test-HarnessSameText ([string](Get-HarnessProp $c 'id')) $Comment.Id)) { continue }
+> if ([string](Get-HarnessProp $c 'id') -ne $Comment.Id) { continue }
+@@ pr-comment.ps1 | -Footer: a short -Head crashes the refusal
+< $HeadSha.Substring(0, [Math]::Min(7, $HeadSha.Length))
+> $HeadSha.Substring(0, 7)
