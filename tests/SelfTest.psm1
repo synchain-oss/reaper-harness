@@ -527,6 +527,10 @@ function Get-ChildCases([string]$Tmp, [string]$RepoRoot, [string[]]$ExtraGuiLock
         if ($f.Count -eq 4 -and $f[0] -eq 'RESULT') { $cases.Add([pscustomobject]@{ Label = $f[3]; Bad = ($f[1] -eq '1'); Passed = ($f[2] -eq '1') }) }
     }
     if ($run.Exit -ne 0 -or $cases.Count -eq 0) { $cases.Add([pscustomobject]@{ Label = "the child self-test failed (exit code $($run.Exit)): $(($run.Err + $run.Out).Trim() -replace '\s+', ' ')"; Bad = $false; Passed = $false }) }
+    # The real message box cases may only be missing where this session really has no desktop (the child then reports
+    # them as not run): a run that left them out by mistake must not look green
+    $dialogs = @($cases | Where-Object { $_.Label -like 'dialog:*' }).Count
+    $cases.Add([pscustomobject]@{ Label = "child: the real message box cases ran whenever this session has a desktop (desktop: $([Environment]::UserInteractive), cases: $dialogs)"; Bad = $false; Passed = ((-not [Environment]::UserInteractive) -or $dialogs -ge 5) })
     $cases
 }
 

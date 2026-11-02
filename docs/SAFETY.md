@@ -56,6 +56,10 @@ only those, are classified:
 A stuck dialog ends the launch, which is recorded as `Modal` with the dialog's name. The evaluation reminder shows
 up on some launches only (about one in six in our runs); buy a licence or run again.
 
+The self-test exercises this with real message boxes. A session without a desktop (a service, for example some CI
+runners) cannot show them: the self-test then states that those cases did not run. The classification in the table
+above is a pure function and is tested everywhere.
+
 ## Scripts
 
 Every script runs under `Set-StrictMode -Version Latest`. PowerShell variable names are case insensitive, so a loop

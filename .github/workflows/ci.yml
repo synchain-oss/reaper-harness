@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: MIT
 #
 # CI (required check: harness-gate). No compiling and no REAPER here: only the repository's own checks.
-#   compliance    script unit tests (every --self-test plus the privacy mutation check), SPDX headers, workflow
-#                 hardening with the pinned actionlint, gitleaks and the privacy scan over the worktree; on pull
-#                 requests gitleaks and the privacy scan over BASE..HEAD; on pushes the same over the pushed
-#                 commits plus the commit check at the push tier
-#   harness-gate  needs every other job and runs with if: always(): any failure, cancellation or skip turns it red.
-#                 This is the check the rulesets require (.github/required-checks.json), so a job added here only
-#                 counts once it is in its needs (check-workflows.mjs fails when one is left out).
+#   compliance         script unit tests (every --self-test plus the privacy mutation check), SPDX headers, workflow
+#                      hardening with the pinned actionlint, gitleaks and the privacy scan over the worktree; on pull
+#                      requests gitleaks and the privacy scan over BASE..HEAD; on pushes the same over the pushed
+#                      commits plus the commit check at the push tier
+#   self-test-windows  the tool's own self-test on Windows (pwsh run.ps1 -SelfTest): guards, watchdog, dialog
+#                      handling, locks and the WAV comparer, with stand-ins for REAPER. REAPER is neither installed
+#                      nor started, and the job holds no secret, so it runs the same on fork PRs
+#   harness-gate       needs every other job and runs with if: always(): any failure, cancellation or skip turns it
+#                      red. This is the check the rulesets require (.github/required-checks.json), so a job added
+#                      here only counts once it is in its needs (check-workflows.mjs fails when one is left out).
 # Pull request commits are judged by branch-gate (DCO, identity, AI attribution, title and body); the commit
 # scans here are an after-the-fact alarm: pushed commits are already public through refs/pull. A finding means
 # closing the PR, deleting the branch and reopening from a fresh one.
@@ -121,11 +124,26 @@ jobs:
           node scripts/check-privacy.mjs --commits --no-messages --needles "$NEEDLES" "$BEFORE..$AFTER"
           node scripts/check-commits.mjs commits --range "$BEFORE..$AFTER" --tier push --needles "$NEEDLES"
 
-  # Hook-in point for the Windows self-test job of the tool itself (windows-2025, the PowerShell and comparer
-  # self-tests, still no REAPER): add the job above this line and its id to the needs of harness-gate.
+  # The self-test prints one line per case. Cases whose precondition this runner lacks (a desktop for real message
+  # boxes, 8.3 short names, a free subst letter) say so in their label.
+  self-test-windows:
+    name: self-test-windows
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Self-test (no REAPER)
+        shell: pwsh
+        run: pwsh -NoProfile -File run.ps1 -SelfTest
+
+  # A new job goes above this line, and its id into the needs below.
   harness-gate:
     name: harness-gate
-    needs: [compliance]
+    needs: [compliance, self-test-windows]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

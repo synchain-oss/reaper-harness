@@ -130,7 +130,11 @@ Write-Case 'modules: the watched binary is collected by file name with its full 
     $sampled.N -gt 0 -and $run.ModuleScans -eq $sampled.N -and @($run.Modules['X.vst3']).Count -eq 1 -and @($run.PluginModules).Count -eq 2 -and -not (@($run.PluginModules) -match 'kernel32'))
 
 # ---- dialogs (real message boxes, under the GUI locks like a real run) ----
-Invoke-WithHarnessLocks -Names (Get-HarnessGuiLockSet -Extra $extra) -TimeoutSeconds 1800 {
+# A message box needs a visible window station. In a session without one (a service, which is how some CI runners
+# run) WinForms refuses to show it and the stand-in exits at once, so these cases could say nothing about the dialog
+# handling. Then, and only then, they are reported as not run; the parent fails when they are missing although this
+# session has a desktop. The window verdicts themselves are pure functions and run everywhere (Get-HostCases).
+$dialogCases = {
     $outNo = Join-Path $Work 'box-no.txt'
     $run = Invoke-HarnessHost -ReaperExe 'stand-in' -TimeoutSec 30 -Launcher (New-StandIn (New-BoxCommand 'REAPER Query' 'YesNo' $outNo) @{})
     Write-Case 'dialog: REAPER Query is answered No, the process exits normally' $false ($run.Status -eq 'Exited' -and 'save-prompt' -in $run.Dismissed -and (Test-Path -LiteralPath $outNo) -and (Get-Content -LiteralPath $outNo -Raw).Trim() -eq 'No')
@@ -149,6 +153,8 @@ Invoke-WithHarnessLocks -Names (Get-HarnessGuiLockSet -Extra $extra) -TimeoutSec
         Write-Case "dialog: another process's REAPER Query is not clicked (only windows of the started PID are handled)" $false ($run.Status -eq 'Killed' -and -not $bystander.HasExited -and -not (Test-Path -LiteralPath $outBy))
     } finally { if (-not $bystander.HasExited) { Stop-Process -Id $bystander.Id -Force } }
 }
+if ([Environment]::UserInteractive) { Invoke-WithHarnessLocks -Names (Get-HarnessGuiLockSet -Extra $extra) -TimeoutSeconds 1800 -ScriptBlock $dialogCases }
+else { Write-Case '(no interactive desktop in this session: the real message box cases did not run for real)' $false $true }
 
 # ---- GUI locks (switched to names of this self-test, so a real run and the self-test never wait for each other) ----
 & (Get-Module Locks) { $script:DefaultGui = "Local\ReaperHarness-selftest-$PID-gui" }
