@@ -66,7 +66,7 @@ function Test-ModuleRules {
     $modRoot = Get-HarnessRepoRoot
     $modSign = Get-HarnessSignoff
     $modHead = 'a' * 40
-    $mod = @{ Privacy = @{ Code = 0; Out = ''; Err = '' }; GraphQl = $null; Paged = $null; CheckRuns = $null; Runs = @{ total_count = 0; workflow_runs = @() }; ExtraReview = $null; Edit = { param($edits) } }
+    $mod = @{ Privacy = @{ Code = 0; Out = ''; Err = '' }; GraphQl = $null; Paged = $null; CheckRuns = $null; LatestOnly = $null; Runs = @{ total_count = 0; workflow_runs = @() }; ExtraReview = $null; Edit = { param($edits) } }
     $modRoutes = [ordered]@{
         '^gh api boom$'                   = { @{ Code = 2; Out = ''; Err = "boom`nsecond line" } }
         '^gh api longboom$'               = { @{ Code = 2; Out = ''; Err = 'e' * 9000 } }
@@ -75,7 +75,7 @@ function Test-ModuleRules {
         'collaborators/DLsnows/permission' = { 'admin' }
         'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
         'actions/runs\?head_sha=' = { $mod.Runs }
-        'commits/\S+/check-runs'           = { $mod.CheckRuns }
+        'commits/\S+/check-runs'           = { param($argv) if ($mod.LatestOnly -and ($argv -join ' ') -notmatch 'filter=all') { return $mod.LatestOnly }; $mod.CheckRuns }
         'pulls/7/comments'                 = { Read-HarnessFixture 'review-comments.json' }
         'pulls/7/reviews'                  = { $list = Read-HarnessFixture 'reviews.json'; if ($mod.ExtraReview) { @($list) + @($mod.ExtraReview) } else { $list } }
         'issues/7/comments'                = { Read-HarnessFixture 'issue-comments.json' }
@@ -424,6 +424,11 @@ function Test-ModuleRules {
         Add-HarnessCase $modCases 'check runs: only a dispatch on this head: no result at all' $true ($null -eq $modDispatchOnly)
         $modRerun = & $modGate @((& $modActionsRun 101 'failure' 5000000002), (& $modActionsRun 102 'success' 5000000003))
         Add-HarnessCase $modCases 'check runs: two runs of the pull_request event: the newer counts' $false ($modRerun.conclusion -ne 'success')
+        # the default answer of GitHub holds only the newest run of each name: asked that way only the dispatch would be left
+        $mod.LatestOnly = [pscustomobject]@{ total_count = 1; check_runs = @(& $modActionsRun 909 'failure' 5000000777) }
+        $modDispatchLater = & $modGate @((& $modActionsRun 101 'success' 5000000002), (& $modActionsRun 909 'failure' 5000000777))
+        $mod.LatestOnly = $null
+        Add-HarnessCase $modCases 'check runs: a successful PR run and a later dispatch on this head: the PR run counts' $false ((Get-HarnessProp $modDispatchLater 'conclusion') -ne 'success')
         # only GitHub Actions takes part: another app can name a check the same and point its link at a real PR run
         $modOtherApp = { param($link, $slug = 'some-other-app') [pscustomobject]@{ id = 909; name = 'harness-gate'; status = 'completed'; conclusion = 'success'; head_sha = $modHead; app = [pscustomobject]@{ slug = $slug }; details_url = $link } }
         Add-HarnessCase $modCases 'check runs: a successful check of another app does not cover a failed one' $true ((& $modGate @((& $modActionsRun 101 'failure' 5000000002), (& $modOtherApp 'https://example.invalid/report/909'))).conclusion -eq 'failure')

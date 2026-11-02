@@ -500,7 +500,7 @@
 < if (-not $scan.Ok) { throw
 > if ($false) { throw
 @@ new-worktree.ps1 | existing worktree on another branch accepted
-< if ($current -ne $branch) { throw
+< if (-not (Test-HarnessSameText $current $branch)) { throw
 > if ($false) { throw
 @@ new-worktree.ps1 | existing local branch reused
 < if ((Invoke-HarnessGit @('rev-parse', '--verify', '--quiet', "refs/heads/$branch") -AllowFail).Code -eq 0) {
@@ -1134,7 +1134,7 @@
 < if ($problems.Count) { throw "The squash commit failed the read-back
 > if ($false) { throw "The squash commit failed the read-back
 @@ pr-merge.ps1 | worktree on another branch removed
-< if ($current -ne $branch) { throw "$WorktreePath is on branch
+< if (-not (Test-HarnessSameText $current $branch)) { throw "$WorktreePath is on branch
 > if ($false) { throw "$WorktreePath is on branch
 @@ pr-merge.ps1 | worktree removed with force
 < @('worktree', 'remove', $WorktreePath)
@@ -1342,11 +1342,11 @@
 < elseif ($localRead.Code -ne 1) {
 > elseif ($false) {
 @@ pr-merge.ps1 | remote branch deleted even when it is gone
-< if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
-> Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null
+< if ($remoteTip) { Invoke-HarnessGit @('push', "--force-with-lease=${branchRef}:$remoteTip", 'origin', '--delete', $branchRef) | Out-Null }
+> Invoke-HarnessGit @('push', "--force-with-lease=${branchRef}:$remoteTip", 'origin', '--delete', $branchRef) | Out-Null
 @@ pr-merge.ps1 | failed delete of the remote branch ignored
-< Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null
-> Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) -AllowFail | Out-Null
+< Invoke-HarnessGit @('push', "--force-with-lease=${branchRef}:$remoteTip", 'origin', '--delete', $branchRef) | Out-Null
+> Invoke-HarnessGit @('push', "--force-with-lease=${branchRef}:$remoteTip", 'origin', '--delete', $branchRef) -AllowFail | Out-Null
 @@ pr-merge.ps1 | local branch deleted even when it is gone
 < if ($localTip) { Invoke-HarnessGit @('branch', '-D', $branch) | Out-Null }
 > Invoke-HarnessGit @('branch', '-D', $branch) | Out-Null
@@ -2388,9 +2388,9 @@
 > $null = 0
 @@ pr-merge.ps1 | -After: a leftover is removed after the remote branch
 < if ($leftover) { Remove-WorktreeLeftover $WorktreePath }
-<     # delete the remote sub-branch (the pre-push hook lets feat/* deletions through), then remove the worktree and the local branch under the git lock
-<     if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
-> if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
+<     # delete the remote sub-branch (the pre-push hook lets feat/* deletions through; the lease makes git refuse when it moved since the comparison above), then remove the worktree and the local branch under the git lock
+<     if ($remoteTip) { Invoke-HarnessGit @('push', "--force-with-lease=${branchRef}:$remoteTip", 'origin', '--delete', $branchRef) | Out-Null }
+> if ($remoteTip) { Invoke-HarnessGit @('push', "--force-with-lease=${branchRef}:$remoteTip", 'origin', '--delete', $branchRef) | Out-Null }
 >     if ($leftover) { Remove-WorktreeLeftover $WorktreePath }
 @@ pr-merge.ps1 | -After: a leftover is removed from the top down
 < Sort-Object { $_.FullName.Length } -Descending
@@ -2506,3 +2506,50 @@
 % run=check-secrets
 < const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--text", "--diff-merges=first-parent"];
 > const LOG_OPTS = ["--no-ext-diff", "--no-textconv", "--diff-merges=first-parent"];
+@@ lib/HarnessGh.psm1 | check runs: only the newest run of each name asked for
+% run=shared
+< check-runs?per_page=100&filter=all"
+> check-runs?per_page=100"
+@@ pr-merge.ps1 | -After: the delete of the remote branch without a lease
+< @('push', "--force-with-lease=${branchRef}:$remoteTip", 'origin', '--delete', $branchRef)
+> @('push', 'origin', '--delete', $branchRef)
+@@ pr-merge.ps1 | -After: a branch that differs only by letter case is taken for it
+< if (-not (Test-HarnessSameText $current $branch)) { throw "$WorktreePath is on branch
+> if ($current -ne $branch) { throw "$WorktreePath is on branch
+@@ new-worktree.ps1 | existing worktree on a branch that differs only by letter case accepted
+< if (-not (Test-HarnessSameText $current $branch)) { throw
+> if ($current -ne $branch) { throw
+@@ pr-comment.ps1 | -Footer: a stray bracket in the refusal
+< ([string]$s.head).Length))), not
+> ([string]$s.head).Length)))), not
+@@ ../check-commits.mjs | subject and sign-off with invisible characters: rule disabled
+% run=check-commits
+< if (!fork && hiddenInFormatLines(message)) errors.push(
+> if (false) errors.push(
+@@ ../check-commits.mjs | subject and sign-off with invisible characters: for outside contributors too
+% run=check-commits
+< if (!fork && hiddenInFormatLines(message)) errors.push(
+> if (hiddenInFormatLines(message)) errors.push(
+@@ ../check-commits.mjs | subject and sign-off with invisible characters: the subject is not looked at
+% run=check-commits
+< (i === 0 || SIGNOFF_LINE.test(stripInvisible(l))) && stripInvisible(l) !== l
+> SIGNOFF_LINE.test(stripInvisible(l)) && stripInvisible(l) !== l
+@@ ../check-commits.mjs | subject and sign-off with invisible characters: the sign-off is not looked at
+% run=check-commits
+< (i === 0 || SIGNOFF_LINE.test(stripInvisible(l))) && stripInvisible(l) !== l
+> i === 0 && stripInvisible(l) !== l
+@@ ../check-commits.mjs | subject and sign-off with invisible characters: every line counts
+% run=check-commits
+< (i === 0 || SIGNOFF_LINE.test(stripInvisible(l))) && stripInvisible(l) !== l
+> stripInvisible(l) !== l
+@@ ../check-commits.mjs | subject and sign-off with invisible characters: a split sign-off key is not seen
+% run=check-commits
+< (i === 0 || SIGNOFF_LINE.test(stripInvisible(l))) && stripInvisible(l) !== l
+> (i === 0 || SIGNOFF_LINE.test(l)) && stripInvisible(l) !== l
+@@ ../check-commits.mjs | subject and sign-off with invisible characters: read after the merge exemption
+% run=check-commits
+<     if (merge) return { errors, warns };
+<     if (!fork && hiddenInFormatLines(message)) errors.push(
+>     if (!fork && hiddenInFormatLines(message)) errors.push("x");
+>     if (merge) return { errors, warns };
+>     if (false) errors.push(

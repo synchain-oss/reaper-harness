@@ -851,7 +851,7 @@ function Invoke-AfterUnlocked {
     if ($present -and -not $leftover) {
         Assert-WorktreeDir -Path $WorktreePath -MainRoot (Get-HarnessRepoRoot) -KnownTrees $registered
         $current = (Invoke-HarnessGit @('symbolic-ref', '--quiet', '--short', 'HEAD') -Repo $WorktreePath -AllowFail).Out.Trim()
-        if ($current -ne $branch) { throw "$WorktreePath is on branch '$current', not on $branch of #${Number}: wrong path, nothing is cleaned up" }
+        if (-not (Test-HarnessSameText $current $branch)) { throw "$WorktreePath is on branch '$current', not on $branch of #${Number}: wrong path, nothing is cleaned up" }
     }
     # everything is compared before anything is deleted: a tip other than the merged head holds commits the merge does not have
     $mergedHead = [string]$pull.head.sha
@@ -892,8 +892,8 @@ function Invoke-AfterUnlocked {
     }
     # what an earlier run left goes first: when it is still held open nothing else has changed
     if ($leftover) { Remove-WorktreeLeftover $WorktreePath }
-    # delete the remote sub-branch (the pre-push hook lets feat/* deletions through), then remove the worktree and the local branch under the git lock
-    if ($remoteTip) { Invoke-HarnessGit @('push', 'origin', '--delete', $branchRef) | Out-Null }
+    # delete the remote sub-branch (the pre-push hook lets feat/* deletions through; the lease makes git refuse when it moved since the comparison above), then remove the worktree and the local branch under the git lock
+    if ($remoteTip) { Invoke-HarnessGit @('push', "--force-with-lease=${branchRef}:$remoteTip", 'origin', '--delete', $branchRef) | Out-Null }
     Invoke-HarnessGitLocked {
         # the plain remove: no --force, git itself still refuses a worktree that changed in the meantime
         if ($present -and -not $leftover) { Invoke-HarnessGit @('worktree', 'remove', $WorktreePath) | Out-Null }
@@ -1923,7 +1923,7 @@ function Invoke-SelfTest {
             ' symbolic-ref --quiet --short HEAD' = { $wtBranch.Name }
             'ls-remote --exit-code --heads origin refs/heads/feat/example$' = { $afterState.Remote }
             ' status --porcelain --untracked-files=normal --ignored$' = { $afterState.Status }
-            ' push origin --delete refs/heads/feat/example' = { $afterState.Push }
+            ' push --force-with-lease=refs/heads/feat/example:\S+ origin --delete refs/heads/feat/example' = { $afterState.Push }
             ' worktree list --porcelain'     = { & $worktreeText }
             # fake worktree remove: moves the directory into the self-test's temp directory (never deletes), and only when the path is inside it
             ' worktree remove '              = {
@@ -1941,7 +1941,7 @@ function Invoke-SelfTest {
         $afterLine = { try { Invoke-After -Number 7 -WorktreePath $exampleTree } catch { "threw: $($_.Exception.Message)" } }
         $line = & $afterLine
         Add-HarnessCase $cases '-After: merge lock first; read-back passes, remote branch deleted, worktree and local branch removed under the git lock' $false (-not (
-                $line -match 'merged as fffffff' -and @($log | Where-Object { $_ -match 'push origin --delete refs/heads/feat/example' }).Count -eq 1 -and
+                $line -match 'merged as fffffff' -and @($log | Where-Object { $_ -match "push --force-with-lease=refs/heads/feat/example:$headSha origin --delete refs/heads/feat/example" }).Count -eq 1 -and
                 @($log | Where-Object { $_ -match "worktree remove $([regex]::Escape($exampleTree))$" }).Count -eq 1 -and
                 @($log | Where-Object { $_ -match 'branch -D feat/example' }).Count -eq 1 -and
                 $locks[0] -eq 'merge' -and @($locks | Where-Object { $_ -eq 'git' }).Count -ge 2))
@@ -1953,7 +1953,7 @@ function Invoke-SelfTest {
             $log.Clear()
         }
         $removed = { @($log | Where-Object { $_ -match ' worktree remove ' }).Count }
-        $nothingDeleted = { @($log | Where-Object { $_ -match 'push origin --delete| worktree remove | branch -D ' }).Count -eq 0 -and (Test-Path -LiteralPath $exampleTree) }
+        $nothingDeleted = { @($log | Where-Object { $_ -match 'origin --delete| worktree remove | branch -D ' }).Count -eq 0 -and (Test-Path -LiteralPath $exampleTree) }
         $afterCase = {
             param([string]$label, [string]$stateKey, $stateAnswer, [string]$word)
             & $reset
@@ -1975,7 +1975,7 @@ function Invoke-SelfTest {
         $afterState.Remote = @{ Code = 2; Out = ''; Err = '' }
         $remoteGone = & $afterLine
         $afterState.Remote = $remoteLine
-        Add-HarnessCase $cases '-After: the remote branch is already gone: not pushed, and the last line says so' $false (-not ($remoteGone -match 'remote sub-branch was already gone, worktree removed, local branch removed' -and @($log | Where-Object { $_ -match 'push origin --delete' }).Count -eq 0))
+        Add-HarnessCase $cases '-After: the remote branch is already gone: not pushed, and the last line says so' $false (-not ($remoteGone -match 'remote sub-branch was already gone, worktree removed, local branch removed' -and @($log | Where-Object { $_ -match 'origin --delete' }).Count -eq 0))
         & $reset
         $afterState.Local = @{ Code = 1; Out = ''; Err = '' }
         $localGone = & $afterLine
@@ -2014,6 +2014,8 @@ function Invoke-SelfTest {
         & $reset
         $wtBranch.Name = 'feat/other'
         Add-HarnessCase $cases '-After: the worktree is on another branch (wrong path): nothing is cleaned up' $true (((& $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }) -match "not on feat/example") -and (Test-Path -LiteralPath $exampleTree) -and (& $removed) -eq 0)
+        $wtBranch.Name = 'feat/Example'
+        Add-HarnessCase $cases '-After: the worktree is on a branch that differs only by letter case: nothing is cleaned up' $true (((& $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }) -match "on branch 'feat/Example', not on feat/example") -and (Test-Path -LiteralPath $exampleTree) -and (& $removed) -eq 0)
         $wtBranch.Name = 'feat/example'
         Add-HarnessCase $cases '-After: no -Worktree' $true ((& $messageOf { Invoke-After -Number 7 -WorktreePath '' }) -match 'needs -Worktree')
         $squash.Message = "feat(example): add (#7)`n`nAdds it.`n`n$(Get-HarnessSignoff)`n$(Get-HarnessSignoff)"
@@ -2028,7 +2030,7 @@ function Invoke-SelfTest {
         $squash.Author = 'DLsnows'; $squash.CommitterEmail = 'someone@example.com'
         Add-HarnessCase $cases '-After: the committer is not allowed' $true ((& $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }) -match 'committer email')
         $squash.CommitterEmail = 'noreply@github.com'
-        Add-HarnessCase $cases '-After: no push, remove or branch delete ran in any of the refused runs' $false (@($log | Where-Object { $_ -match 'push origin --delete| worktree remove | branch -D ' }).Count -gt 0)
+        Add-HarnessCase $cases '-After: no push, remove or branch delete ran in any of the refused runs' $false (@($log | Where-Object { $_ -match 'origin --delete| worktree remove | branch -D ' }).Count -gt 0)
         $mergedPull.merged = $false
         Add-HarnessCase $cases '-After: not merged yet' $true ((& $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }) -match 'not merged yet')
         $mergedPull.merged = $true
@@ -2087,7 +2089,7 @@ function Invoke-SelfTest {
         $halfLine = & $afterLine
         Add-HarnessCase $cases '-After: unregistered, only empty directories left: the rest is done' $false (-not (
                 $halfLine -match 'remote sub-branch deleted, worktree was already unregistered, its empty directory removed, local branch removed' -and (& $removed) -eq 0 -and
-                @($log | Where-Object { $_ -match 'push origin --delete' }).Count -eq 1 -and @($log | Where-Object { $_ -match 'branch -D' }).Count -eq 1 -and -not (Test-Path -LiteralPath $exampleTree)))
+                @($log | Where-Object { $_ -match 'origin --delete' }).Count -eq 1 -and @($log | Where-Object { $_ -match 'branch -D' }).Count -eq 1 -and -not (Test-Path -LiteralPath $exampleTree)))
         & $halfDone
         Set-Content -LiteralPath (Join-Path $leftBelow 'kept.txt') -Value 'x'
         $halfFile = & $messageOf { Invoke-After -Number 7 -WorktreePath $exampleTree }
@@ -2129,7 +2131,7 @@ function Invoke-SelfTest {
             $linkAsTree = & $messageOf { Invoke-After -Number 7 -WorktreePath $emptyLink }
             $linkStays = Test-Path -LiteralPath $emptyLink
             if ($linkStays) { [IO.Directory]::Delete($emptyLink) }
-            Add-HarnessCase $cases '-After: a junction to an empty directory given as -Worktree: refused as a link, nothing is deleted' $true ($linkAsTree -match 'is a link' -and $linkStays -and -not @($log | Where-Object { $_ -match 'push origin --delete| branch -D ' }).Count)
+            Add-HarnessCase $cases '-After: a junction to an empty directory given as -Worktree: refused as a link, nothing is deleted' $true ($linkAsTree -match 'is a link' -and $linkStays -and -not @($log | Where-Object { $_ -match 'origin --delete| branch -D ' }).Count)
         }
         # registered and empty is something else: git still knows it, so it is looked at as a worktree
         $worktreeText = $savedWorktreeText
@@ -2205,7 +2207,7 @@ function Invoke-SelfTest {
         }
         try {
             $repoRootNow = Get-HarnessRepoRoot
-            $e2e = @{ Pull = $null; Line = '' }
+            $e2e = @{ Pull = $null; Line = ''; BeforeDelete = $null }
             # gh is answered here; git runs for real, and a command addressed to this repository goes to the temporary main clone instead
             Set-HarnessFake {
                 param($cmd, $argv, $opts)
@@ -2214,6 +2216,11 @@ function Invoke-SelfTest {
                     return @{ Code = 1; Out = ''; Err = "no fixture for: gh $($argv -join ' ')" }
                 }
                 if ($cmd -ceq 'git' -and $argv[0] -ceq '-C' -and $argv[1] -ceq $repoRootNow -and $argv[2] -cne 'config') { $argv[1] = $e2eMain }
+                if ($cmd -ceq 'git' -and ($argv -contains '--delete') -and $e2e.BeforeDelete) {
+                    $beforeDelete = $e2e.BeforeDelete
+                    $e2e.BeforeDelete = $null
+                    & $beforeDelete
+                }
                 $null
             }
             $realGit = { param([string[]]$gitArgs) (Invoke-HarnessExternal git $gitArgs).Out.Trim() }
@@ -2267,6 +2274,12 @@ function Invoke-SelfTest {
             # the real worktree is elsewhere than the path given: its changes were never looked at, and git branch -D would fail after the remote is gone
             $typoRun = & $messageOf { $e2e.Line = Invoke-After -Number 7 -WorktreePath (Join-Path $e2eRoot 'typo') }
             Add-HarnessCase $cases '-After with real git: a wrong path while the real worktree is elsewhere: refused, nothing is deleted' $true ($typoRun -match 'feat/example is checked out at .*tree, not at .*typo' -and (& $intact))
+
+            # the remote branch moves after the comparison, just before the delete goes out
+            $e2e.BeforeDelete = { & $realGit @('--git-dir', $e2eOrigin, 'update-ref', $branchRefName, $remoteExtra) | Out-Null }
+            $movedRun = & $e2eRun
+            Add-HarnessCase $cases '-After with real git: the remote branch moves after the comparison: the lease refuses the delete, the branches and the worktree stay' $true ($movedRun -match 'git push origin refs/heads/feat/example failed' -and (& $intact) -and (& $realGit @('--git-dir', $e2eOrigin, 'rev-parse', $branchRefName)) -ceq $remoteExtra)
+            & $realGit @('--git-dir', $e2eOrigin, 'update-ref', $branchRefName, $treeTip) | Out-Null
 
             # the clean case deletes all three; an ignored file goes with the worktree, and the last line names it
             Add-Content -LiteralPath (Join-Path $mainGitDir 'info/exclude') -Value '*.ignored'

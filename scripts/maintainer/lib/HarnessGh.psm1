@@ -735,7 +735,8 @@ function Get-HarnessCheckRuns {
     $prRuns = [System.Collections.Generic.HashSet[string]]::new()
     $runPages = Get-HarnessApi "repos/$($script:RepoSlug)/actions/runs?head_sha=$Sha&event=pull_request&per_page=100" -Paginate
     foreach ($run in @($runPages | ForEach-Object { $_.workflow_runs } | ForEach-Object { $_ })) { [void]$prRuns.Add([string]$run.id) }
-    $pages = Get-HarnessApi "repos/$($script:RepoSlug)/commits/$Sha/check-runs?per_page=100" -Paginate
+    # filter=all: by default GitHub lists only the newest run of each check name, and a later dispatch on this head would push the PR run out of the answer
+    $pages = Get-HarnessApi "repos/$($script:RepoSlug)/commits/$Sha/check-runs?per_page=100&filter=all" -Paginate
     $latest = @{}
     foreach ($c in @($pages | ForEach-Object { $_.check_runs } | ForEach-Object { $_ })) {
         if ([string](Get-HarnessProp (Get-HarnessProp $c 'app') 'slug') -cne 'github-actions') { continue }

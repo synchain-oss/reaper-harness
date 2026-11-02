@@ -41,7 +41,7 @@ function New-WorkWorktree {
     $wt = Join-Path (Join-Path (Get-HarnessRoot) 'wt') $Card
     if (Test-Path -LiteralPath $wt) {
         $current = (Invoke-HarnessGit @('symbolic-ref', '--quiet', '--short', 'HEAD') -Repo $wt -AllowFail).Out.Trim()
-        if ($current -ne $branch) { throw "$wt already exists, but on branch '$current', not on $branch" }
+        if (-not (Test-HarnessSameText $current $branch)) { throw "$wt already exists, but on branch '$current', not on $branch" }
         Set-RepoIdentity $wt
         return "Worktree already exists: $wt ($branch)"
     }
@@ -117,6 +117,9 @@ function Invoke-SelfTest {
         $state.Sticky = $false; $state.Name = 'DLsnows'
         $state.Current = 'feat/other'
         Add-HarnessCase $cases 'the worktree exists but on another branch' $true (Test-Throws { New-WorkWorktree -Card $unit -Slug 'example-unit' })
+        $state.Current = 'feat/Example-Unit'
+        Add-HarnessCase $cases 'the worktree exists on a branch that differs only by letter case' $true (Test-Throws { New-WorkWorktree -Card $unit -Slug 'example-unit' })
+        $state.Current = 'feat/other'
         $state.LocalBranch = 0
         Add-HarnessCase $cases 'the local branch exists already' $true ((Get-ThrownMessage { New-WorkWorktree -Card 'unit-b' -Slug 'example-unit' }) -match 'Local branch feat/example-unit exists already')
         # each refusal is checked by its own reason: with a second reason behind it a missing check would go unnoticed (the local branch is still reported as existing here)

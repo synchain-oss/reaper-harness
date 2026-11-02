@@ -26,7 +26,7 @@ import fs from "node:fs";
 import { UsageError, assertNodeVersion, caseResult, git, j, reportSelfTest, runCli } from "./lib/check-kit.mjs";
 import * as needles from "./lib/privacy-needles.mjs";
 
-const { FAKE_NEEDLE, INVISIBLES, READABLE, plainText, redact, scan } = needles;
+const { FAKE_NEEDLE, INVISIBLES, READABLE, plainText, redact, scan, stripInvisible } = needles;
 
 export const MAINTAINER = "DLsnows <noreply@synchain.ca>";
 export const SIGNOFF = `Signed-off-by: ${MAINTAINER}`;
@@ -84,9 +84,17 @@ function readMessage(message) {
     }
 }
 
+/** The rules read around invisible characters, the history keeps them: the subject and the sign-off lines have to be what they look like. */
+function hiddenInFormatLines(message) {
+    return String(message)
+        .split("\n")
+        .some((l, i) => (i === 0 || SIGNOFF_LINE.test(stripInvisible(l))) && stripInvisible(l) !== l);
+}
+
 /**
  * One commit message. author = { name, email }; merge commits skip the subject and sign-off rules (no new content). The rules read it
  * through plainText, so an invisible character cannot hide a path or a trailer from them; a control character is an error of that message.
+ * Our own subject and sign-off lines hold no invisible character at all; a contribution from outside may (an emoji with a joiner, Persian text).
  */
 export function checkMessage(message, opts = {}) {
     const { tier = "same", author, merge = false, exactlyOne = false, personal = [] } = opts;
@@ -102,6 +110,7 @@ export function checkMessage(message, opts = {}) {
     if (hasAiTrailer(lines)) (fork ? warns : errors).push("AI attribution trailers are not allowed");
     if (trailers(text).some((l) => !SIGNOFF_LINE.test(l))) (fork ? warns : errors).push("Signed-off-by is the only allowed trailer");
     if (merge) return { errors, warns };
+    if (!fork && hiddenInFormatLines(message)) errors.push("the subject and the Signed-off-by line must not hold invisible characters: they stay in the history as written");
     const signoffs = lines.filter((l) => SIGNOFF_LINE.test(l)).map((l) => l.trim());
     if (fork) {
         const own = author && `signed-off-by: ${author.name} <${author.email}>`.toLowerCase();
@@ -308,7 +317,13 @@ export function selfTest() {
     }
     c("same: the path without a split is found as well", true, commit(msg(splitPath(""), "", SIGNOFF)));
     c("same: a co-author trailer split by a zero-width space", true, commit(msg(j("Co-\u200bauthored", "-by: Someone <s@example.com>"), "", SIGNOFF)));
-    c("same: a sign-off with a zero-width space reads as the sign-off", false, commit(msg(`${SIGNOFF}\u200b`)));
+    c("same: a sign-off with a zero-width space stays in the history as written", true, commit(msg(`${SIGNOFF}\u200b`)));
+    c("same: a sign-off key split by a zero-width space stays in the history as written", true, commit(msg(`Signed\u200b-off-by: ${MAINTAINER}`)));
+    c("same: a subject with a zero-width space stays in the history as written", true, commit(`ci(checks):\u200b add checks\n\nOne line of explanation.\n\n${SIGNOFF}`));
+    c("same: a zero-width space in a body line is read around", false, commit(msg("One\u200b more line.", "", SIGNOFF)));
+    t("same: the refusal names the subject and the sign-off", true, checkCommit(commit(msg(`${SIGNOFF}\u200b`)), { tier: "same" }).errors.filter((e) => /subject and the Signed-off-by line must not hold invisible/.test(e)));
+    c("same: a merge commit with a zero-width space in its subject brings no new content", false, commit("Merge pull request #3\u200b from synchain-oss/feat/x", { parents: 2 }));
+    c("push: an own commit with a zero-width space in its sign-off", true, commit(msg(`${SIGNOFF}\u200b`)), "push");
     c("same: an emoji with a joiner, a warning sign and Persian text", false, commit(msg(READABLE, "", SIGNOFF)));
     t("same: a control character is an error of that message, no crash", true, checkMessage(msg("colour \u001b[31m", "", SIGNOFF)).errors.filter((e) => /control character U\+001B/.test(e)));
     t("same: a CR without its LF is an error of that message", true, checkMessage(msg("one\rtwo", "", SIGNOFF)).errors.filter((e) => /control character U\+000D/.test(e)));
@@ -345,6 +360,7 @@ export function selfTest() {
     c("fork: sign-off does not match the author", true, commit(msg(SIGNOFF), { author: OUTSIDER, committer: OUTSIDER }), "fork");
     c("fork: an emoji with a joiner, a warning sign and Persian text", false, commit(msg(READABLE, "", own), { author: OUTSIDER, committer: OUTSIDER }), "fork");
     c("fork: a local path split by a zero-width space is found", true, commit(msg(splitPath("\u200b"), "", own), { author: OUTSIDER, committer: OUTSIDER }), "fork");
+    c("fork: an emoji with a joiner in the subject and the sign-off", false, commit(`ci(checks): add ${READABLE}\n\nOne line of explanation.\n\n${own}\u200d`, { author: OUTSIDER, committer: OUTSIDER }), "fork");
     const forkAi = checkCommit(commit(msg(j("Co-Authored", "-By: Bot <b@example.com>"), own), { author: OUTSIDER }), { tier: "fork" });
     t("fork: AI trailer only warns", false, forkAi.warns.length ? forkAi.errors : ["no warning"]);
     c("push: web merge of an outside contribution", false, commit(msg(own), { author: OUTSIDER, committer: WEB }), "push");

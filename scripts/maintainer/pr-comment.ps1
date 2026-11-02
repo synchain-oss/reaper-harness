@@ -87,7 +87,7 @@ function Get-FooterResult {
     $activity = Get-HarnessPrActivity $Number
     $s = (Get-HarnessReviewState $activity).summary
     if (-not $s) { return @{ Ok = $false; Reason = 'no bot review summary yet' } }
-    if ($HeadSha -and $s.head -ne $HeadSha) { return @{ Ok = $false; Reason = "the newest summary reviewed $(([string]$s.head).Substring(0, [Math]::Min(7, ([string]$s.head).Length)))), not $($HeadSha.Substring(0, 7))" } }
+    if ($HeadSha -and $s.head -ne $HeadSha) { return @{ Ok = $false; Reason = "the newest summary reviewed $(([string]$s.head).Substring(0, [Math]::Min(7, ([string]$s.head).Length))), not $($HeadSha.Substring(0, 7))" } }
     if (-not $s.ok) { return @{ Ok = $false; Reason = $s.reason } }
     @{ Ok = $true; Red = $s.red; Important = $s.important; Suggest = $s.suggest; Run = $s.runId; Head = $s.head }
 }
@@ -356,6 +356,8 @@ function Invoke-SelfTest {
         # a refusal is an answer with Ok = false; an exception is no refusal, so the case turns red under its own name
         $footerRefused = { param($askedHead) try { -not (Get-FooterResult 7 $askedHead).Ok } catch { $false } }
         Add-HarnessCase $cases '-Footer: the summary reviewed another head' $true (& $footerRefused ('a' * 40))
+        $footerWhy = try { (Get-FooterResult 7 ('a' * 40)).Reason } catch { '' }
+        Add-HarnessCase $cases '-Footer: the refusal names the head that was reviewed and the one asked for' $true ($footerWhy -cmatch "^the newest summary reviewed $($sha.Substring(0, 7)), not aaaaaaa$")
         $summary = $issue[0]
         $orig = $summary.body
         $summary.body = "$orig`n<!-- harness-review v1 red=0 important=0 suggest=1 -->"
