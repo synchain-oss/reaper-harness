@@ -16,6 +16,7 @@
 # The criteria are read from the checkout this script runs from, so that checkout must sit exactly on the freshly fetched
 # origin/feature/v1 with a clean tree: the rules come from the target line, never from the PR under review. core.hooksPath
 # must resolve to scripts/hooks of that checkout (relative or absolute spelling), otherwise the commit and push guards are off.
+# Run it from the main checkout: a shared core.hooksPath names the main checkout's hooks, so another worktree reports it.
 #
 # The user's decisions live in one JSON record file, handed in with -WaiverFile only (no environment variable, no config).
 # Every record needs "by": "user" and a full 40-character head; after another push it no longer applies and the user has to
