@@ -1,0 +1,167 @@
+# SPDX-License-Identifier: MIT
+#
+# CI (required check: harness-gate). No compiling and no REAPER here: only the repository's own checks.
+#   compliance         script unit tests (every --self-test plus the privacy mutation check), SPDX headers, workflow
+#                      hardening with the pinned actionlint, gitleaks and the privacy scan over the worktree; on pull
+#                      requests gitleaks and the privacy scan over BASE..HEAD; on pushes the same over the pushed
+#                      commits plus the commit check at the push tier
+#   self-test-windows  the tool's own self-test on Windows (pwsh run.ps1 -SelfTest): guards, watchdog, dialog
+#                      handling, locks and the WAV comparer, with stand-ins for REAPER. REAPER is neither installed
+#                      nor started, and the job holds no secret, so it runs the same on fork PRs
+#   harness-gate       needs every other job and runs with if: always(): any failure, cancellation or skip turns it
+#                      red. This is the check the rulesets require (.github/required-checks.json), so a job added
+#                      here only counts once it is in its needs (check-workflows.mjs fails when one is left out).
+# Pull request commits are judged by branch-gate (DCO, identity, AI attribution, title and body); the commit
+# scans here are an after-the-fact alarm: pushed commits are already public through refs/pull. A finding means
+# closing the PR, deleting the branch and reopening from a fresh one.
+# Personal needles: same-repository PRs, pushes and manual runs read the secret PRIVACY_NEEDLES (--needles ci,
+# missing means red); fork PRs and dependabot's PRs cannot read it and run the generic rules only (ci-optional),
+# which the scan states in the log. The PR author's login cannot be forged.
+# The secret only goes to steps that run node and git. Earlier steps can write $GITHUB_ENV / $GITHUB_PATH and so
+# influence later steps that hold the secret; the only code that runs before them is gitleaks and actionlint,
+# both checked against a pinned sha256, and this PR's own node scripts, which run in the secret-holding steps anyway.
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, prod, "feature/**"]
+    # edited: a PR whose base changed must recompute its commit range against the new base (editing the title or
+    # body reruns it as well, harmless)
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [dev, "feature/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer run of the same PR replaces the older one and may cancel it; a push checks the commits that push brought,
+# and a cancelled push run would leave them unchecked, so each push is its own group and is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  compliance:
+    name: compliance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      NEEDLES: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && 'ci' || 'ci-optional' }}
+      # sha256 of gitleaks_<version>_linux_x64.tar.gz and actionlint_<version>_linux_amd64.tar.gz, taken from each
+      # release's official checksums.txt; change them together with .gitleaks-version and .actionlint-version
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Install pinned tools (gitleaks, actionlint)
+        run: |
+          set -euo pipefail
+          v=$(tr -d '[:space:]' < .gitleaks-version)
+          f="gitleaks_${v}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${v}/$f"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          echo "HARNESS_GITLEAKS=$RUNNER_TEMP/gitleaks/gitleaks" >> "$GITHUB_ENV"
+          v=$(tr -d '[:space:]' < .actionlint-version)
+          f="actionlint_${v}_linux_amd64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$f" "https://github.com/rhysd/actionlint/releases/download/v${v}/$f"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/actionlint" actionlint
+          echo "HARNESS_ACTIONLINT=$RUNNER_TEMP/actionlint/actionlint" >> "$GITHUB_ENV"
+      # Every --self-test of the check scripts, the review bot and the hooks, and the privacy mutation check
+      # (scripts/lib/self-tests.test.mjs). The hook tests commit through the real sh shells in temp repositories.
+      - name: Script unit tests
+        run: node --test "scripts/**/*.test.mjs"
+      - name: Worktree (SPDX, workflows, secrets)
+        run: |
+          set -euo pipefail
+          node scripts/check-spdx.mjs
+          node scripts/check-workflows.mjs
+          "$HARNESS_GITLEAKS" dir . --no-banner --redact
+      - name: Worktree privacy
+        env:
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: node scripts/check-privacy.mjs --needles "$NEEDLES"
+      - name: Pull request commits (secrets)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          "$HARNESS_GITLEAKS" git . --no-banner --redact --log-opts="$BASE_SHA..$HEAD_SHA --no-ext-diff --no-textconv"
+      - name: Pull request commits (privacy)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: node scripts/check-privacy.mjs --commits --no-messages --needles "$NEEDLES" "$BASE_SHA..$HEAD_SHA"
+      # A new branch has no before; its commits went through a pull request first
+      - name: Pushed commits (secrets)
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          "$HARNESS_GITLEAKS" git . --no-banner --redact --log-opts="$BEFORE..$AFTER --no-ext-diff --no-textconv"
+      - name: Pushed commits (privacy and commit check, push tier)
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: |
+          set -euo pipefail
+          node scripts/check-privacy.mjs --commits --no-messages --needles "$NEEDLES" "$BEFORE..$AFTER"
+          node scripts/check-commits.mjs commits --range "$BEFORE..$AFTER" --tier push --needles "$NEEDLES"
+
+  # The self-test prints one line per case. Cases whose precondition this runner lacks (a desktop for real message
+  # boxes, 8.3 short names, a free subst letter) say so in their label, and the summary line counts them. One check
+  # stays silent: the admin share spelling in a file identity case is not judged when the share cannot be read, and
+  # the label of that case does not change.
+  self-test-windows:
+    name: self-test-windows
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Self-test (no REAPER)
+        shell: pwsh
+        run: pwsh -NoProfile -File run.ps1 -SelfTest
+
+  # A new job goes above this line, and its id into the needs below.
+  harness-gate:
+    name: harness-gate
+    needs: [compliance, self-test-windows]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if [ "$(echo "$NEEDS" | jq 'length')" -lt 1 ]; then
+            echo "::error::harness-gate needs no job"
+            exit 1
+          fi
+          bad=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')
+          if [ -n "$bad" ]; then
+            echo "::error::not successful: $bad"
+            exit 1
+          fi

@@ -16,7 +16,7 @@
 - **不会悄悄放行。** 结局只有 PASS、FAIL、INCOMPLETE（没有结论）、SKIPPED、REFUSED；INCOMPLETE 永远不算 PASS。
   内置反例每一轮都证明对拍器、看门狗和各道护栏仍然有效。
 - **只在本机用。** 它驱动本机装好的 REAPER 7，需要真实的桌面会话；REAPER 的许可按 REAPER 自己的条款办理。
-  它不是给托管的 CI runner 用的。它自己的自测不需要 REAPER，在哪里都能跑。
+  它不是给托管的 CI runner 用的。它自己的自测不需要 REAPER，在任何 Windows 机器上都能跑。
 
 ## 测什么
 

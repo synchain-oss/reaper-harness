@@ -24,7 +24,7 @@ your own REAPER setup.
   the watchdog and the guards still work.
 - **Local only.** It drives an installed copy of REAPER 7 in a real desktop session; you need a
   REAPER licence under REAPER's own terms. It is not meant for hosted CI runners. Its self-test
-  needs no REAPER and runs anywhere.
+  needs no REAPER and runs on any Windows machine.
 
 ## What it tests
 

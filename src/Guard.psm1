@@ -4,11 +4,11 @@
 # Why this exists: REAPER does not fail on a -cfgfile path that does not exist. It silently falls back to
 # %APPDATA%\REAPER and writes the user's own configuration. So before every launch all of these must hold: the
 # configuration directory is an explicit absolute path, it is not under (and does not point into) %APPDATA%, it
-# holds the sentinel written by doctor.ps1 -Init, and reaper.ini exists. If any of them fails a REFUSED: error is
-# thrown and the caller must not start REAPER.
+# holds the sentinel written by doctor.ps1 -Init, nothing at its top level leads out of it, and reaper.ini exists. If
+# any of them fails a REFUSED: error is thrown and the caller must not start REAPER.
 #   Assert-HarnessCfgDir        checks the directory and returns @{ Dir; Ini }; New-HarnessCfgDir creates one for -Init
-#   Initialize-HarnessCfg       checks it and pins the ini path into a read-only constant; from then on the -cfgfile
-#                               argument can only come from Get-HarnessCfgArgument
+#   Initialize-HarnessCfg       checks it, walks its whole tree once, and pins the ini path into a read-only constant;
+#                               from then on the -cfgfile argument can only come from Get-HarnessCfgArgument
 #   Set-HarnessIniValue         changes one key in the private ini (bytes round-trip, no other line changes)
 #   Get-HarnessDefaultCfgSnapshot / Compare-HarnessDefaultCfgSnapshot
 #                               read-only listing (size and write time) of %APPDATA%\REAPER, compared before and after
@@ -23,7 +23,8 @@ $ErrorActionPreference = 'Stop'
 
 # The identity comes from an open handle (FILE_ID_INFO), so 8.3 short names, case, trailing separators, subst
 # drives, junctions and symbolic links all collapse to the same value. That is more reliable than comparing string
-# prefixes. FILE_FLAG_OPEN_REPARSE_POINT is not used, so links are followed to their targets.
+# prefixes. Get opens without FILE_FLAG_OPEN_REPARSE_POINT, so it follows a link to its target. LinkCount opens with that
+# flag, so it does not follow one and looks at the name it was given. The two differ on purpose.
 if (-not ('HarnessFileId' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -50,6 +51,17 @@ public static class HarnessFileId {
             return BitConverter.ToString(b);
         } finally { CloseHandle(h); }
     }
+    // How many names this file has on its volume, or -1 when that cannot be read. The name given is looked at itself:
+    // a link is not followed (FILE_FLAG_OPEN_REPARSE_POINT on top of the flags above).
+    public static long LinkCount(string path) {
+        IntPtr h = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return -1;
+        try {
+            byte[] b = new byte[24]; // FILE_STANDARD_INFO: two 8-byte sizes, 4-byte NumberOfLinks, two flags, padding
+            if (!GetFileInformationByHandleEx(h, 1, b, (uint)b.Length)) return -1;
+            return BitConverter.ToUInt32(b, 16);
+        } finally { CloseHandle(h); }
+    }
 }
 '@
 }
@@ -64,6 +76,10 @@ function Stop-Refuse([string]$Why) { throw [System.InvalidOperationException]::n
 # Identity string of the directory (or file) a path points to; $null if the path does not exist; 'ERROR:<code>' if
 # it exists but cannot be opened (callers must treat that as "cannot prove").
 function Get-HarnessFileIdentity([string]$Path) { [HarnessFileId]::Get($Path) }
+
+# How many names a file has on its volume, below 1 when that cannot be read. A function of its own so that the self-test
+# can stand in for a count that cannot be read: nothing it can do to a real file makes that happen.
+function Get-HarnessFileLinkCount([string]$Path) { [HarnessFileId]::LinkCount($Path) }
 
 # Resolves junctions and symbolic links level by level and returns the real path; parts that do not exist are
 # appended literally.
@@ -91,11 +107,28 @@ function Test-HarnessUnder([string]$Path, [string]$Root) {
     $p.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)
 }
 
+# The type of the drive a path is on, by name (Fixed, Removable, Network...), or '' when it cannot be read. A function
+# of its own so that the self-test can stand in for a mapped network drive: making a real one would change the machine.
+function Get-HarnessDriveType([string]$Path) {
+    try { [string][IO.DriveInfo]::new([IO.Path]::GetPathRoot($Path)).DriveType } catch { '' }
+}
+
+# One spelling of the directory: it has to start with a drive letter, and that drive has to be one this machine holds
+# itself. A mapped network drive can lead back here (net use Z: \\localhost\C$\...) and the identity SMB reports need
+# not equal the local one, so neither of the later layers can be trusted on it. A drive whose type cannot be read, or
+# that does not exist, proves nothing and is refused the same way.
+function Assert-HarnessLocalDrive([string]$Path) {
+    if ($Path -notmatch '^[A-Za-z]:[\\/]') { Stop-Refuse '-CfgDir must be an absolute path on a local drive letter (D:\...), and a link in it must not lead anywhere else: \\?\ prefixes, \\.\ device paths, UNC paths and admin shares such as \\localhost\C$\ are not accepted' }
+    $kind = Get-HarnessDriveType $Path
+    if (-not $kind -or $kind -in 'Network', 'Unknown', 'NoRootDirectory') { Stop-Refuse "-CfgDir must be on a local drive: this is a network drive, or a drive whose type cannot be read ('$kind')" }
+}
+
 # Checks the path itself, not its contents: an explicit absolute path that is not under (and does not point into)
 # AppData. Returns the real path. Three layers, none optional:
-#   1. Only absolute paths that start with a drive letter. \\?\ prefixes, \\.\ device paths and \\server\share
-#      (including \\localhost\C$\ admin shares pointing back at this machine) name the same directory but slip past
-#      string comparison, so they are all refused;
+#   1. Only absolute paths that start with a drive letter, as given and after expanding links, on a drive this machine
+#      holds itself. \\?\ prefixes, \\.\ device paths and \\server\share (including \\localhost\C$\ admin shares
+#      pointing back at this machine) name the same directory but slip past string comparison, and on a mapped network
+#      drive neither comparison can be trusted, so they are all refused;
 #   2. string comparison: after expanding .. and junctions / symbolic links, not under the AppData string prefix;
 #   3. file identity: the directory itself and every parent up to the drive root is compared with AppData by
 #      identity (8.3 short names, subst drives and other spellings strings cannot see). An existing path whose
@@ -104,11 +137,14 @@ function Test-HarnessUnder([string]$Path, [string]$Root) {
 function Assert-HarnessOutsideDefaultDir([string]$CfgDir) {
     if ([string]::IsNullOrWhiteSpace($CfgDir)) { Stop-Refuse 'no -CfgDir given (only an explicit absolute path is accepted)' }
     if (-not [IO.Path]::IsPathFullyQualified($CfgDir)) { Stop-Refuse '-CfgDir must be an absolute path' }
-    if ($CfgDir -notmatch '^[A-Za-z]:[\\/]') { Stop-Refuse '-CfgDir must be an absolute path on a local drive letter (D:\...): \\?\ prefixes, \\.\ device paths, UNC paths and admin shares such as \\localhost\C$\ are not accepted' }
+    $spelled = [IO.Path]::GetFullPath($CfgDir)
+    Assert-HarnessLocalDrive $spelled
     $appData = $env:APPDATA
     if ([string]::IsNullOrWhiteSpace($appData)) { Stop-Refuse 'APPDATA is not set, so the configuration directory cannot be proven to be outside it' }
-    $full = [IO.Path]::GetFullPath($CfgDir).TrimEnd('\', '/')
-    $real = (Resolve-HarnessRealPath $full).TrimEnd('\', '/')
+    $full = $spelled.TrimEnd('\', '/')
+    $resolved = Resolve-HarnessRealPath $full
+    Assert-HarnessLocalDrive $resolved
+    $real = $resolved.TrimEnd('\', '/')
     $bases = @($appData, (Resolve-HarnessRealPath $appData))
     foreach ($candidate in @($full, $real)) {
         foreach ($base in $bases) {
@@ -128,11 +164,43 @@ function Assert-HarnessOutsideDefaultDir([string]$CfgDir) {
     $real
 }
 
+# Checks one level of the directory: the layers above only look at the directory itself, while REAPER and
+# Set-HarnessIniValue read and write through whatever is in it. Refused: any entry that is a link or junction, a level
+# that cannot be listed, and any file with more than one name on its volume. That last one is a hard link: writing the
+# file changes it under its other name too, and that name can be anywhere on the volume and called anything, so looking
+# for it in the default resource directory could never be complete. A count that cannot be read proves nothing and is
+# refused as well. Returns the directories of this level, for the walk below. Root only sets how a level or an entry is
+# named in the refusal, always relative to it (the top level is .).
+function Assert-HarnessCfgEntries([string]$Folder, [string]$Root = $Folder) {
+    $entries = try { @(Get-ChildItem -LiteralPath $Folder -Force -ErrorAction Stop) } catch { Stop-Refuse "the configuration directory cannot be listed ($([IO.Path]::GetRelativePath($Root, $Folder))), so nothing in it can be proven to stay inside it" }
+    foreach ($entry in $entries) {
+        $shown = [IO.Path]::GetRelativePath($Root, $entry.FullName)
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { Stop-Refuse "the configuration directory holds a link or junction ($shown): reads and writes would follow it out of the directory" }
+        if ($entry.PSIsContainer) { $entry.FullName; continue }
+        $names = Get-HarnessFileLinkCount $entry.FullName
+        if ($names -lt 1) { Stop-Refuse "the number of names of $shown in the configuration directory cannot be read, so it cannot be proven to be a file of its own" }
+        if ($names -gt 1) { Stop-Refuse "$shown in the configuration directory is a hard link (the file has $names names on this volume): writing it would change the file under its other names too, wherever they are" }
+    }
+}
+
+# Every level of the tree, the same way. A link is refused and so never entered. This is what Initialize-HarnessCfg does
+# once per process, and not what every start does: a configuration directory can hold thousands of entries (plugin
+# presets, for one) and each launch checks several times, while the top level, where REAPER and the harness open files
+# by a fixed name, stays cheap enough to look at every time.
+function Assert-HarnessCfgTree([string]$Folder) {
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($Folder)
+    while ($pending.get_Count() -gt 0) {
+        foreach ($sub in (Assert-HarnessCfgEntries ($pending.Pop()) $Folder)) { $pending.Push($sub) }
+    }
+}
+
 function Assert-HarnessCfgDir {
     param([string]$CfgDir)
     $real = Assert-HarnessOutsideDefaultDir $CfgDir
     if (-not (Test-Path -LiteralPath $real -PathType Container)) { Stop-Refuse 'the configuration directory does not exist' }
     if (-not (Test-HarnessSentinel $real)) { Stop-Refuse 'the configuration directory has no sentinel file (initialise it with doctor.ps1 -Init first)' }
+    $null = Assert-HarnessCfgEntries $real # on every start, since a link can appear after -Init
     $ini = Join-Path $real 'reaper.ini'
     if (-not (Test-Path -LiteralPath $ini -PathType Leaf)) { Stop-Refuse 'the configuration directory has no reaper.ini' }
     [pscustomobject]@{ Dir = $real; Ini = $ini }
@@ -158,6 +226,7 @@ function New-HarnessCfgDir {
         if (-not (Test-HarnessSentinel $real) -and @(Get-ChildItem -LiteralPath $real -Force).Count -gt 0) {
             Stop-Refuse '-CfgDir has content but no sentinel file: only a missing directory, an empty one or one initialised before is taken over; nothing was written'
         }
+        $null = Assert-HarnessCfgEntries $real # before anything is written: the writes below would go through a link
     }
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $real 'plugins')
     $ini = Join-Path $real 'reaper.ini'
@@ -169,7 +238,8 @@ function New-HarnessCfgDir {
 }
 
 # Pins the ini path into a read-only constant (Constant cannot be changed even with -Force): any later assignment,
-# including one through a same-name variable that differs only by case, is a hard error.
+# including one through a same-name variable that differs only by case, is a hard error. The whole tree is walked first,
+# so a refusal leaves nothing pinned; a later call in the same process only checks what every start checks.
 function Initialize-HarnessCfg {
     param([string]$CfgDir)
     $g = Assert-HarnessCfgDir $CfgDir
@@ -177,17 +247,19 @@ function Initialize-HarnessCfg {
     if ($held) {
         if ($held.Value -cne $g.Ini) { Stop-Refuse 'this process has already pinned a different configuration directory' }
     } else {
+        Assert-HarnessCfgTree $g.Dir # once per process
         New-Variable -Name HarnessPinnedCfgIni -Value $g.Ini -Option Constant -Scope Script
     }
     $g
 }
 
-# The only source of the -cfgfile argument: checks the directory again, then quotes the path from the constant.
+# The only source of the value of the -cfgfile argument: checks the directory again, then returns the path from the
+# constant, without quotes. Invoke-HarnessHost passes it as one element of ArgumentList, and .NET does the quoting.
 function Get-HarnessCfgArgument {
     if (-not (Get-Variable -Name HarnessPinnedCfgIni -Scope Script -ErrorAction SilentlyContinue)) { Stop-Refuse 'Initialize-HarnessCfg has not run' }
     $g = Assert-HarnessCfgDir (Split-Path -Parent $script:HarnessPinnedCfgIni)
     if ($g.Ini -cne $script:HarnessPinnedCfgIni) { Stop-Refuse 'the real path of the configuration directory changed' }
-    '"{0}"' -f $script:HarnessPinnedCfgIni
+    return $script:HarnessPinnedCfgIni
 }
 
 # The pinned configuration directory (real path), for callers that need to place files in it (plugins, cache).
@@ -245,14 +317,25 @@ function Get-HarnessDefaultCfgDir { Join-Path $env:APPDATA 'REAPER' }
 # Listing of everything under the default resource directory, read only. Files are recorded as "size|write-time
 # ticks"; directories only as present: NTFS updates the time stamps of subdirectories in the parent listing lazily,
 # so two reads in a row can differ and would cause false alarms. Changes inside a directory show up on its files.
-# A missing directory gives an empty listing. Root is only for the self-test.
+# A directory that cannot be listed is recorded as "unreadable" (the root itself under the name "."), not left out: a
+# change inside it could not show up, so the comparison must not call it unchanged. A missing directory gives an empty
+# listing. Root is only for the self-test.
 function Get-HarnessDefaultCfgSnapshot {
     param([string]$Root = (Get-HarnessDefaultCfgDir))
     $snap = [ordered]@{}
-    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $snap }
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        # Test-Path also says no for a path it cannot look at: that is not a missing directory
+        $rootId = Get-HarnessFileIdentity $Root
+        if ($rootId -and $rootId.StartsWith('ERROR:')) { $snap['.'] = 'unreadable' }
+        return $snap
+    }
     $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
-    foreach ($e in Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue) {
+    foreach ($e in Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable listingFaults) {
         $snap[$e.FullName.Substring($prefix.Length)] = $e.PSIsContainer ? 'dir' : ('{0}|{1}' -f $e.Length, $e.LastWriteTimeUtc.Ticks)
+    }
+    foreach ($fault in $listingFaults) {
+        $faultPath = try { [IO.Path]::GetFullPath([string]$fault.TargetObject) } catch { '' }
+        $snap[$faultPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) ? $faultPath.Substring($prefix.Length) : '.'] = 'unreadable'
     }
     $snap
 }
@@ -265,7 +348,12 @@ function Compare-HarnessDefaultCfgSnapshot {
         elseif ($After[$k] -cne $Before[$k]) { $changed.Add("changed:$k") }
     }
     foreach ($k in $After.get_Keys()) { if (-not $Before.Contains($k)) { $changed.Add("added:$k") } }
-    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.get_Count(); Changed = $changed.ToArray() }
+    # Unreadable in either listing, even in both: nothing can be said about what is in there, so it does not count as unchanged
+    $unreadable = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($listing in @($Before, $After)) {
+        foreach ($entry in $listing.GetEnumerator()) { if ($entry.Value -ceq 'unreadable') { $null = $unreadable.Add($entry.Key) } }
+    }
+    [pscustomobject]@{ Same = ($changed.Count -eq 0 -and $unreadable.get_Count() -eq 0); Count = $Before.get_Count(); Changed = $changed.ToArray(); Unreadable = @($unreadable) }
 }
 
 # Variable names in a script that differ only by case (file wide, stricter than PowerShell's scoping). A parse
@@ -307,14 +395,16 @@ function Find-HarnessControlChars {
 
 # Scans the .ps1 / .psm1 files under a set of paths (directories are walked recursively, files taken as they are).
 # Besides variable case collisions: every file has Set-StrictMode -Version Latest; the -cfgfile literal appears
-# exactly once overall and only in Host.psm1; APPDATA is only mentioned in Guard.psm1 and the self-test (no other
-# file should even read it; LOCALAPPDATA, a different directory, is not meant). Comments do not count. .Keys and
+# exactly once overall and only in src/Host.psm1; APPDATA is only mentioned in src/Guard.psm1 and tests/SelfTest.psm1 (no
+# other file should even read it; LOCALAPPDATA, a different directory, is not meant). Those exemptions go by the path
+# relative to the repository root, not by the file name: a tests/Host.psm1 is not src/Host.psm1. Root defaults to the
+# repository this module is in; the self-test passes its scratch directories. Comments do not count. .Keys and
 # .Values are never read as properties: on a dictionary that has an entry named "Keys" or "Values" (a key from a
 # config, a file name, a variable name) the property returns that entry instead, and a check that walks the keys
 # silently walks one value; .get_Keys() / .get_Values() / .GetEnumerator() cannot be shadowed. .ps1 / .psm1 / .lua /
 # .json files must not contain invisible control characters.
 function Test-HarnessScriptLint {
-    param([Parameter(Mandatory)][string[]]$Paths)
+    param([Parameter(Mandatory)][string[]]$Paths, [string]$Root = (Split-Path -Parent $PSScriptRoot))
     $problems = [Collections.Generic.List[string]]::new()
     $sites = 0
     $isStrict = { param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ieq 'Set-StrictMode' -and $n.Extent.Text -imatch '-Version\s+Latest' }
@@ -349,9 +439,10 @@ function Test-HarnessScriptLint {
         if (@($ast.FindAll($isStrict, $true)).Count -eq 0) { $problems.Add("$($f.Name): missing Set-StrictMode -Version Latest") }
         $n = @($ast.FindAll($isCfg, $true)).Count
         $sites += $n
-        if ($n -gt 0 -and $f.Name -ne 'Host.psm1') { $problems.Add("$($f.Name): -$word may only be built in Host.psm1") }
-        if ($f.Name -notin 'Guard.psm1', 'SelfTest.psm1' -and @($tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -imatch '(?<!local)appdata' }).Count -gt 0) {
-            $problems.Add("$($f.Name): only Guard.psm1 and the self-test may mention APPDATA")
+        $rel = [IO.Path]::GetRelativePath($Root, $f.FullName).Replace('\', '/')
+        if ($n -gt 0 -and $rel -ine 'src/Host.psm1') { $problems.Add("${rel}: -$word may only be built in src/Host.psm1") }
+        if ($rel -inotin 'src/Guard.psm1', 'tests/SelfTest.psm1' -and @($tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -imatch '(?<!local)appdata' }).Count -gt 0) {
+            $problems.Add("${rel}: only src/Guard.psm1 and tests/SelfTest.psm1 may mention APPDATA")
         }
     }
     if ($sites -ne 1) { $problems.Add("the -$word literal must appear exactly once, found $sites") }

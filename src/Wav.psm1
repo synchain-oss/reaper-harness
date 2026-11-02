@@ -5,7 +5,7 @@
 #                             file throws an error whose message starts with "WAV:" (never a crash)
 #   Compare-HarnessWavFiles   reads two files and compares them; returns facts (Get-HarnessCompareFacts) and the
 #                             verdict (Get-HarnessCompareVerdict)
-#   Get-HarnessCompareVerdict pure function: facts + criteria -> PASS / FAIL and one stable English line
+#   Get-HarnessCompareVerdict pure function: facts + criteria -> PASS / FAIL / INCOMPLETE and one stable English line
 #   New-HarnessSignalFile     deterministic test signal: one impulse + seeded noise (+ optional sine), float32
 #   Write-HarnessWav          writes samples in any supported format (signals, and the self-test's hand-made files)
 # Samples are decoded to double, which is lossless for every supported format, so "identical" can be decided on
@@ -44,15 +44,16 @@ public static class HarnessWav {
         byte[] b;
         try { b = File.ReadAllBytes(path); } catch (Exception e) { throw Bad("cannot read the file (" + e.GetType().Name + ")"); }
         if (b.Length < 12 || Encoding.ASCII.GetString(b, 0, 4) != "RIFF" || Encoding.ASCII.GetString(b, 8, 4) != "WAVE") throw Bad("not a RIFF/WAVE file");
-        int pos = 12, fmtAt = -1, fmtLen = 0, dataAt = -1; long dataLen = 0; bool openEnded = false;
+        int pos = 12, fmtAt = -1, fmtLen = 0, dataAt = -1; long dataLen = 0;
         while (pos + 8 <= b.Length) {
             string id = Encoding.ASCII.GetString(b, pos, 4);
             long len = BitConverter.ToUInt32(b, pos + 4);
             int body = pos + 8;
             if (id == "fmt ") { fmtAt = body; fmtLen = (int)Math.Min(len, int.MaxValue); }
             else if (id == "data") {
-                // 0xFFFFFFFF is the "length unknown" placeholder of streaming writers: the data runs to the end of the file
-                if (len == 0xFFFFFFFFL) { openEnded = true; len = (long)b.Length - body; }
+                // 0xFFFFFFFF is the "length unknown" placeholder: the writer never came back to fill in the length, so the file
+                // is not finished, however many whole frames it holds
+                if (len == 0xFFFFFFFFL) throw Bad("the data length was never written (placeholder 0xFFFFFFFF), the file is not finished");
                 // a render cut off (a crash, a full disk, a writer that never finished) is never read as a shorter file
                 if (len > (long)b.Length - body) throw Bad("data chunk is truncated (" + len + " bytes declared, " + ((long)b.Length - body) + " in the file)");
                 dataAt = body; dataLen = len; break;
@@ -62,7 +63,7 @@ public static class HarnessWav {
             pos = (int)next;
         }
         if (fmtAt < 0) throw Bad("no fmt chunk");
-        if (fmtLen < 16 || fmtAt + fmtLen > b.Length) throw Bad("fmt chunk is too short or truncated");
+        if (fmtLen < 16 || fmtLen > b.Length - fmtAt) throw Bad("fmt chunk is too short or truncated");
         if (dataAt < 0) throw Bad("no data chunk");
         int tag = BitConverter.ToUInt16(b, fmtAt);
         int channels = BitConverter.ToUInt16(b, fmtAt + 2);
@@ -86,7 +87,6 @@ public static class HarnessWav {
         else throw Bad("unsupported encoding (format tag " + tag + ", " + bits + " bits)");
         int bytes = bits / 8;
         if (align != bytes * channels) throw Bad("block align " + align + " does not match " + channels + " channels of " + bits + " bits");
-        if (openEnded) dataLen -= dataLen % align; // a streamed file may end inside a frame; only whole frames count
         if (dataLen % align != 0) throw Bad("data chunk does not hold whole frames (" + dataLen + " bytes, " + align + " per frame)");
         long frames = dataLen / align;
         var s = new double[frames * channels];
@@ -243,12 +243,15 @@ function New-HarnessSignalFile {
 # Always checked: both files comparable (same rate and channel count), no NaN / Inf in either. The line starts with
 # the fixed facts (identical, lag, maxdiff, head, frames, channels, rate, format, nonfinite, peak), so negative
 # cases can match it with a regex; a failure appends "; failed: <reasons>".
+# A render with no frames comes first and is INCOMPLETE ("; incomplete: <reason>"): no sample was compared, and two
+# empty files would otherwise count as bit-identical.
 function Get-HarnessCompareVerdict {
     param([Parameter(Mandatory)]$Facts, [Nullable[double]]$MaxDiffDb = $null, [int]$Lag = 0, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent)
     $f = $Facts
     $line = 'identical={0} lag={1} maxdiff={2} head={3} frames={4}/{5} channels={6}/{7} rate={8}/{9} format={10}/{11} nonfinite={12}/{13} peak={14}/{15}' -f `
         ($f.Identical ? 'yes' : 'no'), ($f.Comparable ? [string]$f.BestLag : '?'), (Format-HarnessDb $f.MaxDiff), (Format-HarnessDb $f.HeadDiff), $f.FramesA, $f.FramesB,
         $f.ChannelsA, $f.ChannelsB, $f.RateA, $f.RateB, $f.FormatA, $f.FormatB, $f.NonFiniteA, $f.NonFiniteB, (Format-HarnessDb $f.PeakA), (Format-HarnessDb $f.PeakB)
+    if ($f.FramesA -eq 0 -or $f.FramesB -eq 0) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "$line; incomplete: a render has no frames, nothing was compared" } }
     $why = [Collections.Generic.List[string]]::new()
     if (-not $f.Comparable) { $why.Add('sample rate or channel count differ, the renders cannot be compared') }
     if ($f.NonFiniteA -gt 0 -or $f.NonFiniteB -gt 0) { $why.Add('NaN or Inf samples present') }
