@@ -1072,6 +1072,7 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a stem that is not a track of the layout'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = 'Ghost' }; M = "'Ghost' is not a track of layout 'states'" }
         @{ L = 'a stem whose track name cannot name a file (not ASCII)'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = 'V' + [char]0xF6 + 'x' }; M = 'cannot name a stem file' }
         @{ L = 'a stem whose track name ends in a dot'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = 'Quiet.' }; M = 'cannot name a stem file' }
+        @{ L = 'a stem whose track name is one dot (it ends in a dot too)'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = '.' }; M = 'cannot name a stem file' }
         @{ L = 'a stem named Master (the name of the master file)'; E = { param($c) (& $scenario $c 'states')['stems'][0]['track'] = 'master' }; M = 'a track named Master cannot be a stem' }
         @{ L = 'a stem listed twice, differing only by case'; E = { param($c) (& $scenario $c 'routing')['stems'] += 'drums' }; M = "'drums' is listed twice" }
         @{ L = 'a stem compared with the reference when the scenario compares with none'; E = { param($c) (& $scenario $c 'routing-alone')['stems'] = @([ordered]@{ track = 'Cue'; compare = 'reference' }) }; M = 'compare reference needs a reference' }

@@ -37,7 +37,8 @@ $script:StatePattern = '^[a-z0-9][a-z0-9-]{0,39}$'
 $script:TrackNamePattern = '^[^"\u0000-\u001f]{1,64}$'
 $script:ChannelPattern = '^(L|R|[1-9][0-9]?)$'
 # Stem files are named after their track: plain ASCII without characters Windows refuses, not ending in a space or a dot
-$script:StemNamePattern = '^[A-Za-z0-9()+_.-]([A-Za-z0-9 ()+_.-]*[A-Za-z0-9()+_-])?$'
+# (a name of one character included, so "." is no stem name)
+$script:StemNamePattern = '^(?:[A-Za-z0-9()+_-]|[A-Za-z0-9()+_.-][A-Za-z0-9 ()+_.-]*[A-Za-z0-9()+_-])$'
 $script:Modes = 'offline', '1x', 'online'
 $script:Expectable = 'PASS', 'FAIL', 'SKIPPED', 'INCOMPLETE', 'REFUSED'
 $script:BuiltinKinds = 'render', 'device', 'savereopen', 'instances'
