@@ -699,7 +699,8 @@ function Get-HostCases {
         $r = & $v '#32770' $true $trouble
         & $add "dialog: '$trouble' counts as stuck (unknown-dialog), not as a progress window" $true ($r.Action -eq 'Fatal' -and $r.Name -eq 'unknown-dialog')
     }
-    foreach ($window in 'VST3: Fixture Gain (Fixture Audio) - Track 1', 'VST3i: Synth (Vendor) - Track 2', 'VST: Old (Vendor)', 'VSTi: Old Synth (Vendor)', 'CLAP: Gain (Vendor)', 'CLAPi: Synth (Vendor)', 'JS: reaper-harness PDC delay - Track 1', 'FX: Track 1 "Voice"', 'VST3: Render failed (Vendor) - Track 1') {
+    # The first four as REAPER 7.82 titled them (a VST3 and a JSFX floated from one track, the chain windows of a track and of the master)
+    foreach ($window in 'VST3: Fixture Gain (Fixture Audio) - Track 1 [1/2]', 'JS: reaper-harness PDC delay - Track 1 [2/2]', 'FX: Track 1', 'FX: Master Track', 'VST3: Fixture Gain (Fixture Audio) - Track 1', 'VST3i: Synth (Vendor) - Track 2', 'VST: Old (Vendor)', 'VSTi: Old Synth (Vendor)', 'CLAP: Gain (Vendor)', 'CLAPi: Synth (Vendor)', 'JS: reaper-harness PDC delay - Track 1', 'FX: Track 1 "Voice"', 'VST3: Render failed (Vendor) - Track 1') {
         $r = & $v '#32770' $true $window
         & $add "dialog: '$window' is the floating window of a plugin or an FX chain, no dialog: left alone" $false ($r.Action -eq 'Benign' -and $r.Name -eq 'plugin-window')
     }

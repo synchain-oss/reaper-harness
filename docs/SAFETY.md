@@ -106,7 +106,7 @@ only those, are classified:
 |---|---|
 | `REAPER Query` (save changes?) | answered No |
 | `Render…`, `Scanning…`, `Building peaks…` | progress windows, left alone, unless the title has `fail` or `error` in it in any case: those report trouble and do not go away on their own, so they are stuck, `unknown-dialog` |
-| `VST3: …`, `VST3i: …`, `VST: …`, `VSTi: …`, `CLAP: …`, `CLAPi: …`, `JS: …` (the floating window of a plugin, for example `VST3: Name (Vendor) - Track 1`), `FX: …` (an FX chain window) | not a dialog, left alone (`plugin-window`): the prefix must start the title, in that case, followed by a blank. A dialog a plugin opens itself has a title of its own and is still `unknown-dialog`, as is `Fake VST3: x` |
+| `VST3: …`, `VST3i: …`, `VST: …`, `VSTi: …`, `CLAP: …`, `CLAPi: …`, `JS: …` (the floating window of a plugin), `FX: …` (an FX chain window) | not a dialog, left alone (`plugin-window`): the prefix must start the title, in that case, followed by a blank. Measured on REAPER 7.82: a VST3 and a JSFX floated from one track are titled `VST3: Name (Vendor) - Track 1 [1/2]` and `JS: Name - Track 1 [2/2]`, the chain windows `FX: Track 1` and `FX: Master Track`. A dialog a plugin opens itself has a title of its own and is still `unknown-dialog`, as is `Fake VST3: x` |
 | `About REAPER…` (the evaluation licence reminder) | never clicked away: stuck, `license-nag` |
 | `Project Load Warning`, `REAPER Error`, `Select files to save or delete`, `REAPER` (no audio device) | stuck, named |
 | anything else | stuck, `unknown-dialog` with the title (paths masked) |

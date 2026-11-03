@@ -88,7 +88,7 @@ $script:KnownModals = [ordered]@{
 # which is no dialog at all), Fatal (stuck; Name says which). A title that starts like a progress window but reports
 # trouble ("Render failed") does not go away on its own: left alone it would only end at the timeout, and the outcome
 # would not name it. A floating FX window has the dialog class too; REAPER titles it with the plugin type and its name
-# ("VST3: Name (Vendor) - Track 1"), or "FX: " for a chain, anchored at the start and in that case. A dialog a plugin
+# ("VST3: Name (Vendor) - Track 1 [1/2]"), or "FX: " for a chain, anchored at the start and in that case. A dialog a plugin
 # opens itself has a title of its own, so it is still unknown, and stuck.
 $script:PluginWindow = '^(?:VST3i?|VSTi?|CLAPi?|JS|FX): '
 function Get-HarnessModalVerdict {
