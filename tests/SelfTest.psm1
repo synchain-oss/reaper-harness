@@ -442,6 +442,9 @@ function Get-InitCases([string]$Tmp, [string]$RepoRoot) {
     $null = New-Item -ItemType Directory -Path $empty
     $made = try { New-HarnessCfgDir $empty } catch { $null }
     & $add '-Init: an empty directory is taken over (plugins, reaper.ini, sentinel)' $false ($made -and (Test-Path -LiteralPath (Join-Path $empty $sentinel)) -and (Test-Path -LiteralPath (Join-Path $empty 'plugins') -PathType Container) -and (Test-Path -LiteralPath (Join-Path $empty 'reaper.ini')))
+    $newIni = $made ? [IO.File]::ReadAllText((Join-Path $empty 'reaper.ini')) : ''
+    & $add "-Init: the new reaper.ini has the dummy audio device and REAPER's version check off" $false (
+        (Get-HarnessIniTextValue -Text $newIni -Section REAPER -Key verchk) -ceq '0' -and (Get-HarnessIniTextValue -Text $newIni -Section audioconfig -Key mode) -ceq '4')
     [IO.File]::WriteAllText((Join-Path $empty 'reaper.ini'), "[REAPER]`nkept=1`n")
     $again = try { New-HarnessCfgDir $empty } catch { $null }
     & $add '-Init: a directory initialised before (with the sentinel) stays usable; its reaper.ini is left alone' $false ($again -and [IO.File]::ReadAllText((Join-Path $empty 'reaper.ini')) -ceq "[REAPER]`nkept=1`n")

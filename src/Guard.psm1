@@ -234,8 +234,9 @@ function Test-HarnessSentinel([string]$Folder) {
 }
 
 # For doctor.ps1 -Init: after the path checks, creates the directory, the private plugin directory, a minimal
-# reaper.ini (dummy audio device) and the sentinel. Only three kinds of directory are taken over: one that does not
-# exist yet, an empty one, and one that already has the sentinel (initialised before; an existing ini is left alone).
+# reaper.ini (dummy audio device, version check off) and the sentinel. Only three kinds of directory are taken over:
+# one that does not exist yet, an empty one, and one that already has the sentinel (initialised before; an existing ini
+# is left alone).
 # A directory with content but no sentinel is always refused and nothing is written, and there is no switch to
 # override that: it is most likely a real REAPER configuration (for example a portable install), and the tests would
 # rewrite its reaper.ini and copy plugins into its plugin directory.
@@ -252,7 +253,7 @@ function New-HarnessCfgDir {
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $real 'plugins')
     $ini = Join-Path $real 'reaper.ini'
     if (-not (Test-Path -LiteralPath $ini)) {
-        [IO.File]::WriteAllText($ini, "[REAPER]`npromptendrec=0`n[audioconfig]`nmode=4`ndummy_srate=48000`ndummy_blocksize=512`n", [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($ini, "[REAPER]`npromptendrec=0`nverchk=0`n[audioconfig]`nmode=4`ndummy_srate=48000`ndummy_blocksize=512`n", [Text.UTF8Encoding]::new($false))
     }
     [IO.File]::WriteAllText((Join-Path $real $script:SentinelName), "$($script:SentinelMagic)`n", [Text.UTF8Encoding]::new($false))
     Assert-HarnessCfgDir $real

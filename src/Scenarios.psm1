@@ -140,6 +140,11 @@ function Invoke-HarnessLaunch {
         # The marker is checked again while holding the locks: someone may have started a manual test meanwhile
         if (Get-HarnessSkipMarkerHit $Ctx.SkipMarkers) { return & $none 'SkipMarker' }
         $Ctx.Launches++
+        # REAPER looks for a new version about once a day and, when there is one, shows a notification that ends the launch
+        # as stuck (INCOMPLETE). [REAPER] verchk=0 turns that check off; written on every launch, so that a directory
+        # initialised without it is covered too. Measured on REAPER 7.82: with the key a week-old [verchk] lastt stays as it
+        # was and no notification comes; without it the notification shows within about 2 s.
+        $null = Set-HarnessIniValue -Section REAPER -Key verchk -Value 0
         $Watch = @($Ctx.Installed.get_Values() | ForEach-Object { $_.BinaryLeaf })
         $extra = @{ WatchModules = $Watch; StartedList = $Ctx.Started }
         if ($Ctx.Launcher) { $extra.Launcher = $Ctx.Launcher }

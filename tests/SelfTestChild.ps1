@@ -619,6 +619,9 @@ $e2e = $suite.Clone(); $e2e.ReaperExe = $pwshExe; $e2e.ResultDir = Join-Path $Wo
 $r = Invoke-WithSuiteCommand 'Get-HarnessReaperProcessIds' { 4242 } { Invoke-HarnessSuite @e2e -SelfTestHooks $hooks }
 Write-Case 'entry: a reaper.exe already running makes the whole suite SKIPPED with that reason, REAPER never started' $true ($r.verdict -ceq 'SKIPPED' -and $r.launches -eq 0 -and $seenArgs.Count -eq 0 -and @($r.skipReasons -match '^a reaper\.exe not started by this tool').Count -eq 1)
 
+# A directory initialised before the version check was turned off has no verchk key: the launches write it
+[IO.File]::WriteAllText($pinned.Ini, ([IO.File]::ReadAllText($pinned.Ini) -replace '(?m)^verchk=.*\r?\n', ''))
+$verchkBefore = Get-HarnessIniValue -Section REAPER -Key verchk
 $r = Invoke-HarnessSuite @e2e -SelfTestHooks $hooks
 $rowsOut = @($r.runs[0].scenarios)
 $notPass = @($rowsOut | Where-Object { $_.status -ne 'PASS' } | ForEach-Object { "$($_.id)=$($_.status): $($_.detail)" })
@@ -647,6 +650,8 @@ Write-Case 'end to end: the JSFX is installed in the private Effects directory, 
     $byId['pdc-device'].detail -like 'block 2048 and rate 48000 read back, anticipative FX off; 2 FX report the configured latency*' -and $byId['pdc-unreported'].detail -cmatch '^identical=no lag=16 ')
 Write-Case 'end to end: anticipative FX is written as bit 0 of workrender in the private ini and read back by the device step' $false (
     (Get-HarnessIniValue -Section REAPER -Key workrender) -in '16', '17' -and $byId['bus-device'].detail -like '*anticipative FX on;*')
+Write-Case "end to end: the launches turn REAPER's version check off in the private ini, also in a directory initialised without it" $false (
+    $null -eq $verchkBefore -and (Get-HarnessIniValue -Section REAPER -Key verchk) -ceq '0')
 $path = Write-HarnessResult -Data $r -ResultDir $e2e.ResultDir
 $json = [IO.File]::ReadAllText($path)
 $back = ConvertFrom-HarnessJson $json

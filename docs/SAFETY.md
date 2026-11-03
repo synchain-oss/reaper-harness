@@ -114,6 +114,12 @@ only those, are classified:
 A stuck dialog ends the launch and the scenario is INCOMPLETE. The evaluation reminder shows up on some launches
 only (about one in six in our runs); buy a licence or run again.
 
+REAPER also looks for a new version about once a day and shows `REAPER New Version Notification` when there is one,
+which would end that launch the same way. So every launch first writes `verchk=0` under `[REAPER]` in the private
+`reaper.ini` (and `doctor.ps1 -Init` writes it into a new one), which turns that check off; nothing is clicked away,
+and the default resource directory is not touched. Measured on REAPER 7.82: with the key a `[verchk] lastt` a week
+old stays as it was and no notification comes; without it the notification shows within about 2 s.
+
 ## Outcomes never lie in your favour
 
 - PASS, FAIL, INCOMPLETE (no conclusion: something did not run or could not be checked), SKIPPED (the suite did not
