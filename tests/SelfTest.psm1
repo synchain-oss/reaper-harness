@@ -1344,8 +1344,8 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
         ($keys[0..2] -join ',') -ceq 'gain|,bus|,delay|' -and $keys.Count -eq 10 -and @($keys | Select-Object -Unique).Count -eq 10 -and 'gain@quiet|' -cin $keys -and 'gain@loud|' -cin $keys -and
         @($variants | Where-Object { $_.Key -ceq 'gain@loud|' })[0].State -ceq 'loud' -and 'delay|Delay (samples)=0.0078125' -cin $keys)
     # A state with parameters on top (its own or the plugin's) is learned alone too, before the first variant using it
-    $pFx = { param($p) [pscustomobject]@{ Variant = "gain@quiet|Gain=$p"; Plugin = 'gain'; State = 'quiet'; Params = [ordered]@{ Gain = [pscustomobject]@{ Normalized = $p; Display = $null } } } }
-    $pConf = [pscustomobject]@{ Plugins = [ordered]@{ gain = $null }; Layouts = @{ L = [pscustomobject]@{ Tracks = @([pscustomobject]@{ Fx = @((& $pFx 0.5), (& $pFx 0.25)) }) } } }
+    $stateFx = { param($p) [pscustomobject]@{ Variant = "gain@quiet|Gain=$p"; Plugin = 'gain'; State = 'quiet'; Params = [ordered]@{ Gain = [pscustomobject]@{ Normalized = $p; Display = $null } } } }
+    $pConf = [pscustomobject]@{ Plugins = [ordered]@{ gain = $null }; Layouts = @{ L = [pscustomobject]@{ Tracks = @([pscustomobject]@{ Fx = @((& $stateFx 0.5), (& $stateFx 0.25)) }) } } }
     $pVariants = Get-HarnessLearnVariants -Config $pConf -Scenarios @([pscustomobject]@{ layout = 'L' })
     $pKeys = @($pVariants | ForEach-Object { "$($_.Key)/$($_.Params.get_Count())" })
     & $add "learning: a state used with parameters on top is learned alone once, before its first such variant ($($pKeys -join ', '))" $false (
