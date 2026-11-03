@@ -737,6 +737,13 @@ Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; See
 try { $r = Invoke-HarnessSuite @e2e -Only '^monitor-states$' -NoNegative -SelfTestHooks $hooks }
 finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
 $recRow = @($r.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+# A block probe that is not first in the chain: the numbers would not be what the plugin gets
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; ProbeIdx = 1 }
+try { $gapRun = Invoke-HarnessSuite @e2e -Only '^monitor-states$' -NoNegative -SelfTestHooks $hooks }
+finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$gapRow = @($gapRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+Write-Case 'end to end: a block probe that is not first in the chain makes the row INCOMPLETE, never PASS or FAIL' $true (
+    $gapRun.verdict -ceq 'INCOMPLETE' -and $null -ne $gapRow -and $gapRow.status -ceq 'INCOMPLETE' -and $gapRow.detail -clike "the block probe of the tested track is not the harness's own first in its chain (idx 1*")
 Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
     $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
 

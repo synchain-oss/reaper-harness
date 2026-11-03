@@ -370,7 +370,7 @@ function Invoke-FakeTransport($job, $report) {
     $tracks = Read-FakeProject ([IO.File]::ReadAllText($job['project']))
     $probe = Find-FakePlugin $job['probe']
     $ident = $probe ? $probe.Ident : ''
-    foreach ($kv in @("clock_ident=$ident", 'probe_idx=0', "probe_ident=$ident", "probe_fx_count=$($tracks[[int]$job['track']].Fx.Count + 1)")) { $report.Add($kv) }
+    foreach ($kv in @("clock_ident=$ident", "probe_idx=$($script:Spec['ProbeIdx'] ?? 0)", "probe_ident=$ident", "probe_fx_count=$($tracks[[int]$job['track']].Fx.Count + 1)")) { $report.Add($kv) }
     $nch = 0; $rate = 0
     if ($job.Contains('feed')) {
         $feed = Find-FakePlugin $job['feed']

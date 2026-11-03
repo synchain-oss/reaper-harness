@@ -1847,6 +1847,10 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     $msRaw.Remove('feed')
     $res = Test-HarnessConfigData -Raw $raw -Kinds $cfgExt.Kinds
     & $add 'configuration: a transport scenario without a feed has none (its tested track gets no input)' $false (@($res.Problems).Count -eq 0 -and $null -eq @($res.Config.Scenarios | Where-Object id -ceq 'monitor-states')[0].feed)
+    $chainLayout = $conf.Layouts['chain']
+    $withItems = New-HarnessProjectText -Layout $chainLayout -SourceWav 'S.wav' -RenderDir 'D' -RenderName 'N' -NoFx
+    $noItems = New-HarnessProjectText -Layout $chainLayout -SourceWav 'S.wav' -RenderDir 'D' -RenderName 'N' -NoFx -NoItems
+    & $add 'project: the transport kind gets its tracks without items (an item would make REAPER run an unarmed track while playing)' $true ($withItems -cmatch '<ITEM' -and $noItems -cnotmatch '<ITEM')
     # Run FX when stopped in the private ini, and read back
     & $add 'Run FX when stopped: bit 0 of runallonstop set or cleared, the other bits kept; no readable value counts as REAPER''s default 1' $false (
         (Get-HarnessRunAllOnStop '6' $true) -eq 7 -and (Get-HarnessRunAllOnStop '7' $false) -eq 6 -and (Get-HarnessRunAllOnStop $null $true) -eq 1 -and (Get-HarnessRunAllOnStop '' $false) -eq 0 -and (Get-HarnessRunAllOnStop 'x' $true) -eq 1)
