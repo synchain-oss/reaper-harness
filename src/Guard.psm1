@@ -164,6 +164,22 @@ function Assert-HarnessOutsideDefaultDir([string]$CfgDir) {
     $real
 }
 
+# -ResultDir and the work files below it are written during a run, so it must not be the default resource directory or
+# below it: after expanding links, and by file identity for any other spelling (a subst drive). A part that does not
+# exist yet has no identity, and without a default resource directory the path is all there is. Nothing else is asked of
+# it: unlike -CfgDir it may be elsewhere under AppData or on a network drive, because REAPER never runs from it.
+function Assert-HarnessResultDir([string]$ResultDir) {
+    $default = Get-HarnessDefaultCfgDir
+    $real = Resolve-HarnessRealPath $ResultDir
+    $said = '-ResultDir is the default REAPER resource directory, or below it, or points there: that directory is never touched'
+    if (Test-HarnessUnder $real (Resolve-HarnessRealPath $default)) { Stop-Refuse $said }
+    $baseId = Get-HarnessFileIdentity $default
+    if (-not $baseId -or $baseId.StartsWith('ERROR:')) { return }
+    for ($p = $real; $p; $p = [IO.Path]::GetDirectoryName($p)) {
+        if ((Get-HarnessFileIdentity $p) -ceq $baseId) { Stop-Refuse "$said (detected by file identity)" }
+    }
+}
+
 # Checks one level of the directory: the layers above only look at the directory itself, while REAPER and
 # Set-HarnessIniValue read and write through whatever is in it. Refused: any entry that is a link or junction, a level
 # that cannot be listed, and any file with more than one name on its volume. That last one is a hard link: writing the
@@ -449,6 +465,6 @@ function Test-HarnessScriptLint {
     , $problems.ToArray()
 }
 
-Export-ModuleMember -Function Get-HarnessSentinel, Get-HarnessFileIdentity, Resolve-HarnessRealPath, Test-HarnessUnder, Assert-HarnessCfgDir, New-HarnessCfgDir, Initialize-HarnessCfg,
+Export-ModuleMember -Function Get-HarnessSentinel, Get-HarnessFileIdentity, Resolve-HarnessRealPath, Test-HarnessUnder, Assert-HarnessCfgDir, Assert-HarnessResultDir, New-HarnessCfgDir, Initialize-HarnessCfg,
     Get-HarnessCfgArgument, Get-HarnessPinnedCfgDir, Set-HarnessIniText, Set-HarnessIniValue, Get-HarnessDefaultCfgDir, Get-HarnessDefaultCfgSnapshot, Compare-HarnessDefaultCfgSnapshot,
     Find-HarnessVariableCaseCollisions, Find-HarnessControlChars, Test-HarnessScriptLint

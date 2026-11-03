@@ -1,8 +1,8 @@
 # Safety
 
 The harness starts a real REAPER on your desktop many times in a row. These are the rules it keeps so that this
-never changes your own REAPER setup and never hides a failure. Every rule has self-test cases
-(`pwsh run.ps1 -SelfTest`) that turn red when the rule is removed.
+never changes your own REAPER setup, never hides a failure, and never tests something else than the build you
+pointed it at. Every rule has self-test cases (`pwsh run.ps1 -SelfTest`) that turn red when the rule is removed.
 
 ## Your REAPER configuration is never touched
 
@@ -38,15 +38,22 @@ The checked ini path is pinned into a read-only constant for the rest of the pro
 only come from it, and is checked again right before every start. A lint rule keeps the `-cfgfile` literal in
 exactly one place in the code (`src/Host.psm1`).
 
+`-ResultDir` is written during a run too, so it is refused (exit 64) when it is the default resource directory or below
+it: after expanding links, and by file identity for any other spelling. Nothing else is asked of it: unlike `-CfgDir` it
+may be elsewhere under `%APPDATA%` or on a network drive, because REAPER never runs from it.
+
 Arguments reach REAPER one by one, not as one command line, so a space in a path cannot split it and the private ini
 is always the element right after `-cfgfile`. Before the start, `-ReaperArgs` holding a double quote (a caller still
 quoting for itself, which would hand REAPER literal quotes) or naming the `-cfgfile` switch again is refused.
 
-`src/Guard.psm1` lists `%APPDATA%\REAPER` (file sizes and write times, read only) and compares two listings; the
-self-test does so before and after it runs, and fails when anything changed. A file or directory that cannot be
-listed is recorded as `unreadable` (the directory itself under the name `.`), and a comparison with anything
-unreadable on either side is not "unchanged", also when both listings say the same: what cannot be read cannot be
-proven to have stayed as it was. The comparison names those entries.
+Before and after every round the harness lists `%APPDATA%\REAPER` (file sizes and write times, read only), and the
+self-test does so before and after it runs. If anything was seen to change the round is FAIL and no further round runs. A file or
+directory that cannot be listed is recorded as `unreadable` (the directory itself under the name `.`), and a comparison
+with anything unreadable on either side is not "unchanged", also when both listings say the same: what cannot be read
+cannot be proven to have stayed as it was. The comparison names those entries. A round where that happens is
+INCOMPLETE, not FAIL (nothing was seen to change, it just cannot be shown that nothing did), and no further round runs.
+An entry listed once and unreadable the other time, and what was below it, counts as that same lack of evidence and not
+as a change. A change anywhere else in the directory is still FAIL, whatever could not be listed next to it.
 
 The self-test reaches a mapped network drive and a link count that cannot be read through stand-ins for the functions
 that read them, and uses a real letter with nothing mounted on it. A real mapped drive changes the machine, so one is
@@ -57,23 +64,38 @@ machine (a deny entry, a subst drive, a mapped drive) is checked as undone, and 
 ## Only its own processes, one GUI run at a time
 
 - The watchdog ends only the process ID it started, at the time limit (`Timeout`) or at a kill point (`Killed`).
+  A `reaper.exe` that was already running makes the whole suite SKIPPED: the harness does not run alongside it,
+  and changes to the default resource directory could not be attributed. After a round only the processes that round
+  started count, each recognised by its process ID and start time: one of them still there and reported by no launch
+  makes the round FAIL. A `reaper.exe` of somebody else that appeared during the round is not looked for, since the
+  locks are free between launches and it says nothing about this round, and neither is a later process that got the
+  same number.
 - A process the watchdog could not end is reported, not assumed gone: the launch result has `StillRunning`, true when
   the stop failed or the process was still there after the wait, and false when it is gone (a process that had already
   exited is no failure). A caller that sees `StillRunning` true records `INCOMPLETE`, does not release its GUI lock and
   does not start the next launch: that window may still be on the desktop. `Invoke-WithHarnessLocks` always releases
   when its block ends, so a caller that can start REAPER must not use it: it takes and releases the locks itself with
-  `Enter-HarnessLocks` and `Exit-HarnessLocks`.
+  `Enter-HarnessLocks` and `Exit-HarnessLocks`. The run command does just that: `Invoke-HarnessLaunch` keeps the locks
+  and notes the process, every later launch of that context starts nothing and reports `Blocked`, the round is
+  INCOMPLETE and no further round runs. The kernel takes the locks back when the run's process ends.
+- Watching a process can fail too (its counters cannot be read, for one), and only the host knows the process at that
+  point. So nothing there throws past it: the process is ended by its PID as at a timeout, the status is `Error` with
+  the reason, the launch is INCOMPLETE, and a process that could not be ended is treated as above. The next launch never
+  starts next to it.
 - Before every launch the GUI lock has to be held: `Invoke-HarnessHost` enforces it, and without the object
   `Enter-HarnessLocks` returned for a set holding the default lock it refuses before anything starts. The other two
   checks before a launch, that no other `reaper.exe` is running and the listing of the default directory, are the job
-  of the run command, which arrives with the scenarios.
+  of the run command, once at its start and once per round.
 - The default lock is `Local\ReaperHarness-gui`, a kernel mutex. `-ExtraGuiLock
   <Local\name>` adds more (for example the lock another tool on the same machine uses for its GUI tests); locks can
   only be added, never removed. All locks of a set are taken in a fixed order, all or nothing, so two runs with
-  different sets cannot deadlock. If the set cannot be taken within the wait limit, nothing is started. A holder
-  that crashes or is killed releases its locks (the kernel does), so they never stay taken.
+  different sets cannot deadlock. If they cannot be taken within `limits.lockWaitSec` the scenario is INCOMPLETE
+  and REAPER is not started. Nothing ever starts REAPER without the locks.
 - `Local\` names only exclude within one logon session; do not run the harness from SSH, a scheduled task or
   another user's session at the same time.
+- `-SkipMarker <file>` (repeatable): while any of these files exists, the suite is SKIPPED with zero launches. The
+  marker is checked again while holding the locks, right before each launch. Use it to pause automated runs while
+  someone is testing on the machine by hand.
 
 ## Dialogs
 
@@ -88,11 +110,88 @@ only those, are classified:
 | `Project Load Warning`, `REAPER Error`, `Select files to save or delete`, `REAPER` (no audio device) | stuck, named |
 | anything else | stuck, `unknown-dialog` with the title (paths masked) |
 
-A stuck dialog ends the launch, which is recorded as `Modal` with the dialog's name. The evaluation reminder shows
-up on some launches only (about one in six in our runs); buy a licence or run again.
+A stuck dialog ends the launch and the scenario is INCOMPLETE. The evaluation reminder shows up on some launches
+only (about one in six in our runs); buy a licence or run again.
+
+## Outcomes never lie in your favour
+
+- PASS, FAIL, INCOMPLETE (no conclusion: something did not run or could not be checked), SKIPPED (the suite did not
+  run at all), REFUSED (a guard said no). INCOMPLETE is never counted as PASS; an empty set of outcomes is
+  INCOMPLETE; SKIPPED mixed with PASS is INCOMPLETE.
+- A handler that throws gives INCOMPLETE, never PASS. So does any other unexpected error past the guards: it is
+  something that could not be done, not a criterion that was checked, so the exit code is 2 and never 1. A round that
+  breaks still gets the checks of the end of a round (a change in the default resource directory, or a process it left,
+  is still FAIL), and no further round runs. A guard that refuses inside a round is treated the same way: REAPER may
+  have run already, so exit 64 (nothing was started) would be wrong, and leaving early would skip those checks.
+- Negative cases pass only when the outcome and the reason both match (see [CONFIG.md](CONFIG.md#negative-cases)).
+  The built-in ones prove the comparer, the watchdog and the entry guards in every round.
+
+## The build under test is the build that ran
+
+This is the part that is easy to get wrong. REAPER keeps one plugin per file name. When a release build of your
+plugin is installed in a system VST3 directory, the private copy of your development build has the same bundle
+name and the same class ID, and REAPER may load the release build instead. Nothing in the render tells you.
+
+Measured on 2026-11-01 with REAPER 7.82 x64 (evaluation licence) on Windows 10 22H2, dummy audio device, a private
+configuration directory made by `doctor.ps1 -Init`, a development build in the private plugins directory and a
+release build of the same plugin (same bundle name, class ID and display name, different bytes) in
+`%COMMONPROGRAMFILES%\VST3`; which file was loaded was read from the module list of the REAPER process and from
+`fx_ident`:
+
+| `vstpath64` | loaded into the REAPER process |
+|---|---|
+| private directory first, system directories after it (REAPER appends them itself) | the release build |
+| the same, with the private binary's write time set to now | the release build |
+| system VST3 directories first, **private directory last** | **the private development build** |
+
+So with the same file name the directory scanned **last** wins, regardless of file times. REAPER appends
+`%COMMONPROGRAMFILES%\VST3` and `%LOCALAPPDATA%\Programs\Common\VST3` to the path only when they are missing.
+Before every round the harness therefore writes `vstpath64` as your other entries, then both system directories,
+then the private plugins directory, and removes the cache entries of the configured bundles so REAPER scans them
+afresh.
+
+That ordering is observed behaviour, not a documented promise. So it is not trusted on its own; every round also
+proves which file was loaded, in two independent ways:
+
+- **The module list of the REAPER process.** On every poll the full paths of loaded modules with the file name of a
+  tested binary are collected. Each tested binary must be seen loaded, and only from its private file (compared by
+  file identity). Another file with that name (`Foreign`) makes the learn row and the round INCOMPLETE; a binary
+  never seen (`Unseen`) makes the learn row INCOMPLETE ("the private copy is not proven"). Every later launch of the
+  round is checked for `Foreign` too.
+- **`fx_ident`.** After adding each plugin the Lua driver reads `fx_ident`, which for VST3 is the full path of the
+  binary followed by the class ID. It must be the private binary, and the class ID must equal the one in
+  `moduleinfo.json`.
+
+Plugin scanning happens in a separate process, so only launches that instantiate the plugin can show it in the
+module list; the learn launch always does. If a future REAPER resolves duplicate names differently, the result is
+INCOMPLETE with the reason, never a PASS about the wrong build.
+
+## Keeping other plugins out
+
+On startup REAPER loads every plugin file it has no up-to-date cache entry for. On a machine with many plugins
+that means third-party code runs inside the test process: a newly installed plugin can show an activation dialog
+or hang the scan. Before every round the **scan shield** gives each file REAPER would scan outside the private
+plugins directory (`*.vst3` bundles and files, `*.dll`) an empty, current entry in the private
+`reaper-vstplugins64.ini` when it has none, so REAPER treats it as "scanned, no plugin here" and never loads it.
+Only the private cache is written; the plugins and the system directories are only listed. The key is the file
+name with every character other than ASCII letters, digits and `.` replaced by `_`; the stamp is the binary's last
+write time as FILETIME in little-endian hex. Names with non-ASCII characters have no known key and are counted as
+`unshielded` in the result. CLAP plugins are not shielded; the result lists every `.vst3` and `.clap` module seen
+loaded, so a third-party plugin in the process is visible.
+
+## Learning the plugin blocks
+
+A plugin block in a project without the state REAPER saved for that plugin is reported as "effect unavailable".
+So no block is ever written by hand. Once per round one launch adds every plugin (and every parameter set a layout
+uses) by name, sets the parameters by name and reads them back, and saves the project; the blocks REAPER wrote are
+what every other project of the round uses. `TrackFX_AddByName` matches loosely (a single letter adds some plugin),
+so the full name `VST3: <Name> (<Vendor>)` is used and checked after adding: the displayed name, `fx_ident` and the
+class ID of the saved block must all be the expected ones. A plugin that does not load is FAIL.
 
 A path in a recorded title is masked from its drive letter, `\\` or `//` up to the next double quote or the end of the
-title: a path can hold spaces, and a user name is often right after one.
+title: a path can hold spaces, and a user name is often right after one. Everything else that reaches a result file or
+the console (reasons, exception messages, the facts of a row, usage errors) is masked the same way, see
+[RESULTS.md](RESULTS.md). The console names the result file without its directory.
 
 The self-test exercises this with real message boxes. A session without a desktop (a service, for example some CI
 runners) cannot show them: the self-test then states that those cases did not run. The classification in the table
@@ -105,7 +204,9 @@ above is a pure function and is tested everywhere.
 - A render whose data length is still the placeholder `0xFFFFFFFF` is unreadable, so `INCOMPLETE` in a comparison and on
   its own alike: the writer never came back to fill in the length, so the file is not finished, and what is in it says
   nothing about what is missing. REAPER's finished renders hold the real length.
-- With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven.
+- With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven. A configuration
+  cannot get there: it needs at least one plugin (the schema refuses an empty `plugins`), so every run has a binary to
+  prove, and a test that only needs JSFX still names one.
 
 ## Scripts
 

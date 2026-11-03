@@ -200,7 +200,9 @@ function Get-HarnessModuleVerdict {
 function Stop-HostRefuse([string]$Why) { throw [System.InvalidOperationException]::new("REFUSED: $Why") }
 
 # Starts REAPER and waits for it to exit. Status: Exited / Timeout (TimeoutSec reached) / Killed (KillAfterSec
-# reached, for the negative cases) / Modal (a stuck dialog).
+# reached, for the negative cases) / Modal (a stuck dialog) / Error (watching it failed, Error says how: its counters
+# could not be read, for one). Once the process is started nothing in here throws: only this function knows the process,
+# so whatever goes wrong it is ended by its PID like at a timeout, and the caller gets the same StillRunning as there.
 # Refused before anything starts, with no way around it for a Launcher either: Lock is not an object from
 # Enter-HarnessLocks holding the default GUI lock; an element of ReaperArgs contains a double quote (the arguments go
 # to the process one by one, a quote of its own would arrive escaped); ReaperArgs names the configuration file switch
@@ -219,6 +221,8 @@ function Stop-HostRefuse([string]$Why) { throw [System.InvalidOperationException
 # Sampler and ModuleSampler are for the self-test only too: they replace Get-HarnessProcessSample and
 # Get-HarnessProcessModulePaths. So is Stopper: it replaces the call that ends the process, so a process that cannot
 # be ended can be tested.
+# StartedList: a list of the caller; it gets one row (Pid, StartUtc) right after the start, so that the caller knows of
+# the process even when something later in here throws. Get-HarnessOwnProcessesLeft reads those rows.
 function Invoke-HarnessHost {
     param(
         [Parameter(Mandatory)][string]$ReaperExe,
@@ -233,7 +237,8 @@ function Invoke-HarnessHost {
         [scriptblock]$Launcher = $null,
         [scriptblock]$Sampler = $null,
         [scriptblock]$ModuleSampler = $null,
-        [scriptblock]$Stopper = $null
+        [scriptblock]$Stopper = $null,
+        $StartedList = $null
     )
     if (-not (Test-HarnessLockHeld -Lock $Lock -Name (Get-HarnessDefaultGuiLock))) { Stop-HostRefuse 'REAPER is only started while holding the default GUI lock: pass the object from Enter-HarnessLocks as -Lock' }
     $cfgArgs = @('-nosplash', '-newinst', '-cfgfile', (Get-HarnessCfgArgument))
@@ -250,6 +255,7 @@ function Invoke-HarnessHost {
     $startedUtc = [DateTime]::UtcNow # taken before the start: files written by this launch are never older
     $proc = $Launcher ? (& $Launcher $psi) : [Diagnostics.Process]::Start($psi)
     $ownPid = $proc.Id
+    if ($null -ne $StartedList) { $StartedList.Add([pscustomobject]@{ Pid = $ownPid; StartUtc = (Get-HarnessProcessStartUtc $proc) }) }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $status = $null
     $modal = $null
@@ -262,48 +268,55 @@ function Invoke-HarnessHost {
     foreach ($leaf in $WatchModules) { $modSeen[$leaf] = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
     $plugSeen = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $modScans = 0
-    while (-not $proc.HasExited) {
-        Start-Sleep -Milliseconds 250
-        $now = $sw.Elapsed.TotalSeconds
-        if ($KillAfterSec -gt 0 -and $now -ge $KillAfterSec) { $status = 'Killed'; break }
-        if ($now -ge $TimeoutSec) { $status = 'Timeout'; break }
-        if ($WatchModules.Count) {
-            $paths = $ModuleSampler ? (& $ModuleSampler $proc) : (Get-HarnessProcessModulePaths $proc)
-            if ($null -ne $paths) {
-                $modScans++
-                foreach ($modPath in $paths) {
-                    $leaf = [IO.Path]::GetFileName($modPath)
-                    foreach ($w in $WatchModules) { if ([string]::Equals($leaf, $w, [StringComparison]::OrdinalIgnoreCase)) { $null = $modSeen[$w].Add($modPath) } }
-                    if ($leaf -match '\.(vst3|clap)$') { $null = $plugSeen.Add($modPath) }
+    $hostError = $null
+    try {
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 250
+            $now = $sw.Elapsed.TotalSeconds
+            if ($KillAfterSec -gt 0 -and $now -ge $KillAfterSec) { $status = 'Killed'; break }
+            if ($now -ge $TimeoutSec) { $status = 'Timeout'; break }
+            if ($WatchModules.Count) {
+                $paths = $ModuleSampler ? (& $ModuleSampler $proc) : (Get-HarnessProcessModulePaths $proc)
+                if ($null -ne $paths) {
+                    $modScans++
+                    foreach ($modPath in $paths) {
+                        $leaf = [IO.Path]::GetFileName($modPath)
+                        foreach ($w in $WatchModules) { if ([string]::Equals($leaf, $w, [StringComparison]::OrdinalIgnoreCase)) { $null = $modSeen[$w].Add($modPath) } }
+                        if ($leaf -match '\.(vst3|clap)$') { $null = $plugSeen.Add($modPath) }
+                    }
                 }
             }
-        }
-        foreach ($row in [HarnessWin]::Windows([uint32]$ownPid)) {
-            $f = $row -split "`t", 4
-            $verdict = Get-HarnessModalVerdict -Class $f[2] -Visible ($f[1] -eq '1') -Title $f[3]
-            if ($verdict.Action -eq 'Ignore') { continue }
-            $null = $titles.Add($verdict.Name + ($verdict.Name -eq 'unknown-dialog' ? ':' + (ConvertTo-HarnessSafeTitle $f[3]) : ''))
-            $h = [long]$f[0]
-            if ($verdict.Action -eq 'PressNo') {
-                if ([HarnessWin]::Press($h, $script:IdNo)) { $dismissed.Add($verdict.Name) }
-            } elseif ($verdict.Action -eq 'Fatal') {
-                if (-not $firstSeen.ContainsKey($h)) { $firstSeen[$h] = $now }
-                elseif ($now - $firstSeen[$h] -ge 0.5) { $modal = $verdict.Name; [HarnessWin]::Close($h); $status = 'Modal'; break }
+            foreach ($row in [HarnessWin]::Windows([uint32]$ownPid)) {
+                $f = $row -split "`t", 4
+                $verdict = Get-HarnessModalVerdict -Class $f[2] -Visible ($f[1] -eq '1') -Title $f[3]
+                if ($verdict.Action -eq 'Ignore') { continue }
+                $null = $titles.Add($verdict.Name + ($verdict.Name -eq 'unknown-dialog' ? ':' + (ConvertTo-HarnessSafeTitle $f[3]) : ''))
+                $h = [long]$f[0]
+                if ($verdict.Action -eq 'PressNo') {
+                    if ([HarnessWin]::Press($h, $script:IdNo)) { $dismissed.Add($verdict.Name) }
+                } elseif ($verdict.Action -eq 'Fatal') {
+                    if (-not $firstSeen.ContainsKey($h)) { $firstSeen[$h] = $now }
+                    elseif ($now - $firstSeen[$h] -ge 0.5) { $modal = $verdict.Name; [HarnessWin]::Close($h); $status = 'Modal'; break }
+                }
+            }
+            if ($status) { break }
+            foreach ($label in @($WatchFiles.get_Keys())) {
+                if ($marks.Contains($label) -or $label -in $lost -or -not (Test-Path -LiteralPath $WatchFiles[$label])) { continue }
+                $sample = $Sampler ? (& $Sampler $proc) : (Get-HarnessProcessSample $proc)
+                if ($sample.Exited) { $lost.Add($label) } else { $marks[$label] = $sample }
             }
         }
-        if ($status) { break }
-        foreach ($label in @($WatchFiles.get_Keys())) {
-            if ($marks.Contains($label) -or $label -in $lost -or -not (Test-Path -LiteralPath $WatchFiles[$label])) { continue }
-            $sample = $Sampler ? (& $Sampler $proc) : (Get-HarnessProcessSample $proc)
-            if ($sample.Exited) { $lost.Add($label) } else { $marks[$label] = $sample }
+        if (-not $status) {
+            # The process exited faster than the next poll: the mark file is there but there was no time to sample.
+            # That is "exited before the sample" too, not "missing".
+            foreach ($label in @($WatchFiles.get_Keys())) {
+                if (-not $marks.Contains($label) -and $label -notin $lost -and (Test-Path -LiteralPath $WatchFiles[$label])) { $lost.Add($label) }
+            }
         }
-    }
-    if (-not $status) {
-        # The process exited faster than the next poll: the mark file is there but there was no time to sample.
-        # That is "exited before the sample" too, not "missing".
-        foreach ($label in @($WatchFiles.get_Keys())) {
-            if (-not $marks.Contains($label) -and $label -notin $lost -and (Test-Path -LiteralPath $WatchFiles[$label])) { $lost.Add($label) }
-        }
+    } catch {
+        # The process runs on and nobody else knows it: treated like a timeout below, and the status says what happened
+        $status = 'Error'
+        $hostError = $_.Exception.Message -replace '\s+', ' '
     }
     $stillRunning = $false
     if ($status) {
@@ -325,13 +338,35 @@ function Invoke-HarnessHost {
     [pscustomobject]@{
         Status = $status ?? 'Exited'; ExitCode = $exit; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Pid = $ownPid; StartedUtc = $startedUtc; ExitedUtc = $exitedUtc
         Modal = $modal; Dismissed = $dismissed.ToArray(); Windows = @($titles); Marks = $marks; SampleLost = $lost.ToArray(); Modules = $modules; ModuleScans = $modScans
-        PluginModules = @($plugSeen); StillRunning = $stillRunning
+        PluginModules = @($plugSeen); StillRunning = $stillRunning; Error = $hostError
     }
 }
 
-# IDs of the reaper.exe processes on this machine right now (taken before and after: if somebody else's REAPER is
-# running the suite does not run; after a run none of ours may be left).
+# IDs of the reaper.exe processes on this machine right now, whoever started them: if there are any before a run, the
+# suite does not run. Only for that check: a process found by name may be anybody's. What a run itself left behind is
+# Get-HarnessOwnProcessesLeft.
 function Get-HarnessReaperProcessIds { Get-Process -Name reaper -ErrorAction SilentlyContinue | ForEach-Object { $_.Id } }
 
+# When a process started, in UTC, or $null when that cannot be read. Through the get_ method: a property that throws
+# is swallowed by PowerShell into an empty value.
+function Get-HarnessProcessStartUtc($Process) {
+    try { $Process.get_StartTime().ToUniversalTime() } catch { $null }
+}
+
+# The rows of Started (Pid, StartUtc; see StartedList of Invoke-HarnessHost) whose process is still alive. A PID alone
+# proves nothing, since Windows hands out the number again once a process is gone, so the start time has to match as well.
+# A row whose start time was never read cannot be told apart from a new process of that number and counts when its PID
+# is alive: better a round that is red for nothing than a process of ours nobody noticed. StartOf: PID -> start time
+# in UTC, or $null when no such process can be read (injectable for the self-test); a process that cannot be read now
+# is not ours, since this tool could read what it started itself.
+function Get-HarnessOwnProcessesLeft {
+    param([object[]]$Started = @(), [scriptblock]$StartOf = $null)
+    $lookup = $StartOf ?? { param($id) $found = Get-Process -Id $id -ErrorAction SilentlyContinue; $found ? (Get-HarnessProcessStartUtc $found) : $null }
+    $Started | Where-Object {
+        $now = & $lookup $_.Pid
+        $null -ne $now -and ($null -eq $_.StartUtc -or $now -eq $_.StartUtc)
+    }
+}
+
 Export-ModuleMember -Function Get-HarnessModalVerdict, ConvertTo-HarnessSafeTitle, Resolve-HarnessExitedUtc, Invoke-HarnessHost, Get-HarnessReaperProcessIds, Get-HarnessProcessSample,
-    Get-HarnessMarkProblem, Get-HarnessModuleVerdict, Get-HarnessProcessModulePaths, Test-HarnessSameFile
+    Get-HarnessMarkProblem, Get-HarnessModuleVerdict, Get-HarnessProcessModulePaths, Test-HarnessSameFile, Get-HarnessProcessStartUtc, Get-HarnessOwnProcessesLeft
