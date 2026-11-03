@@ -1627,6 +1627,36 @@ function Get-ExtensionCases([string]$Tmp, [string]$RepoRoot) {
     $cases
 }
 
+# ---------------------------------------------------------------- the worked example
+# examples/scvb is what docs/INTEGRATING.md walks plugin projects through, and docs/validation records its rows, so
+# it is read here as a run reads it, without REAPER: its extension registers, the configuration validates with the
+# rows the notes count, and the five states come out of the template, each the plugin it is meant for and from the
+# track the routing layout names the same way. The preflight check itself is not run: its answer depends on what
+# else runs on the machine.
+function Get-ExampleCases([string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $exampleFile = Join-Path $RepoRoot 'examples/scvb/reaper-harness.json'
+    $exampleExt = Import-HarnessExtensions (Read-HarnessConfigExtensions $exampleFile)
+    & $add 'example: the SCVB preflight module registers one preflight check and no kinds' $false (($exampleExt.Modules -join ',') -ceq 'scvb-preflight' -and $exampleExt.Preflight.Count -eq 1 -and $exampleExt.Kinds.get_Count() -eq 0)
+    $exampleConf = Read-HarnessConfig -Path $exampleFile -Kinds $exampleExt.Kinds # a problem is a usage error, which fails the group
+    & $add 'example: the SCVB configuration validates, with the 47 scenario rows and 2 negative cases its validation notes count' $false ($exampleConf.Scenarios.Count -eq 47 -and $exampleConf.Negative.Count -eq 2)
+    $exampleStates = Read-HarnessStates -Config $exampleConf
+    $wantStates = [ordered]@{
+        'input@ch1'       = @('VST3: SCVB Input (Synchain)', 'ABCDEF019182FAEB536E636853637669', 'Vox 1')
+        'input@ch2'       = @('VST3: SCVB Input (Synchain)', 'ABCDEF019182FAEB536E636853637669', 'Vox 2')
+        'input@ch3'       = @('VST3: SCVB Input (Synchain)', 'ABCDEF019182FAEB536E636853637669', 'Vox 3')
+        'output@group-8'  = @('VST3: SCVB Output (Synchain)', 'ABCDEF019182FAEB536E63685363766F', 'Bus')
+        'monitor@group-8' = @('VST3: SCVB Monitor (Synchain)', 'ABCDEF019182FAEB536E63685363766D', 'Bus')
+    }
+    $stateKeys = @($exampleStates.get_Keys())
+    $wrongStates = @($wantStates.get_Keys() | Where-Object { -not $exampleStates.Contains($_) -or $exampleStates[$_].Name -cne $wantStates[$_][0] -or $exampleStates[$_].Cid -cne $wantStates[$_][1] -or $exampleStates[$_].Track -cne $wantStates[$_][2] })
+    & $add 'example: the five states come out of routing-template.rpp, each block the plugin it is configured for, from its track' $false (($stateKeys -join ',') -ceq (@($wantStates.get_Keys()) -join ',') -and $wrongStates.Count -eq 0)
+    $routingNames = @($exampleConf.Layouts['routing'].Tracks | ForEach-Object { $_.Name })
+    & $add 'example: the routing layout names its tracks as the template does' $false (($routingNames -join ',') -ceq 'Bus,Vox 1,Vox 2,Vox 3')
+    $cases
+}
+
 # ---------------------------------------------------------------- wiring
 function Get-WiringCases([string]$RepoRoot) {
     $cases = New-CaseList
@@ -1757,7 +1787,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {
