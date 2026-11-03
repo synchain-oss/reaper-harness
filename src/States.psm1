@@ -133,8 +133,8 @@ function Get-HarnessBlockSha([string[]]$Lines) {
 }
 
 # Every state of the configuration (Config.ConfigDir is the directory paths are relative to). Returns an ordered table
-# "<plugin>@<state>" -> @{ Plugin; State; Lines; Name; Cid; Sha (12 hex digits) }. Throws "USAGE: states: ..." with
-# every problem.
+# "<plugin>@<state>" -> @{ Plugin; State; Lines; Name; Cid; Sha (12 hex digits); Track (the template track it was
+# taken from, '' for a state file) }. Throws "USAGE: states: ..." with every problem.
 function Read-HarnessStates {
     param([Parameter(Mandatory)]$Config)
     $out = [ordered]@{}
@@ -157,7 +157,8 @@ function Read-HarnessStates {
             if ($got.Problem) { $bad.Add("${label}: $leaf $($got.Problem)"); continue }
             $h = Read-HarnessStateHeader $got.Lines
             if ($h.Problem) { $bad.Add("${label}: $leaf ($($st.Template ? "track '$($st.Track)', FX $($st.Fx)" : 'state file')): $($h.Problem)"); continue }
-            $out["$($p.Id)@$($st.Name)"] = [pscustomobject]@{ Plugin = $p.Id; State = $st.Name; Lines = $h.Lines; Name = $h.Name; Cid = $h.Cid; Sha = (Get-HarnessBlockSha $h.Lines).Substring(0, 12) }
+            $out["$($p.Id)@$($st.Name)"] = [pscustomobject]@{ Plugin = $p.Id; State = $st.Name; Lines = $h.Lines; Name = $h.Name; Cid = $h.Cid; Sha = (Get-HarnessBlockSha $h.Lines).Substring(0, 12)
+                Track = ($st.Template ? $st.Track : '') }
         }
     }
     if ($bad.Count) { Stop-Usage ("states: $($bad.Count) problem(s): " + ($bad -join '; ')) }

@@ -98,6 +98,14 @@ own without them, since only a state with nothing set on top can be compared so.
 the project they opened again and compare every state FX's block with the block it was given. A plugin that
 ignores or rewrites a state fails there, naming the track and the FX.
 
+A plugin can keep in its state what it sees of other instances, for example a bus plugin that labels its inputs by
+the names of their tracks. It then saves its block back changed whenever those tracks are named otherwise, although
+it holds the state it was given. So in the learn project the track of a state taken from a template gets the name of
+that template track (the `track` field); a state file, a name an earlier variant already has (in any case), a name
+with a double quote and a name like `learn-<n>` get `learn-<n>`, as every variant without a state does. For the same
+reason, a layout that uses such states should name its tracks as the template does: `device` and `savereopen`
+compare with the block as it was given.
+
 ## signal
 
 The test signal is one impulse at 0.25 s followed by seeded noise (and optionally a sine), written as 32-bit float

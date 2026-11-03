@@ -198,8 +198,11 @@ class ID of the saved block must all be the expected ones. A plugin that does no
 A named state is a block REAPER saved for you (see [CONFIG.md](CONFIG.md#states)). It is not added by name: the
 project the learn launch opens already holds the block, REAPER loads it as it loads any saved project, and the block
 REAPER saves back must be the one it was given; a state used with parameters on top is learned on its own as well,
-so this holds for every state. Before anything starts, the block's name and class ID must be the plugin's (from
-`moduleinfo.json`); a block of another plugin is a usage error. Of a template project only that one block is read:
+so this holds for every state. The track that holds a template state in the learn project is named like the template
+track (the `track` field of the configuration, not read from the template), because a plugin may keep the names of
+the tracks it sees in its state; any other track is `learn-<n>`. Before anything starts, the block's name and class
+ID must be the plugin's (from `moduleinfo.json`); a block of another plugin is a usage error. Of a template project
+only that one block is read:
 other tracks, other plugins and file paths in it never reach the console, the logs or the result file, and the block
 itself only goes into projects in the work directory. A JSFX shipped with the tool is copied into the private
 configuration directory and checked by the name REAPER shows and by its path there.

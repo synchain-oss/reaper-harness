@@ -114,7 +114,8 @@ end
 
 local steps = {}
 
--- job.project: tracks learn-1 ... learn-<n>, empty or holding a state block; job.fx: list of { name = the name to add
+-- job.project: one track per entry, in order (named learn-<n>, or after the template track of its state), empty or
+-- holding a state block; entry n is on track n whatever its name; job.fx: list of { name = the name to add
 -- it by, preloaded = true when the track already holds it, params = { { name, value, display? } ... } }; job.saveAs.
 -- Reported per entry n (1-based): fx<n>_idx (-1 = REAPER could not add it, or the state block did not load),
 -- fx<n>_name, fx<n>_ident, fx<n>_pdc, fx<n>_offline, fx<n>_nparams, and per parameter k:

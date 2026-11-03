@@ -304,7 +304,7 @@ function Get-FakeIniValue([string]$IniKey, [string]$Default = '') {
     $m.Success ? $m.Groups[1].Value : $Default
 }
 
-# The learn step: tracks learn-<n> of the job's project (empty, or holding a state block), the plugin added by name
+# The learn step: the tracks of the job's project (empty, or holding a state block), the plugin added by name
 # to an empty one, parameters set on top; the saved project holds every plugin's state as it saves it.
 function Invoke-FakeLearn($job, $report) {
     $given = @(($job['project'] -and (Test-Path -LiteralPath $job['project'])) ? (Read-FakeProject ([IO.File]::ReadAllText($job['project']))) : @())
@@ -327,7 +327,9 @@ function Invoke-FakeLearn($job, $report) {
                 $fx = [pscustomobject]@{ Kind = $p.Kind; Name = $p.Name; Ident = $p.Ident; Header = $header; Bypassed = $false; Params = (New-FakeParams $p.Kind); Plugin = $p }
             }
         }
-        $null = $rpp.Append("  <TRACK`n    NAME `"learn-$n`"`n")
+        # Like the driver: track n of the opened project keeps its name; a track it has to add is named learn-<n>
+        $trackName = ($n -le $given.Count -and $given[$n - 1].Name) ? $given[$n - 1].Name : "learn-$n"
+        $null = $rpp.Append("  <TRACK`n    NAME `"$trackName`"`n")
         if (-not $fx) { $report.Add("${key}idx=-1"); $null = $rpp.Append("  >`n"); continue }
         $ident = ($fx.Kind -eq 'JS') ? $fx.Ident : $fx.Plugin.Ident
         $k = 0
