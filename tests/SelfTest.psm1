@@ -1516,6 +1516,14 @@ function Get-StateCases([string]$Tmp, [string]$RepoRoot) {
     $out = & $msg { param($c) $c.Plugins['gain'].States['quiet'].Track = 'Nobody'; $c.Plugins['gain'].States['loud'].StateFile = 'states/template.rpp' }
     & $add "states: every problem is listed at once; a problem names file, track and FX number, never the content ($out)" $true (
         $out -like "USAGE: states: 2 problem(s): *template.rpp has no track named 'Nobody'*template.rpp holds 0 plugin blocks*" -and $out -notmatch 'FAKESTATE|Lead backup')
+    # A state file that is there but cannot be read (held open by another program without sharing)
+    $held = Join-Path $Tmp 'held-states'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $held 'states')
+    foreach ($f in 'template.rpp', 'loud.RfxChain') { Copy-Item -LiteralPath (Join-Path $RepoRoot "tests/fixtures/states/$f") -Destination (Join-Path $held 'states') }
+    $lock = [IO.File]::Open((Join-Path $held 'states/loud.RfxChain'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try { $out = & $msg { param($c) $c.ConfigDir = $held } } finally { $lock.Dispose() }
+    & $add "states: a file that cannot be read is a usage error naming the file only, not the path the exception text holds ($out)" $true (
+        $out -ceq 'USAGE: states: 1 problem(s): plugins.gain.states.loud: loud.RfxChain cannot be read (IOException)')
     $gainInfo = Read-HarnessModuleInfo (Join-Path $RepoRoot 'tests/fixtures/plugins/Fixture Gain.vst3')
     $busInfo = Read-HarnessModuleInfo (Join-Path $RepoRoot 'tests/fixtures/plugins/Fixture Bus.vst3')
     & $add 'states: blocks of the plugin they are configured for pass the identity check' $false ($(try { Assert-HarnessStateIdentity -States $st -Infos ([ordered]@{ gain = $gainInfo; bus = $busInfo }); $true } catch { $false }))

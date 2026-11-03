@@ -146,8 +146,13 @@ function Read-HarnessStates {
             $rel = $st.Template ? $st.Template : $st.StateFile
             try { $file = Resolve-HarnessExtensionPath -ConfigDir $Config.ConfigDir -Relative $rel -What 'state' }
             catch { $bad.Add("${label}: $($_.Exception.Message -replace '^USAGE: ', '')"); continue }
-            if (-not $texts.ContainsKey($file)) { $texts[$file] = [IO.File]::ReadAllText($file) }
             $leaf = Split-Path -Leaf $file
+            if (-not $texts.ContainsKey($file)) {
+                # A file that is there but cannot be read (no access, held open by another program): the exception text
+                # names the full path, so only the file name and the kind of error are reported
+                try { $texts[$file] = [IO.File]::ReadAllText($file) }
+                catch { $bad.Add("${label}: $leaf cannot be read ($($_.Exception.GetBaseException().GetType().Name))"); continue }
+            }
             $got = $st.Template ? (Get-HarnessTemplateFxBlock -Text $texts[$file] -Track $st.Track -Fx $st.Fx) : (Get-HarnessStateFileBlock $texts[$file])
             if ($got.Problem) { $bad.Add("${label}: $leaf $($got.Problem)"); continue }
             $h = Read-HarnessStateHeader $got.Lines
