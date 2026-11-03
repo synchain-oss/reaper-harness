@@ -85,10 +85,12 @@ To set a state up without anyone at the keyboard, drive the plugin's own editor.
 page, two environment variables given to that one REAPER process are enough:
 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>` opens the Chrome DevTools Protocol, bound to
 127.0.0.1 only, and `WEBVIEW2_USER_DATA_FOLDER=<scratch directory>` keeps WebView2's data out of the user's profile.
-A small CDP client can then call the functions the page itself calls, and a Lua script saves the project. Do this
-only while making the template: start that REAPER with the private configuration directory, on a desktop nobody
-looks at, pick a free port and check that nothing listens on it first, end only the process you started, and never
-leave the variables set for a normal run. If the plugin writes settings or logs of its own when its editor opens,
+A small CDP client can then call the functions the page itself calls, and a Lua script saves the project. The port
+asks for no password: while it is open, any program running on the machine can connect to it and drive that page.
+So do this only while making the template, on a machine where you trust what runs locally: start that REAPER with
+the private configuration directory, on a desktop nobody looks at, pick a free port and check that nothing listens
+on it first, end only the process you started (which closes the port), and never leave the variables set for a
+normal run. If the plugin writes settings or logs of its own when its editor opens,
 point that process's profile folders (`USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) at a scratch directory as well. That
 works for plugins that look these folders up from the process environment; not every plugin does, so also compare a
 listing of the plugin's real data directories before and after.
