@@ -191,7 +191,7 @@ function Get-HarnessSignal {
         $s = [pscustomobject]@{ Seconds = $Ctx.Signal.Seconds; Seed = $Spec.Seed; NoiseDb = $Spec.NoiseDb; SineHz = $Spec.SineHz; SineDb = $Spec.SineDb }
     }
     if (-not $Ctx.Signals.ContainsKey($key)) {
-        $path = Join-Path $Ctx.Work "signal-$key.wav"
+        $path = Join-Path $Ctx.Work "_signal-$key.wav"
         New-HarnessSignalFile -Path $path -Rate $Sr -Channels $Channels -Seconds $s.Seconds -Seed $s.Seed -NoiseDb $s.NoiseDb -SineHz $s.SineHz -SineDb $s.SineDb -OffsetSamples $OffsetSamples
         $Ctx.Files.Add($path)
         $Ctx.Signals[$key] = $path
@@ -201,16 +201,27 @@ function Get-HarnessSignal {
 
 function Get-HarnessLayout($Ctx, [string]$Id) { ($Id -ceq '@dry') ? (Get-HarnessDryLayout) : $Ctx.Config.Layouts[$Id] }
 
+# The files of one render in the work directory (pure): Project, Wav (the master) and Stems (track name -> file).
+# With stems REAPER writes <Name>-stem-<track>.wav per stem and <Name>-stem-Master.wav for the master (the render
+# pattern of New-HarnessProjectText), so a stem never takes the name of another render of the scenario
+# (<id>-first, <id>-variant). The files the scenarios of a round share (the signals, the dry references) start with
+# '_', which no scenario id does, so no scenario renders into them either.
+function Get-HarnessRunFiles([string]$Work, [string]$Name, [string[]]$Stems = @()) {
+    $stemFiles = [ordered]@{}
+    foreach ($st in $Stems) { $stemFiles[$st] = Join-Path $Work "$Name-stem-$st.wav" }
+    [pscustomobject]@{ Project = (Join-Path $Work "$Name.rpp"); Wav = (Join-Path $Work ($Stems.Count ? "$Name-stem-Master.wav" : "$Name.wav")); Stems = $stemFiles }
+}
+
 # Writes the project and sets the audio configuration; returns the project path, the path of its (master) render and
-# Stems (track name -> path of its stem). With stems REAPER names the master <Name>-Master.wav.
+# Stems (track name -> path of its stem), named as Get-HarnessRunFiles says.
 function New-HarnessRun {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)]$Layout, [int]$Sr = 48000, [int]$Block = 512,
           [string]$Mode = 'offline', [int]$Channels = 2, [string[]]$Bypass = @(), [double]$VolumeScale = 1.0, [int]$OffsetSamples = 0, [switch]$NoFx,
           [hashtable]$Blocks = $null, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true)
-    $Project = Join-Path $Ctx.Work "$Name.rpp"
-    $Wav = Join-Path $Ctx.Work ($Stems.Count ? "$Name-Master.wav" : "$Name.wav")
-    $stemFiles = [ordered]@{}
-    foreach ($st in $Stems) { $stemFiles[$st] = Join-Path $Ctx.Work "$Name-$st.wav" }
+    $files = Get-HarnessRunFiles $Ctx.Work $Name $Stems
+    $Project = $files.Project
+    $Wav = $files.Wav
+    $stemFiles = $files.Stems
     foreach ($f in @($Wav) + @($stemFiles.get_Values())) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
     $sources = @{}
     foreach ($t in $Layout.Tracks) { if ($t.Source -and $null -ne $t.Signal) { $sources[$t.Name] = Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples -Spec $t.Signal } }
@@ -377,10 +388,16 @@ function Test-HarnessReopenFacts([Parameter(Mandatory)][hashtable]$Facts, [int]$
 
 # -------- kinds --------
 
+# The name of a dry reference render (pure); it starts with '_' (see Get-HarnessRunFiles).
+function Get-HarnessReferenceName([string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true) {
+    $key = "_dry-$($LayoutId.TrimStart('@'))-$Sr-$Block-$Mode-$Channels" + ($AnticipativeFx ? '' : '-noaf')
+    if ($Stems.Count) { $key += '-stems-' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Stems -join "`n"))).Substring(0, 8).ToLowerInvariant() }
+    $key
+}
+
 # The dry reference: the layout without any FX. Stems: tracks rendered as stems as well. Cached per round.
 function Get-HarnessReference($Ctx, [string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true) {
-    $key = "dry-$($LayoutId.TrimStart('@'))-$Sr-$Block-$Mode-$Channels" + ($AnticipativeFx ? '' : '-noaf')
-    if ($Stems.Count) { $key += '-stems-' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Stems -join "`n"))).Substring(0, 8).ToLowerInvariant() }
+    $key = Get-HarnessReferenceName $LayoutId $Sr $Block $Mode $Channels $Stems $AnticipativeFx
     if (-not $Ctx.Refs.ContainsKey($key)) {
         $r = New-HarnessRun -Ctx $Ctx -Name $key -Layout (Get-HarnessLayout $Ctx $LayoutId) -Sr $Sr -Block $Block -Mode $Mode -Channels $Channels -Stems $Stems -AnticipativeFx $AnticipativeFx -NoFx
         $res = Invoke-HarnessRender $Ctx $r.Project $r.Wav 'reference' -Also @($r.Stems.get_Values())
@@ -590,6 +607,6 @@ function Invoke-HarnessScenario {
 }
 
 Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, Hide-HarnessFacts, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
-    Get-HarnessLayout, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
+    Get-HarnessLayout, Get-HarnessRunFiles, Get-HarnessReferenceName, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
     Get-HarnessScenarioKinds, Get-HarnessApi, Invoke-HarnessScenario, Get-HarnessSkipMarkerHit, Get-HarnessWorkrender, Test-HarnessStateProof, Invoke-HarnessCompare,
     Test-HarnessHostReadback, Test-HarnessReopenFacts

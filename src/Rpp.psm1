@@ -65,7 +65,8 @@ function Get-HarnessFolderFlags([object[]]$Tracks) {
 # of the layout's own bypass flags. NoFx: leave every FX out (the dry reference). VolumeScale: multiplies the volume
 # of the source tracks (a built-in negative case uses 0.5). Sources: track name -> signal file for tracks with a
 # signal of their own (the others get SourceWav). Stems: track names rendered as stems: the render then writes
-# <RenderName>-<track>.wav per stem and <RenderName>-Master.wav (REAPER's "master mix + stems of selected tracks").
+# <RenderName>-stem-<track>.wav per stem and <RenderName>-stem-Master.wav (REAPER's "master mix + stems of selected
+# tracks"; Get-HarnessRunFiles in Scenarios.psm1 expects these names).
 function New-HarnessProjectText {
     param(
         [Parameter(Mandatory)]$Layout,
@@ -88,7 +89,7 @@ function New-HarnessProjectText {
     $add = { param([string]$Line) $null = $sb.Append($Line).Append("`n") }
     & $add '<REAPER_PROJECT 0.1 "7.0/win64" 0 0'
     & $add "  RENDER_FILE $(ConvertTo-RppString $RenderDir)"
-    & $add "  RENDER_PATTERN $(ConvertTo-RppString ($Stems.Count ? ($RenderName + '-$track') : $RenderName))"
+    & $add "  RENDER_PATTERN $(ConvertTo-RppString ($Stems.Count ? ($RenderName + '-stem-$track') : $RenderName))"
     & $add "  RENDER_FMT 0 $Channels $SampleRate"
     & $add "  RENDER_1X $($script:RenderSpeed[$Mode])"
     & $add '  RENDER_RANGE 1 0 0 0 1000'

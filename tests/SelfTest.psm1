@@ -1203,8 +1203,32 @@ function Get-ProjectCases([string]$Tmp, [string]$RepoRoot) {
             [pscustomobject]@{ Name = 'B'; Source = $false; Folder = $false; Depth = 0; Volume = 1.0; Pan = 0.0; Mute = $false; MasterSend = $true; Sends = @(); Fx = @() }) }
     & $add 'project: a pre-FX send is mode 1' $false ((New-HarnessProjectText -Layout $pfx -SourceWav 'S' -RenderDir 'D' -RenderName 'N') -match 'AUXRECV 0 1 0.25 0 ')
     & $add 'project: a track with a signal of its own gets that file; the other source tracks the shared one' $false ((& $part 'Drums') -match 'FILE "D.wav"' -and (& $part 'Keys') -match 'FILE "S.wav"' -and (& $part 'Verb') -notmatch 'FILE')
-    & $add 'project: with stems each file is named after its track, REAPER renders master and stems, only the stem tracks are selected' $false (
-        $rt -match 'RENDER_PATTERN "N-\$track"' -and $rt -match 'RENDER_STEMS 1' -and (@([regex]::Matches($rt, 'SEL (\d)') | ForEach-Object { $_.Groups[1].Value }) -join '') -ceq '1001')
+    & $add 'project: with stems each file is named <name>-stem-<track>, REAPER renders master and stems, only the stem tracks are selected' $false (
+        $rt -match 'RENDER_PATTERN "N-stem-\$track"' -and $rt -match 'RENDER_STEMS 1' -and (@([regex]::Matches($rt, 'SEL (\d)') | ForEach-Object { $_.Groups[1].Value }) -join '') -ceq '1001')
+    # The files a render expects are the ones its render pattern makes REAPER write ($track is Master for the master)
+    $wf = Get-HarnessRunFiles 'W' 'N' @('Drums', 'Cue')
+    $pat = [regex]::Match($rt, 'RENDER_PATTERN "([^"]*)"').Groups[1].Value
+    & $add "work files: the project, the master and each stem are where the render pattern puts them ($(Split-Path -Leaf $wf.Wav), $(Split-Path -Leaf $wf.Stems['Cue']))" $false (
+        (Split-Path -Leaf $wf.Project) -ceq 'N.rpp' -and (Split-Path -Leaf $wf.Wav) -ceq "$($pat.Replace('$track', 'Master')).wav" -and
+        (Split-Path -Leaf $wf.Stems['Drums']) -ceq "$($pat.Replace('$track', 'Drums')).wav" -and (Split-Path -Leaf $wf.Stems['Cue']) -ceq "$($pat.Replace('$track', 'Cue')).wav" -and
+        (Split-Path -Leaf (Get-HarnessRunFiles 'W' 'N').Wav) -ceq 'N.wav')
+    # No stem of the test render of scenario x takes a file of its first or variant render (with or without stems of
+    # their own): not a stem named first (the first render's master without stems), first-Master or variant-a
+    $tf = Get-HarnessRunFiles 'W' 'x' @('first', 'first-Master', 'variant', 'variant-a', 'Master2')
+    $testFiles = @($tf.Project, $tf.Wav) + @($tf.Stems.get_Values())
+    $clash = @(foreach ($rf in @((Get-HarnessRunFiles 'W' 'x-first'), (Get-HarnessRunFiles 'W' 'x-first' @('a')), (Get-HarnessRunFiles 'W' 'x-variant'), (Get-HarnessRunFiles 'W' 'x-variant' @('a')))) {
+            foreach ($f in @($rf.Project, $rf.Wav) + @($rf.Stems.get_Values())) { if ($f -in $testFiles) { Split-Path -Leaf $f } }
+        })
+    & $add "work files: no stem takes the name of a file of the scenario's first or variant render (file names ignore case)$($clash.Count ? ": $($clash -join ', ')" : '')" $true ($clash.Count -eq 0)
+    # The files the scenarios of a round share start with _, which no scenario id does: a scenario named like one
+    # renders into a file of its own
+    $sigCtx = [pscustomobject]@{ Work = $Tmp; Signals = @{}; Files = [Collections.Generic.List[string]]::new(); Signal = [pscustomobject]@{ Seconds = 0.5; Seed = 1; NoiseDb = -20.0; SineHz = 0.0; SineDb = -20.0 } }
+    $sig = Get-HarnessSignal $sigCtx 48000 2
+    $dryName = Get-HarnessReferenceName 'l' 48000 512 'offline' 2
+    & $add "work files: a scenario named like a dry reference or a signal renders into a file of its own ($dryName, $(Split-Path -Leaf $sig))" $true (
+        $dryName -ceq '_dry-l-48000-512-offline-2' -and (Get-HarnessReferenceName 'l' 48000 512 'offline' 2 @('A') $false) -clike '_dry-l-48000-512-offline-2-noaf-stems-*' -and
+        (Split-Path -Leaf $sig) -ceq '_signal-48000-2-0.wav' -and (Test-Path -LiteralPath $sig) -and
+        (Get-HarnessRunFiles $Tmp 'dry-l-48000-512-offline-2').Wav -notin @((Get-HarnessRunFiles $Tmp $dryName).Wav, $sig) -and (Get-HarnessRunFiles $Tmp 'signal-48000-2-0').Wav -notin @($sig))
     & $add 'project: without stems one file named as asked, no stem render, no track selected' $false ($text -match 'RENDER_PATTERN "N"' -and $text -notmatch 'RENDER_STEMS' -and $text -notmatch 'SEL 1')
     $lp = New-HarnessLearnProjectText -Variants @([pscustomobject]@{ Key = 'gain|'; State = '' }, [pscustomobject]@{ Key = 'gain@quiet|'; State = 'quiet' }) -States @{ 'gain@quiet|' = @('<VST "q"', 'Q', '>') }
     & $add 'learn project: an empty track per variant, the state block already on the track of a named state' $false ($lp -match '(?s)NAME "learn-1"\n    NCHAN 2\n  >\n  <TRACK\n    NAME "learn-2"\n    NCHAN 2\n    <FXCHAIN\n      BYPASS 0 0 0\n      <VST "q"\n      Q\n      >\n    >')
