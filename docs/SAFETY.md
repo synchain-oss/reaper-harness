@@ -106,12 +106,19 @@ only those, are classified:
 |---|---|
 | `REAPER Query` (save changes?) | answered No |
 | `Render…`, `Scanning…`, `Building peaks…` | progress windows, left alone, unless the title has `fail` or `error` in it in any case: those report trouble and do not go away on their own, so they are stuck, `unknown-dialog` |
+| `VST3: …`, `VST3i: …`, `VST: …`, `VSTi: …`, `CLAP: …`, `CLAPi: …`, `JS: …` (the floating window of a plugin), `FX: …` (an FX chain window) | not a dialog, left alone (`plugin-window`): the prefix must start the title, in that case, followed by a blank. Measured on REAPER 7.82: a VST3 and a JSFX floated from one track are titled `VST3: Name (Vendor) - Track 1 [1/2]` and `JS: Name - Track 1 [2/2]`, the chain windows `FX: Track 1` and `FX: Master Track`. A dialog a plugin opens itself has a title of its own and is still `unknown-dialog`, as is `Fake VST3: x` |
 | `About REAPER…` (the evaluation licence reminder) | never clicked away: stuck, `license-nag` |
 | `Project Load Warning`, `REAPER Error`, `Select files to save or delete`, `REAPER` (no audio device) | stuck, named |
 | anything else | stuck, `unknown-dialog` with the title (paths masked) |
 
 A stuck dialog ends the launch and the scenario is INCOMPLETE. The evaluation reminder shows up on some launches
 only (about one in six in our runs); buy a licence or run again.
+
+REAPER also looks for a new version about once a day and shows `REAPER New Version Notification` when there is one,
+which would end that launch the same way. So every launch first writes `verchk=0` under `[REAPER]` in the private
+`reaper.ini` (and `doctor.ps1 -Init` writes it into a new one), which turns that check off; nothing is clicked away,
+and the default resource directory is not touched. Measured on REAPER 7.82: with the key a `[verchk] lastt` a week
+old stays as it was and no notification comes; without it the notification shows within about 2 s.
 
 ## Outcomes never lie in your favour
 
@@ -188,6 +195,15 @@ what every other project of the round uses. `TrackFX_AddByName` matches loosely 
 so the full name `VST3: <Name> (<Vendor>)` is used and checked after adding: the displayed name, `fx_ident` and the
 class ID of the saved block must all be the expected ones. A plugin that does not load is FAIL.
 
+A named state is a block REAPER saved for you (see [CONFIG.md](CONFIG.md#states)). It is not added by name: the
+project the learn launch opens already holds the block, REAPER loads it as it loads any saved project, and the block
+REAPER saves back must be the one it was given; a state used with parameters on top is learned on its own as well,
+so this holds for every state. Before anything starts, the block's name and class ID must be the plugin's (from
+`moduleinfo.json`); a block of another plugin is a usage error. Of a template project only that one block is read:
+other tracks, other plugins and file paths in it never reach the console, the logs or the result file, and the block
+itself only goes into projects in the work directory. A JSFX shipped with the tool is copied into the private
+configuration directory and checked by the name REAPER shows and by its path there.
+
 A path in a recorded title is masked from its drive letter, `\\` or `//` up to the next double quote or the end of the
 title: a path can hold spaces, and a user name is often right after one. Everything else that reaches a result file or
 the console (reasons, exception messages, the facts of a row, usage errors) is masked the same way, see
@@ -205,8 +221,10 @@ above is a pure function and is tested everywhere.
   its own alike: the writer never came back to fill in the length, so the file is not finished, and what is in it says
   nothing about what is missing. REAPER's finished renders hold the real length.
 - With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven. A configuration
-  cannot get there: it needs at least one plugin (the schema refuses an empty `plugins`), so every run has a binary to
-  prove, and a test that only needs JSFX still names one.
+  needs at least one plugin (the schema refuses an empty `plugins`), but every one of them can be a JSFX shipped with
+  the tool, and then there is no binary to prove: learning does not ask the module list at all, its facts say
+  `modules: NoBinary`, and each JSFX is proven by its path in the private configuration directory (`fx_ident` and
+  the saved block) instead.
 
 ## Scripts
 

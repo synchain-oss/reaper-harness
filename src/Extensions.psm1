@@ -25,20 +25,21 @@ $script:NamePattern = '^[a-z][a-z0-9-]{0,39}$'
 $script:TakenKinds = 'render', 'device', 'savereopen', 'instances', 'hang', 'guard'
 $script:TakenSteps = 'learn', 'device', 'savereopen', 'instances', 'hang'
 $script:Loaded = @{}
-$script:OwnModules ='Config', 'Extensions', 'Guard', 'Host', 'Json', 'Learn', 'Locks', 'Plugins', 'Rpp', 'Scenarios', 'Suite', 'Wav', 'SelfTest', 'TempDir'
+$script:OwnModules ='Config', 'Extensions', 'Guard', 'Host', 'Json', 'Learn', 'Locks', 'Plugins', 'Rpp', 'Scenarios', 'States', 'Suite', 'Wav', 'SelfTest', 'TempDir'
 
 # Relative is a path from the configuration file; the result is the real full path of an existing file inside
-# ConfigDir. Absolute paths, drive-relative paths and anything that resolves outside are refused.
+# ConfigDir. Absolute paths, drive-relative paths and anything that resolves outside are refused. What names the
+# kind of file in the messages (state files and templates use the same rules).
 function Resolve-HarnessExtensionPath {
-    param([Parameter(Mandatory)][string]$ConfigDir, [Parameter(Mandatory)][string]$Relative)
-    if ([IO.Path]::IsPathRooted($Relative) -or $Relative -match '^[A-Za-z]:') { Stop-Usage "extension path '$Relative' must be relative to the configuration file" }
+    param([Parameter(Mandatory)][string]$ConfigDir, [Parameter(Mandatory)][string]$Relative, [string]$What = 'extension')
+    if ([IO.Path]::IsPathRooted($Relative) -or $Relative -match '^[A-Za-z]:') { Stop-Usage "$What path '$Relative' must be relative to the configuration file" }
     $full = [IO.Path]::GetFullPath((Join-Path $ConfigDir $Relative))
     $realDir = Resolve-HarnessRealPath $ConfigDir
     $real = Resolve-HarnessRealPath $full
     if (-not (Test-HarnessUnder $full $ConfigDir) -or -not (Test-HarnessUnder $real $realDir)) {
-        Stop-Usage "extension path '$Relative' leaves the directory of the configuration file"
+        Stop-Usage "$What path '$Relative' leaves the directory of the configuration file"
     }
-    if (-not (Test-Path -LiteralPath $real -PathType Leaf)) { Stop-Usage "extension file not found: $Relative" }
+    if (-not (Test-Path -LiteralPath $real -PathType Leaf)) { Stop-Usage "$What file not found: $Relative" }
     $real
 }
 

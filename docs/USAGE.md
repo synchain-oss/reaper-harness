@@ -10,10 +10,11 @@ scheduled task, and not on hosted CI runners. The self-test (`-SelfTest`) needs 
 pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Init
 ```
 
-This creates the directory with a minimal `reaper.ini` (dummy audio device), an empty `plugins` directory and the
-sentinel file. It only takes over a directory that does not exist, an empty one or one it initialised before; it
-never accepts anything under `%APPDATA%` (see [SAFETY.md](SAFETY.md)). Use one directory per machine and keep it
-for later runs: the scan cache in it makes later starts fast.
+This creates the directory with a minimal `reaper.ini` (dummy audio device, version check off), an empty `plugins`
+directory and the sentinel file. It only takes over a directory that does not exist, an empty one or one it
+initialised before (whose `reaper.ini` it leaves alone; the run itself writes the keys it needs into it). It never
+accepts anything under `%APPDATA%` (see [SAFETY.md](SAFETY.md)). Use one directory per machine and keep it for later
+runs: the scan cache in it makes later starts fast.
 
 The first launch in a new directory makes REAPER scan the plugin path. With the scan shield (see SAFETY.md) it does
 not load third-party plugins, but it still lists them, which can take a minute on a machine with many plugins.

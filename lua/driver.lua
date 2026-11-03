@@ -4,10 +4,12 @@
 -- environment variable REAPER_HARNESS_JOB. The driver runs one step, writes "key=value" lines to job.result (last
 -- line done=1) and quits REAPER. Errors are written as error=... before quitting; only the hang step never quits
 -- (for the watchdog negative cases). Every wait yields to REAPER's message loop through a coroutine.
---   learn       add each plugin by name on its own track, set parameters by name and read them back, save the project
---               (the runner takes the plugin blocks from that file)
---   device      open a project, read back the audio device block size and sample rate and every FX's reported latency
---   savereopen  open a project, read its FX, save it as a new file, open that and read the FX again
+--   learn       open the learn project; add each plugin by name on its own track (or take the one a state block
+--               already put there), set parameters by name and read them back, save the project (the runner takes
+--               the plugin blocks from that file)
+--   device      open a project, read back the audio device block size and sample rate, the workrender setting and
+--               every FX's reported latency; save a copy when asked (it shows the state each plugin holds)
+--   savereopen  open a project, read its FX, then cycles times: save it as a new file, open that and read the FX again
 --   instances   add and remove plugin instances many times; touch a mark file after the warm-up and at the end so
 --               the runner can sample handle and memory counts there
 --   hang        never finishes (watchdog negative cases)
@@ -112,18 +114,31 @@ end
 
 local steps = {}
 
--- job.fx: list of { name = "VST3: Name (Vendor)", params = { { name, value, display? } ... } }; job.saveAs.
--- Reported per entry n (1-based): fx<n>_idx (-1 = REAPER could not add it), fx<n>_name, fx<n>_ident, fx<n>_pdc,
--- fx<n>_offline, fx<n>_nparams, and per parameter k: fx<n>_p<k>=<normalized read back> or missing,
--- fx<n>_p<k>_display=<text read back>.
+-- job.project: tracks learn-1 ... learn-<n>, empty or holding a state block; job.fx: list of { name = the name to add
+-- it by, preloaded = true when the track already holds it, params = { { name, value, display? } ... } }; job.saveAs.
+-- Reported per entry n (1-based): fx<n>_idx (-1 = REAPER could not add it, or the state block did not load),
+-- fx<n>_name, fx<n>_ident, fx<n>_pdc, fx<n>_offline, fx<n>_nparams, and per parameter k:
+-- fx<n>_p<k>=<normalized read back> or missing, fx<n>_p<k>_display=<text read back>.
 function steps.learn()
-    reaper.Main_OnCommand(40023, 0) -- File: New project
-    wait(0.5)
+    if job.project then
+        openAndWait(job.project)
+    else
+        reaper.Main_OnCommand(40023, 0) -- File: New project
+        wait(0.5)
+    end
     for n, e in ipairs(job.fx) do
-        reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
-        local track = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
-        reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "learn-" .. n, true)
-        local idx = reaper.TrackFX_AddByName(track, e.name, false, -1)
+        local track = reaper.GetTrack(0, n - 1)
+        if not track then
+            reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
+            track = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
+            reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "learn-" .. n, true)
+        end
+        local idx
+        if e.preloaded then
+            idx = (reaper.TrackFX_GetCount(track) == 1) and 0 or -1
+        else
+            idx = reaper.TrackFX_AddByName(track, e.name, false, -1)
+        end
         local key = "fx" .. n .. "_"
         put(key .. "idx", idx)
         if idx >= 0 then
@@ -157,16 +172,26 @@ function steps.device()
     put("dev_srate", device("SRATE"))
     put("dev_mode", device("MODE"))
     put("project_srate", reaper.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false))
+    local ok, wr = reaper.get_config_var_string("workrender")
+    put("cfg_workrender", ok and wr or "unavailable")
     putTracks("", job.reads)
+    if job.saveAs then
+        reaper.Main_SaveProjectEx(0, job.saveAs, 0)
+        wait(0.5)
+        put("saved", reaper.file_exists(job.saveAs))
+    end
 end
 
+-- job.cycles (default 1): reports before_... once, then after<i>_... for each save and reopen.
 function steps.savereopen()
     openAndWait(job.project)
     putTracks("before_", job.reads)
-    reaper.Main_SaveProjectEx(0, job.saveAs, 0)
-    wait(0.5)
-    openAndWait(job.saveAs)
-    putTracks("after_", job.reads)
+    for i = 1, (job.cycles or 1) do
+        reaper.Main_SaveProjectEx(0, job.saveAs, 0)
+        wait(0.5)
+        openAndWait(job.saveAs)
+        putTracks("after" .. i .. "_", job.reads)
+    end
     put("saved", reaper.file_exists(job.saveAs))
 end
 

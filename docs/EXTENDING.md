@@ -62,7 +62,9 @@ Called with the round context and the scenario. The scenario has `id`, `kind`, `
 configuration, all fields), `layout` when it has one, and `negative`, `expect`, `expectDetail` for negative cases.
 Return an outcome made with `& $Ctx.Api.Outcome <PASS|FAIL|INCOMPLETE> '<one line>' [<facts>]`. Anything else, or
 an exception, is recorded as INCOMPLETE. The detail and every string in the facts go into the result file with local
-paths masked.
+paths masked. Numbers, booleans, characters, dates and enums in the facts stay what they are; any other value type is
+written as its text, masked the same way. JSON has no NaN or infinity, so those are written as the strings `"NaN"`,
+`"Infinity"` and `"-Infinity"`, and dates as ISO 8601 strings.
 
 Scenarios of extension kinds always get the learned plugin blocks: by the time `Run` is called, `$Ctx.Blocks` and
 `$Ctx.Names` (plugin id → the name REAPER shows) are filled, and the private copies are proven.
@@ -73,11 +75,13 @@ Scenarios of extension kinds always get the learned plugin blocks: by the time `
 |---|---|
 | `Outcome` | `& $Ctx.Api.Outcome PASS 'detail' $facts` |
 | `Layout` | `& $Ctx.Api.Layout $Ctx '<layout id>'`: the normalised layout |
-| `NewRun` | `& $Ctx.Api.NewRun -Ctx $Ctx -Name <file name> -Layout <layout> [-Sr] [-Block] [-Mode] [-Channels] [-Bypass] [-NoFx]`: writes the project (from the learned blocks) and sets the audio device; returns `Project` and `Wav` |
-| `Render` | `& $Ctx.Api.Render $Ctx <project> <wav>`: one render launch; returns `Run` and `Why` (empty when it worked) |
+| `NewRun` | `& $Ctx.Api.NewRun -Ctx $Ctx -Name <file name> -Layout <layout> [-Sr] [-Block] [-Mode] [-Channels] [-Bypass] [-NoFx] [-Stems <track names>] [-AnticipativeFx <bool>]`: writes the project (from the learned blocks) and sets the audio device (anticipative FX on unless `-AnticipativeFx $false`); returns `Project`, `Wav` (the master) and `Stems` (track name → file). The master is `<Name>.wav`; with stems REAPER writes `<Name>-stem-<track>.wav` per stem and the master as `<Name>-stem-Master.wav`. Start your names with the scenario id: names starting with `_` are the harness's own |
+| `Render` | `& $Ctx.Api.Render $Ctx <project> <wav> [-Also <files>]`: one render launch; returns `Run` and `Why` (empty when it worked; a file of `-Also`, such as the stems of `NewRun`, that the render did not produce is a reason too) |
 | `LuaStep` | `& $Ctx.Api.LuaStep -Ctx $Ctx -Name <file name> -Step <step> [-Job @{...}] [-Watch @{ label = <mark file> }] [-TimeoutSec]`: one driver launch; returns `Run`, `Result` (the key=value lines as a hashtable) and `Why` |
 | `Compare` | `& $Ctx.Api.Compare -A <wav> -B <wav> [-MaxDiffDb] [-Lag] [-PeakMaxDb] [-NotSilent]`: the comparer; returns an outcome |
-| `Reference` | `& $Ctx.Api.Reference $Ctx <layout id> <sr> <block> <mode> <channels>`: the dry reference render, cached per round |
+| `Reference` | `& $Ctx.Api.Reference $Ctx <layout id> <sr> <block> <mode> <channels> [-Stems <track names>] [-AnticipativeFx <bool>]`: the dry reference render, cached per round; returns `Wav`, `Stems` and `Why` (empty when it worked) |
+| `Judge` | `& $Ctx.Api.Judge $Ctx <criteria> <reference wav, or '' for none> <test wav>`: one file against criteria as `render` judges it (an object with all of `maxDiffDb`, `lag`, `peakMaxDb`, `notSilent`, `rmsDb`, `energyRatioDb`, `rmsChangeDb`, `$null` for those not used; without a reference the file is judged on its own); returns an outcome |
+| `StateProof`, `FxBlocks` | `& $Ctx.Api.StateProof -Layout <layout> -Blocks $Ctx.Blocks -States $Ctx.States -Saved (& $Ctx.Api.FxBlocks <text of a project REAPER saved>)`: whether every FX with a named state holds it, as `device` and `savereopen` check; returns `Problems` and `Proven` |
 | `FxReport`, `ParamReads` | check a driver report of tracks and FX against a layout, as `device` does |
 | `HostFailure` | the one-line reason for a launch that did not end normally |
 | `HidePaths` | masks local paths in a text |
@@ -91,6 +95,27 @@ built-in kinds. Do not start REAPER any other way.
 Called once before anything is installed or started, with the normalised configuration. Return strings: each one
 is a reason, and any reason makes the whole suite SKIPPED (exit code 3) with zero launches. A preflight that
 throws is a reason too. Use it for things your kinds need that may be missing on a machine.
+
+Two checks that belong in a preflight of your own, not in the harness, because only your project knows what to
+look for:
+
+- **Another host with your plugin open.** Plugins that talk to each other through shared memory or a named pipe
+  can see instances in a DAW the user has open. Probe for the names your plugin creates, read-only, and close
+  them again at once; return a reason when one exists, so the suite is SKIPPED instead of mixing with a live
+  session.
+- **Your plugin's own diagnostic logs.** Note the size of each log file in the preflight and read what was added
+  in a scenario of a kind of your own, listed after the others (there is no hook after the run). Only read the
+  user's data directories, never write to them.
+
+```powershell
+Preflight = {
+    param($Config)
+    foreach ($name in 'Local\MyPlugin-group-1', 'Local\MyPlugin-group-2') {
+        try { $m = [IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting($name, [IO.MemoryMappedFiles.MemoryMappedFileRights]::Read); $m.Dispose(); "another host has $name open" }
+        catch [IO.FileNotFoundException] { }
+    }
+}
+```
 
 ## Lua files
 

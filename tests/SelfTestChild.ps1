@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) # the parent decodes UTF-8
 
 $src = Join-Path $RepoRoot 'src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Scenarios', 'Learn', 'Extensions', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $RepoRoot 'tests/FakeReaper.psm1') -ErrorAction Stop
 
 function Write-Case([string]$Label, [bool]$Bad, [bool]$Passed) { Write-Output ("RESULT`t{0}`t{1}`t{2}" -f [int]$Bad, [int]$Passed, $Label) }
@@ -493,12 +493,15 @@ Write-Case 'entry: -Only picking nothing is a usage error' $true (Test-Throws { 
 Write-Case 'entry: -Repeat 0 is a usage error' $true (Test-Throws { $null = Invoke-HarnessSuite @suite -Repeat 0 } 'USAGE:*-Repeat*')
 Write-Case 'entry: a -BuildLabel outside [0-9A-Za-z._-]{1,40} is a usage error' $true ((Test-Throws { $null = Invoke-HarnessSuite @suite -BuildLabel 'a/b' } 'USAGE:*-BuildLabel*') -and (Test-Throws { $null = Invoke-HarnessSuite @suite -BuildLabel ('x' * 41) } 'USAGE:*-BuildLabel*'))
 Write-Case 'entry: an -ExtraGuiLock that is not a full Local\ name is a usage error' $true (Test-Throws { $null = Invoke-HarnessSuite @suite -ExtraGuiLock 'Other-gui' } 'USAGE:*-ExtraGuiLock*')
-# Variants of the fixture configuration, written next to the scratch files (so its extension paths do not resolve)
+# Variants of the fixture configuration, written next to the scratch files (so its extension paths do not resolve; its
+# state files are copied there, so a variant that gets as far as reading them finds them)
 $writeVariant = {
     param([scriptblock]$Change)
     $raw = [IO.File]::ReadAllText($configFile) | ConvertFrom-Json -AsHashtable
     $raw.Remove('$schema')
     & $Change $raw
+    $statesCopy = Join-Path $Work 'states'
+    if (-not (Test-Path -LiteralPath $statesCopy)) { Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $configFile) 'states') -Destination $statesCopy -Recurse }
     $file = Join-Path $Work 'variant-config.json'
     [IO.File]::WriteAllText($file, ($raw | ConvertTo-Json -Depth 20))
     $v = $suite.Clone(); $v.Config = $file; $v
@@ -616,16 +619,39 @@ $e2e = $suite.Clone(); $e2e.ReaperExe = $pwshExe; $e2e.ResultDir = Join-Path $Wo
 $r = Invoke-WithSuiteCommand 'Get-HarnessReaperProcessIds' { 4242 } { Invoke-HarnessSuite @e2e -SelfTestHooks $hooks }
 Write-Case 'entry: a reaper.exe already running makes the whole suite SKIPPED with that reason, REAPER never started' $true ($r.verdict -ceq 'SKIPPED' -and $r.launches -eq 0 -and $seenArgs.Count -eq 0 -and @($r.skipReasons -match '^a reaper\.exe not started by this tool').Count -eq 1)
 
+# A directory initialised before the version check was turned off has no verchk key: the launches write it
+[IO.File]::WriteAllText($pinned.Ini, ([IO.File]::ReadAllText($pinned.Ini) -replace '(?m)^verchk=.*\r?\n', ''))
+$verchkBefore = Get-HarnessIniValue -Section REAPER -Key verchk
 $r = Invoke-HarnessSuite @e2e -SelfTestHooks $hooks
 $rowsOut = @($r.runs[0].scenarios)
 $notPass = @($rowsOut | Where-Object { $_.status -ne 'PASS' } | ForEach-Object { "$($_.id)=$($_.status): $($_.detail)" })
-Write-Case "end to end: every row of the fixture configuration passes against the stand-in ($($notPass -join ' | '))" $false ($r.verdict -eq 'PASS' -and $notPass.Count -eq 0 -and $rowsOut.Count -eq 22)
+Write-Case "end to end: every row of the fixture configuration passes against the stand-in ($($notPass -join ' | '))" $false ($r.verdict -eq 'PASS' -and $notPass.Count -eq 0 -and $rowsOut.Count -eq 32)
 Write-Case 'end to end: learn ran once, first, and proved the private copy; the module check over all launches passed' $false (
     $rowsOut[0].id -eq 'learn' -and $rowsOut[0].status -eq 'PASS' -and $rowsOut[0].facts.modules -eq 'Proven' -and $r.runs[0].moduleCheck.status -eq 'PASS' -and @($seenArgs | Where-Object { $_ -notmatch 'renderproject' }).Count -ge 5)
 Write-Case 'end to end: every launch is counted and the default resource directory is unchanged' $false ($r.launches -eq $seenArgs.Count -and $r.runs[0].launches -eq $seenArgs.Count -and $r.runs[0].defaultCfgDir.unchanged -and $r.runs[0].reaperProcessesLeft -eq 0 -and $r.runs[0].stillRunning -eq $false)
 # Every path went through the host as one argument, in a work directory with a space and an apostrophe in its name
 $rendered = @($seenArgs | Where-Object { $_ -match '-renderproject' }).Count
 Write-Case 'end to end: projects and the Lua driver reached the stand-in without quotes of their own' $false ($rendered -gt 0 -and @($seenArgs | Where-Object { $_.Contains('"') }).Count -eq 0)
+$byId = @{}
+foreach ($row in $rowsOut) { $byId[$row.id] = $row }
+Write-Case 'end to end: both named states are learned from their blocks and listed with their hashes (result and learn row)' $false (
+    @($r.states).Count -eq 2 -and (@($r.states | ForEach-Object { "$($_.plugin)@$($_.state)" }) -join ',') -ceq 'gain@quiet,gain@loud' -and @($r.states | Where-Object { $_.sha256 -cnotmatch '^[0-9a-f]{12}$' }).Count -eq 0 -and
+    @($rowsOut[0].facts.states).Count -eq 2)
+Write-Case 'end to end: device and savereopen (3 cycles) prove what each instance holds: the blocks saved back are the states it was given' $false (
+    $byId['states-device'].detail -cmatch 'states saved back unchanged: gain quiet [0-9a-f]{12}, gain loud [0-9a-f]{12}$' -and
+    $byId['states-reopen'].detail -cmatch '^FX state unchanged after 3 save and reopen cycles \(0 parameters\); states saved back unchanged: gain quiet [0-9a-f]{12}, gain loud [0-9a-f]{12};')
+Write-Case 'end to end: two instances of one plugin with different states render differently (stems -6 and +6 dB against the dry tracks)' $false (
+    $byId['states'].detail -cmatch '\| stem Quiet: identical=no lag=0 [^|]* rms=\S+/\S+ \| stem Loud: ' -and $byId['states'].detail -cmatch '\| stem Loud: identical=no lag=0 ')
+Write-Case 'end to end: the routing render judges the master and each stem; the muted track is silent, the cue track off the master still has its stem' $false (
+    $byId['routing'].detail -cmatch '^identical=no lag=0 ' -and $byId['routing'].detail -cmatch '\| stem Drums: identical=yes lag=0 ' -and $byId['routing'].detail -cmatch '\| stem Keys: frames=\d+ channels=2 .* rms=-inf,-inf( |$)' -and
+    $byId['routing'].detail -cmatch '\| stem Cue: identical=yes ' -and $byId['routing-alone'].detail -cmatch '^frames=\d+ channels=2 rate=48000 format=float32 nonfinite=0 peak=\S+ rms=\S+ \| stem Cue: frames=')
+Write-Case 'end to end: the JSFX is installed in the private Effects directory, listed with the plugins, and its delay is reported as PDC at block 2048 with anticipative FX off' $false (
+    (Test-Path -LiteralPath (Join-Path $pinned.Dir 'Effects\reaper-harness\harness-pdc-delay.jsfx')) -and @($r.plugins | Where-Object { $_['name'] -ceq 'JS: reaper-harness PDC delay' -and $_['jsfx'] -ceq 'harness-pdc-delay' }).Count -eq 1 -and
+    $byId['pdc-device'].detail -like 'block 2048 and rate 48000 read back, anticipative FX off; 2 FX report the configured latency*' -and $byId['pdc-unreported'].detail -cmatch '^identical=no lag=16 ')
+Write-Case 'end to end: anticipative FX is written as bit 0 of workrender in the private ini and read back by the device step' $false (
+    (Get-HarnessIniValue -Section REAPER -Key workrender) -in '16', '17' -and $byId['bus-device'].detail -like '*anticipative FX on;*')
+Write-Case "end to end: the launches turn REAPER's version check off in the private ini, also in a directory initialised without it" $false (
+    $null -eq $verchkBefore -and (Get-HarnessIniValue -Section REAPER -Key verchk) -ceq '0')
 $path = Write-HarnessResult -Data $r -ResultDir $e2e.ResultDir
 $json = [IO.File]::ReadAllText($path)
 $back = ConvertFrom-HarnessJson $json
@@ -635,6 +661,14 @@ Write-Case 'end to end: the work files of an all-green round are removed' $false
 $extRow = @($rowsOut | Where-Object { $_.id -ceq 'ext-count' })[0]
 Write-Case 'end to end: a local path in the facts of an extension is masked in the row and in the result file' $true ($extRow.facts.count -eq 3 -and $extRow.facts.workDir -ceq '<path>' -and $json -cnotlike '*brien*')
 Write-Case 'result file: a run with nothing wrong has no error' $false ($back.Contains('error') -and $null -eq $back['error'] -and $null -eq $r.error)
+# Only a JSFX, no plugin binary: learning does not ask the module list, which would have nothing to prove, and says so
+$jsOnly = & $writeVariant { param($c) & $noExt $c; $c.plugins = @{ delay = $c.plugins['delay'] }; $c.layouts = @{ js = @{ tracks = @(@{ name = 'Voice'; source = $true; fx = @(@{ plugin = 'delay' }) }) } }; $c.scenarios = @(@{ id = 'js-only'; kind = 'render'; layout = 'js' }); $c.negative = @() }
+$jsOnly.ReaperExe = $pwshExe; $jsOnly.ResultDir = $e2e.ResultDir
+$r = Invoke-HarnessSuite @jsOnly -NoNegative -SelfTestHooks $hooks
+$jsLearn = @($r.runs[0].scenarios)[0]
+Write-Case 'end to end: a configuration of only a JSFX learns without a module proof: learn PASS, its facts say there was no plugin binary, the round PASS' $false (
+    $r.verdict -ceq 'PASS' -and $jsLearn.id -ceq 'learn' -and $jsLearn.status -ceq 'PASS' -and $jsLearn.facts.modules -ceq 'NoBinary' -and $jsLearn.facts.binaries.get_Count() -eq 0 -and
+    $jsLearn.detail -clike '*no plugin binary to check (only JSFX)*' -and $r.runs[0].moduleCheck.status -ceq 'PASS' -and $r.runs[0].moduleCheck.detail -clike 'no plugin binary to check*' -and @($r.plugins).Count -eq 1)
 
 # ---- what a round counts as left behind ----
 $oneScenario = @{ Only = '^chain-offline-48000$'; NoNegative = $true }
@@ -664,6 +698,11 @@ $r = Invoke-HarnessSuite @e2e @oneScenario -Repeat 2 -SelfTestHooks $faultHooks
 $lastRow = @($r.runs[0].scenarios)[-1]
 Write-Case 'round breaks: the round and the run are INCOMPLETE, a row says why without a path' $true ($r.verdict -ceq 'INCOMPLETE' -and $r.runs[0].verdict -ceq 'INCOMPLETE' -and $lastRow.id -ceq 'round-error' -and $lastRow.status -ceq 'INCOMPLETE' -and $lastRow.detail -ceq 'the round stopped on an unexpected error: boom at <path>')
 Write-Case 'round breaks: no further round runs, and the module check says it did not run' $true (@($r.runs).Count -eq 1 -and $r.runs[0].stoppedBecause -clike '*unexpected error*' -and $r.runs[0].moduleCheck.status -ceq 'INCOMPLETE')
+# The facts of the learn row are masked like those of every other row, keys too
+$learnFacts = [ordered]@{ variants = 1; modules = 'Proven'; place = "at $faultPath"; $faultPath = 1 }
+$r = Invoke-WithSuiteCommand 'Invoke-HarnessLearn' { [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = 'stub learn'; Facts = $learnFacts } }.GetNewClosure() { Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $hooks }
+$learnRow = @($r.runs[0].scenarios)[0]
+Write-Case 'learn row: a path in its facts is masked, in a value and in a key' $true ($learnRow.id -ceq 'learn' -and $learnRow.facts.place -ceq 'at <path>' -and $learnRow.facts.Contains('<path>') -and -not $learnRow.facts.Contains($faultPath))
 $refusedHooks = $hooks.Clone()
 $refusedHooks.RoundFault = { throw 'REFUSED: stub' }
 $r = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $refusedHooks
@@ -733,6 +772,15 @@ Write-Case 'end to end: a same-name binary from outside the private directory ma
     $r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].status -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like 'not the private copy*' -and $r.runs[0].scenarios[1].detail -like 'not run: learning*' -and $r.runs[0].moduleCheck.status -eq 'INCOMPLETE')
 $r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks @{ Launcher = $hooks.Launcher; ModuleSampler = { param($proc) @() } }
 Write-Case 'end to end: a tested binary never seen loaded makes learn INCOMPLETE (the private copy is not proven)' $true ($r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like '*not proven*')
+# A state block of another plugin: a usage error before REAPER is ever started
+$badCfg = Join-Path $Work 'cfg-state'
+Copy-Item -LiteralPath (Join-Path $RepoRoot 'tests/fixtures') -Destination $badCfg -Recurse
+$loud = Join-Path $badCfg 'states\loud.RfxChain'
+[IO.File]::WriteAllText($loud, [IO.File]::ReadAllText($loud).Replace('"VST3: Fixture Gain (Fixture Audio)"', '"VST3: Fixture Bus (Fixture Audio)"'))
+$badRun = $e2e.Clone(); $badRun.Config = Join-Path $badCfg 'config.json'
+$launchesBefore = $seenArgs.Count
+Write-Case 'end to end: a state block of another plugin is a usage error naming the state; REAPER is never started' $true (
+    (Test-Throws { $null = Invoke-HarnessSuite @badRun -SelfTestHooks $hooks } "USAGE: states: *plugins.gain.states.loud: the block is of 'VST3: Fixture Bus (Fixture Audio)'*") -and $seenArgs.Count -eq $launchesBefore)
 Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = @{ ($plugins.get_Keys() | Where-Object { $_ -like '*Gain*' }) = $plugins[($plugins.get_Keys() | Where-Object { $_ -like '*Gain*' })] }; Seen = $seenArgs }
 $r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks $hooks
 Write-Case 'end to end: a plugin REAPER cannot add makes learn FAIL with the plugin named, and the round FAIL' $true ($r.verdict -eq 'FAIL' -and $r.runs[0].scenarios[0].status -eq 'FAIL' -and $r.runs[0].scenarios[0].detail -like 'bus could not be added*')

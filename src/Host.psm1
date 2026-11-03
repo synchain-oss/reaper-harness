@@ -84,13 +84,18 @@ $script:KnownModals = [ordered]@{
 }
 
 # How to treat a window: Ignore (not a dialog / not visible), PressNo (save prompt), Benign (render, plugin scan and
-# peak building progress windows, which go away on their own), Fatal (stuck; Name says which). A title that starts like
-# a progress window but reports trouble ("Render failed") does not go away on its own: left alone it would only end at
-# the timeout, and the outcome would not name it.
+# peak building progress windows, which go away on their own, and the floating window of a plugin or of an FX chain,
+# which is no dialog at all), Fatal (stuck; Name says which). A title that starts like a progress window but reports
+# trouble ("Render failed") does not go away on its own: left alone it would only end at the timeout, and the outcome
+# would not name it. A floating FX window has the dialog class too; REAPER titles it with the plugin type and its name
+# ("VST3: Name (Vendor) - Track 1 [1/2]"), or "FX: " for a chain, anchored at the start and in that case. A dialog a plugin
+# opens itself has a title of its own, so it is still unknown, and stuck.
+$script:PluginWindow = '^(?:VST3i?|VSTi?|CLAPi?|JS|FX): '
 function Get-HarnessModalVerdict {
     param([string]$Class, [bool]$Visible, [string]$Title)
     if (-not $Visible -or $Class -cne '#32770') { return [pscustomobject]@{ Action = 'Ignore'; Name = '' } }
     if ($Title -ceq 'REAPER Query') { return [pscustomobject]@{ Action = 'PressNo'; Name = 'save-prompt' } }
+    if ($Title -cmatch $script:PluginWindow) { return [pscustomobject]@{ Action = 'Benign'; Name = 'plugin-window' } }
     if ($Title -inotmatch 'fail|error') {
         if ($Title -imatch '^Render') { return [pscustomobject]@{ Action = 'Benign'; Name = 'render-progress' } }
         if ($Title -imatch '^Scanning') { return [pscustomobject]@{ Action = 'Benign'; Name = 'plugin-scan-progress' } }

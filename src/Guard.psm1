@@ -166,17 +166,22 @@ function Assert-HarnessOutsideDefaultDir([string]$CfgDir) {
 
 # -ResultDir and the work files below it are written during a run, so it must not be the default resource directory or
 # below it: after expanding links, and by file identity for any other spelling (a subst drive). A part that does not
-# exist yet has no identity, and without a default resource directory the path is all there is. Nothing else is asked of
-# it: unlike -CfgDir it may be elsewhere under AppData or on a network drive, because REAPER never runs from it.
+# exist yet has no identity, and without a default resource directory the path is all there is. An identity that cannot
+# be read proves nothing and is refused, as for -CfgDir: that of the default resource directory (it exists, so the
+# comparison has to be made), and that of the directory or of any parent on the way to the drive root. Nothing else is
+# asked of it: unlike -CfgDir it may be elsewhere under AppData or on a network drive, because REAPER never runs from it.
 function Assert-HarnessResultDir([string]$ResultDir) {
     $default = Get-HarnessDefaultCfgDir
     $real = Resolve-HarnessRealPath $ResultDir
     $said = '-ResultDir is the default REAPER resource directory, or below it, or points there: that directory is never touched'
     if (Test-HarnessUnder $real (Resolve-HarnessRealPath $default)) { Stop-Refuse $said }
     $baseId = Get-HarnessFileIdentity $default
-    if (-not $baseId -or $baseId.StartsWith('ERROR:')) { return }
+    if (-not $baseId) { return }
+    if ($baseId.StartsWith('ERROR:')) { Stop-Refuse "the default REAPER resource directory exists but its file identity cannot be read ($baseId), so -ResultDir cannot be proven not to be it" }
     for ($p = $real; $p; $p = [IO.Path]::GetDirectoryName($p)) {
-        if ((Get-HarnessFileIdentity $p) -ceq $baseId) { Stop-Refuse "$said (detected by file identity)" }
+        $id = Get-HarnessFileIdentity $p
+        if ($id -and $id.StartsWith('ERROR:')) { Stop-Refuse "the file identity of -ResultDir or one of its parents cannot be read ($id), so it cannot be proven not to be the default REAPER resource directory" }
+        if ($id -ceq $baseId) { Stop-Refuse "$said (detected by file identity)" }
     }
 }
 
@@ -229,8 +234,9 @@ function Test-HarnessSentinel([string]$Folder) {
 }
 
 # For doctor.ps1 -Init: after the path checks, creates the directory, the private plugin directory, a minimal
-# reaper.ini (dummy audio device) and the sentinel. Only three kinds of directory are taken over: one that does not
-# exist yet, an empty one, and one that already has the sentinel (initialised before; an existing ini is left alone).
+# reaper.ini (dummy audio device, version check off) and the sentinel. Only three kinds of directory are taken over:
+# one that does not exist yet, an empty one, and one that already has the sentinel (initialised before; an existing ini
+# is left alone).
 # A directory with content but no sentinel is always refused and nothing is written, and there is no switch to
 # override that: it is most likely a real REAPER configuration (for example a portable install), and the tests would
 # rewrite its reaper.ini and copy plugins into its plugin directory.
@@ -247,7 +253,7 @@ function New-HarnessCfgDir {
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $real 'plugins')
     $ini = Join-Path $real 'reaper.ini'
     if (-not (Test-Path -LiteralPath $ini)) {
-        [IO.File]::WriteAllText($ini, "[REAPER]`npromptendrec=0`n[audioconfig]`nmode=4`ndummy_srate=48000`ndummy_blocksize=512`n", [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($ini, "[REAPER]`npromptendrec=0`nverchk=0`n[audioconfig]`nmode=4`ndummy_srate=48000`ndummy_blocksize=512`n", [Text.UTF8Encoding]::new($false))
     }
     [IO.File]::WriteAllText((Join-Path $real $script:SentinelName), "$($script:SentinelMagic)`n", [Text.UTF8Encoding]::new($false))
     Assert-HarnessCfgDir $real
@@ -310,6 +316,25 @@ function Set-HarnessIniText {
         }
     }
     ($lines -join $eol) + $eol
+}
+
+# The value of one key in ini text (pure function), or $null when the section or the key is not there.
+function Get-HarnessIniTextValue {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Section, [Parameter(Mandatory)][string]$Key)
+    $in = $false
+    foreach ($line in ($Text -split '\r?\n')) {
+        $s = $line.Trim()
+        if ($s.StartsWith('[')) { $in = $s -ieq "[$Section]"; continue }
+        if ($in -and $line -imatch ('^' + [regex]::Escape($Key) + '=(.*)$')) { return $Matches[1] }
+    }
+    $null
+}
+
+# One key of the private ini, or $null.
+function Get-HarnessIniValue {
+    param([Parameter(Mandatory)][string]$Section, [Parameter(Mandatory)][string]$Key)
+    $null = Get-HarnessCfgArgument
+    Get-HarnessIniTextValue -Text ([Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($script:HarnessPinnedCfgIni))) -Section $Section -Key $Key
 }
 
 # Changes one key of the private ini. Read and written as Latin-1 so bytes round-trip; only written when the text
@@ -466,5 +491,5 @@ function Test-HarnessScriptLint {
 }
 
 Export-ModuleMember -Function Get-HarnessSentinel, Get-HarnessFileIdentity, Resolve-HarnessRealPath, Test-HarnessUnder, Assert-HarnessCfgDir, Assert-HarnessResultDir, New-HarnessCfgDir, Initialize-HarnessCfg,
-    Get-HarnessCfgArgument, Get-HarnessPinnedCfgDir, Set-HarnessIniText, Set-HarnessIniValue, Get-HarnessDefaultCfgDir, Get-HarnessDefaultCfgSnapshot, Compare-HarnessDefaultCfgSnapshot,
+    Get-HarnessCfgArgument, Get-HarnessPinnedCfgDir, Set-HarnessIniText, Set-HarnessIniValue, Get-HarnessIniTextValue, Get-HarnessIniValue, Get-HarnessDefaultCfgDir, Get-HarnessDefaultCfgSnapshot, Compare-HarnessDefaultCfgSnapshot,
     Find-HarnessVariableCaseCollisions, Find-HarnessControlChars, Test-HarnessScriptLint
