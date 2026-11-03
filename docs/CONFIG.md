@@ -248,7 +248,8 @@ Renders the layout and compares the render with a reference.
 
 The pass criteria are fields of the scenario itself, not a nested object: in negative cases `expect` names the
 expected outcome. Both renders must be readable, comparable (same rate and channel count) and free of NaN and Inf
-in every case. The verdict line always starts with the same facts, in this order:
+in every case. A render with no frames is INCOMPLETE before any of this, so a negative case expecting FAIL does not
+pass on one. The verdict line always starts with the same facts, in this order:
 `identical= lag= maxdiff= head= frames= channels= rate= format= nonfinite= peak=` (with `compare: "none"`:
 `frames= channels= rate= format= nonfinite= peak=`), followed by `rms=` per channel when a channel criterion is
 given (reference / test), `nan= inf=` when there are any, and `; failed: <reasons>` on a FAIL. Negative cases match
@@ -307,8 +308,8 @@ copy; the two renders must be bit-identical. Takes `mode`, `sr`, `block`, `host`
 ### instances
 
 Adds and removes instances of the listed plugins `cycles` times on an empty project (`play`: with the transport
-running), after `warmup` cycles. The process handle count and private memory are sampled after the warm-up and at
-the end; growth above `maxHandleGrowth` or `maxPrivateGrowthMB` is FAIL.
+running), after `warmup` cycles. The process handle count and private memory are sampled after the warm-up (with
+`warmup` 0, before the first cycle) and at the end; growth above `maxHandleGrowth` or `maxPrivateGrowthMB` is FAIL.
 
 | key | |
 |---|---|
@@ -323,7 +324,7 @@ A negative case is a scenario that must come out a certain way: the same fields 
 | key | |
 |---|---|
 | `expect` | `PASS`, `FAIL`, `SKIPPED`, `INCOMPLETE` or `REFUSED` |
-| `expectDetail` | a .NET regex, case sensitive, that the outcome detail must match |
+| `expectDetail` | a .NET regex, case sensitive, that the outcome detail must match; one that matches the empty text (`.*`, `^`) would accept any reason and is refused |
 
 A negative row is PASS only when both the outcome and the detail match. Outcomes alone can come about without the
 case having run (a lock that was busy, a render that never started); a matching outcome with another detail is

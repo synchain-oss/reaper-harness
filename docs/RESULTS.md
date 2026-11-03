@@ -2,10 +2,15 @@
 
 Every run that got past the guards writes one JSON file (UTF-8, no BOM):
 `<ResultDir>/<yyyyMMdd-HHmmss>-<config name>-<build label>.json`. A SKIPPED run writes one too, with the reasons.
-Runs refused by a guard or stopped by a usage error (exit 64) write nothing.
+Runs refused by a guard or stopped by a usage error (exit 64) write nothing. A run that stops on an unexpected error
+past the preflight writes its file, with `error` set and a verdict of at least INCOMPLETE; an error before that only
+reaches the console (exit 2). When the file itself cannot be written, the console says so and the verdict stands: a FAIL
+stays a FAIL (exit 1), anything else has no record and so no conclusion (exit 2).
 
-Local paths never appear in a result file: drive paths and UNC paths in any text are replaced by `<path>`. Plugin
-hashes are cut to their first 12 hex digits.
+Local paths never appear in a result file: drive paths and UNC paths in any text, the `facts` of a row included, are
+replaced by `<path>`. A path can hold spaces, apostrophes, semicolons and commas, so what ends it is a closing quote,
+a character no file name can have, or the end of the line; whatever follows an unquoted path on its line goes with it.
+Plugin hashes are cut to their first 12 hex digits.
 
 ## Top level
 
@@ -17,7 +22,7 @@ hashes are cut to their first 12 hex digits.
 | `buildLabel` | string | `-BuildLabel`, or derived from the plugin hashes: up to five plugins their hash prefixes joined by `-`, more plugins the first 12 hex digits of one hash over all of them |
 | `startedUtc` | string | ISO 8601 |
 | `reaper` | string | product version of `reaper.exe` (empty when not found) |
-| `verdict` | string | `PASS`, `FAIL`, `INCOMPLETE` or `SKIPPED`: the worst round verdict |
+| `verdict` | string | `PASS`, `FAIL`, `INCOMPLETE` or `SKIPPED`: the worst round verdict, at least `INCOMPLETE` when `error` is set |
 | `launches` | integer | REAPER starts over all rounds |
 | `skipReasons` | string[] | why the suite did not run (empty otherwise) |
 | `locks` | string[] | the GUI lock set, in the order taken |
@@ -27,6 +32,7 @@ hashes are cut to their first 12 hex digits.
 | `pluginPath` | string | how `vstpath64` was written |
 | `scanShield` | object | `directories`, `files` (scanned outside the private directory), `added`, `replaced`, `removed`, `unshielded` |
 | `runs` | object[] | one per round |
+| `error` | string or null | why the run stopped on an unexpected error (paths masked); null otherwise |
 
 ## A round (`runs[]`)
 
@@ -34,20 +40,21 @@ hashes are cut to their first 12 hex digits.
 |---|---|---|
 | `index` | integer | 1-based |
 | `seconds` | number | |
-| `verdict` | string | worst of the rows and the module check; FAIL when the default resource directory changed or a `reaper.exe` was left |
+| `verdict` | string | worst of the rows and the module check; FAIL when the default resource directory was seen to change or a process this round started was left that no launch reported; else INCOMPLETE when part of that directory could not be listed or a process could not be ended |
 | `launches` | integer | REAPER starts in this round |
 | `counts` | object | rows per outcome: `PASS`, `FAIL`, `INCOMPLETE`, `SKIPPED` |
-| `defaultCfgDir` | object | `unchanged` (bool), `entries` (listed before), `changed` (up to 8 entries, `added:` / `removed:` / `changed:` + relative path) |
-| `reaperProcessesLeft` | integer | `reaper.exe` processes after the round (must be 0) |
+| `defaultCfgDir` | object | `unchanged` (bool), `entries` (listed before), `changed` (up to 8 entries seen to change, `added:` / `removed:` / `changed:` + relative path), `unreadable` (up to 8 entries that could not be listed, `.` for the directory itself; `unchanged` is false when there are any) |
+| `reaperProcessesLeft` | integer | processes this round started that are still there after it, recognised by process ID and start time (must be 0); a `reaper.exe` of somebody else is not counted |
+| `stillRunning` | boolean | a process of this round could not be ended by the watchdog: its GUI locks stay held and nothing was started after it (must be false) |
 | `moduleCheck` | object | `status`, `detail`, `launches`, `foreign` (tested binaries seen from elsewhere, with the launch), `otherPlugins` (count of other `.vst3` / `.clap` modules seen) |
 | `scenarios` | object[] | the rows, in run order |
-| `stoppedBecause` | string | only when no further round ran |
+| `stoppedBecause` | string | only when no further round ran: the default resource directory changed, could not be listed in full, a process could not be ended, or the round stopped on an unexpected error |
 
 ## A row (`scenarios[]`)
 
 | field | type | |
 |---|---|---|
-| `id` | string | scenario id; `learn` for the learn launch (first, when any scenario needs it) |
+| `id` | string | scenario id; `learn` for the learn launch (first, when any scenario needs it); `round-error` (kind `internal`, last) when the round stopped on an unexpected error |
 | `kind` | string | |
 | `status` | string | `PASS`, `FAIL` or `INCOMPLETE` |
 | `seconds` | number | |
@@ -73,7 +80,7 @@ Negative rows also have `negative` (true), `builtin`, `expected` (the expected o
   "runs": [ {
     "index": 1, "seconds": 212.4, "verdict": "PASS", "launches": 31,
     "counts": { "PASS": 19, "FAIL": 0, "INCOMPLETE": 0, "SKIPPED": 0 },
-    "defaultCfgDir": { "unchanged": true, "entries": 118, "changed": [] }, "reaperProcessesLeft": 0,
+    "defaultCfgDir": { "unchanged": true, "entries": 118, "changed": [], "unreadable": [] }, "reaperProcessesLeft": 0, "stillRunning": false,
     "moduleCheck": { "status": "PASS", "detail": "no tested binary was loaded from anywhere but the private copy in 31 launches",
                      "launches": 31, "foreign": [], "otherPlugins": 0 },
     "scenarios": [

@@ -22,7 +22,8 @@ function Register-HarnessExtension {
                     param($Ctx, $Scenario)
                     $n = [int]$Scenario.raw['count']
                     if ($n -lt 1) { return & $Ctx.Api.Outcome FAIL "counted $n, expected at least 1" }
-                    & $Ctx.Api.Outcome PASS "counted $n"
+                    # The facts carry a local path on purpose: the suite masks whatever an extension puts there
+                    & $Ctx.Api.Outcome PASS "counted $n" ([ordered]@{ count = $n; workDir = $Ctx.Work })
                 }
             }
         }

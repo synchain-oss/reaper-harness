@@ -1,0 +1,28 @@
+{
+  "labels": [
+    { "name": "bug", "color": "d73a4a", "description": "缺陷 · Something isn't working" },
+    { "name": "enhancement", "color": "a2eeef", "description": "新功能或改进 · New feature or request" },
+    { "name": "documentation", "color": "0075ca", "description": "文档 · Improvements or additions to documentation" },
+    { "name": "question", "color": "d876e3", "description": "使用问题 · Further information is requested" },
+    { "name": "duplicate", "color": "cfd3d7", "description": "重复 · This issue or pull request already exists" },
+    { "name": "invalid", "color": "e4e669", "description": "无效 · This doesn't seem right" },
+    { "name": "wontfix", "color": "ffffff", "description": "不修 · This will not be worked on" },
+    { "name": "good first issue", "color": "7057ff", "description": "适合新贡献者 · Good for newcomers" },
+    { "name": "help wanted", "color": "008672", "description": "欢迎协助 · Extra attention is needed" },
+    { "name": "needs-triage", "color": "fbca04", "description": "待维护者分拣 · Awaiting maintainer triage" },
+    {
+      "name": "safety",
+      "color": "b60205",
+      "description": "触及安全不变量：默认资源目录、进程、结局、隐私 · Touches a safety invariant"
+    },
+    { "name": "external", "color": "c5def5", "description": "外部贡献 · From an outside contributor" },
+    {
+      "name": "review-followup",
+      "color": "f9d0c4",
+      "description": "评审挂账：处置为挂账的评审意见 · Deferred review finding"
+    },
+    { "name": "backlog", "color": "ededed", "description": "已确认、暂不排期 · Accepted, not scheduled" },
+    { "name": "dependencies", "color": "0366d6", "description": "依赖更新 · Dependency update" },
+    { "name": "github_actions", "color": "000000", "description": "GitHub Actions 依赖 · GitHub Actions update" }
+  ]
+}

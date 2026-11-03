@@ -35,6 +35,34 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
 }
 function New-CaseList { , [Collections.Generic.List[object]]::new() }
 
+# Runs Action with one internal function of the guard module replaced, and always puts the original back. This reaches
+# states the self-test must not or cannot make on the machine it runs on (a mapped network drive, a link count that
+# cannot be read).
+function Invoke-WithGuardStub([string]$Inner, [scriptblock]$Stub, [scriptblock]$Action) {
+    $guard = (Get-Command Assert-HarnessCfgDir).Module
+    $original = & $guard { param($n) (Get-Item "function:$n").ScriptBlock } $Inner
+    & $guard { param($n, $s) Set-Item "function:script:$n" $s } $Inner $Stub
+    try { & $Action } finally { & $guard { param($n, $s) Set-Item "function:script:$n" $s } $Inner $original }
+}
+
+# Runs Action while a directory of this self-test cannot be listed (a deny entry for everyone, taken away again whatever
+# happens). Denied says whether the listing really failed; where it did not, the caller's case has not run for real.
+# Restored says whether the entry was taken away again: when it was not, the scratch directory cannot be deleted, so the
+# caller turns that into a red case.
+function Invoke-WithListingDenied([string]$Folder, [scriptblock]$Action) {
+    $outcome = [pscustomobject]@{ Denied = $false; Result = $null; Restored = $true }
+    & icacls.exe $Folder /deny '*S-1-1-0:(RD)' 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $outcome }
+    try {
+        $outcome.Denied = try { $null = Get-ChildItem -LiteralPath $Folder -Force -ErrorAction Stop; $false } catch { $true }
+        if ($outcome.Denied) { $outcome.Result = & $Action }
+    } finally {
+        & icacls.exe $Folder /remove:d '*S-1-1-0' 2>&1 | Out-Null
+        $outcome.Restored = $LASTEXITCODE -eq 0
+    }
+    $outcome
+}
+
 $script:ScratchPrefix = 'reaper-harness-selftest-' # New-HarnessTempDir appends 32 random hex digits
 $script:SubstLetters = 'Z', 'Y', 'X', 'W', 'V', 'U' # letters the self-test borrows for subst (first free one), and the only ones cleaned up
 
@@ -93,7 +121,7 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
     $noShort = $hasShort ? '' : ' (this volume has no 8.3 short names; not run for real)'
     & $add "the default resource directory as an 8.3 short name is refused (GetFullPath expands it; identity is the second layer)$noShort" $true ((-not $hasShort) -or (Test-Refused { Assert-HarnessCfgDir $short } '*never touched*'))
     & $add "a directory that does not exist yet below the 8.3 short name is refused too$noShort" $true ((-not $hasShort) -or (Test-Refused { Assert-HarnessCfgDir (Join-Path $short 'Data\not-yet') } '*never touched*'))
-    & $add 'file identity: the 8.3 short name and the long name are the same' $false ((-not $hasShort) -or ((Get-HarnessFileIdentity $short) -ceq (Get-HarnessFileIdentity $defaultDir)))
+    & $add "file identity: the 8.3 short name and the long name are the same$noShort" $false ((-not $hasShort) -or ((Get-HarnessFileIdentity $short) -ceq (Get-HarnessFileIdentity $defaultDir)))
     & $add 'file identity: different directories differ, a missing path has none' $false ((Get-HarnessFileIdentity $defaultDir) -and (Get-HarnessFileIdentity $defaultDir) -cne (Get-HarnessFileIdentity $Tmp) -and $null -eq (Get-HarnessFileIdentity (Join-Path $Tmp 'nope-nope')))
     & $add "the 8.3 short name in lower case is refused too (short names are case insensitive)$noShort" $true ((-not $hasShort) -or (Test-Refused { Assert-HarnessCfgDir $short.ToLowerInvariant() } '*never touched*'))
     & $add 'the default resource directory with a \\?\ prefix is refused' $true (Test-Refused { Assert-HarnessCfgDir ('\\?\' + $defaultDir) } '*drive letter*')
@@ -118,7 +146,11 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
         try {
             & $add 'with a subst drive pointing at APPDATA, \REAPER on that drive is refused (the directory and its parents up to the root compared by identity)' $true ((Test-Refused { Assert-HarnessCfgDir "${letter}:\REAPER" } $byIdentity) -and (Test-Refused { Assert-HarnessCfgDir "${letter}:\REAPER\Data\not-yet" } $byIdentity) -and (Test-Refused { Assert-HarnessCfgDir "${letter}:\" } $byIdentity))
             & $add 'file identity: the root of a subst drive equals the directory it points at' $false ((Get-HarnessFileIdentity "${letter}:\") -ceq (Get-HarnessFileIdentity $roam))
-        } finally { & subst.exe "${letter}:" /d 2>&1 | Out-Null }
+            & $add 'result directory: on a subst drive pointing at APPDATA it is refused by file identity, also when it does not exist yet' $true ((Test-Refused { Assert-HarnessResultDir "${letter}:\REAPER" } '*-ResultDir*detected by file identity*') -and (Test-Refused { Assert-HarnessResultDir "${letter}:\REAPER\Data\not-yet" } '*-ResultDir*detected by file identity*'))
+        } finally {
+            & subst.exe "${letter}:" /d 2>&1 | Out-Null
+            & $add 'the subst drive pointing at APPDATA was removed again' $false ($LASTEXITCODE -eq 0)
+        }
     } else {
         & $add '(no subst drive could be made on this machine: the subst cases did not run for real)' $false $true
     }
@@ -133,6 +165,9 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'a sibling whose name only starts with the APPDATA directory name is not refused' $false ((New-HarnessCfgDir $sibling).Dir -like '*-Other')
     & $add 'New-HarnessCfgDir refuses the default resource directory too and creates nothing' $true ((Test-Refused { New-HarnessCfgDir $defaultDir } $byString) -and -not (Test-Path -LiteralPath (Join-Path $defaultDir (Get-HarnessSentinel).Name)))
     foreach ($c in (Get-InitCases $Tmp $RepoRoot)) { $cases.Add($c) }
+    foreach ($c in (Get-CfgEntryCases $Tmp)) { $cases.Add($c) }
+    foreach ($c in (Get-DriveCases $Tmp)) { $cases.Add($c) }
+    foreach ($c in (Get-ResultDirCases $Tmp)) { $cases.Add($c) }
     $gone = Join-Path $Tmp 'not-there'
     & $add 'a directory that does not exist is refused' $true (Test-Refused { Assert-HarnessCfgDir $gone } '*does not exist*')
     $bare = Join-Path $Tmp 'bare'; $null = New-Item -ItemType Directory -Path $bare; Set-Content -LiteralPath (Join-Path $bare 'reaper.ini') -Value '[REAPER]'
@@ -144,6 +179,208 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'a properly initialised configuration directory passes' $false ($made.Ini -like '*good\reaper.ini' -and (Assert-HarnessCfgDir $good).Dir -eq $made.Dir)
     Remove-Item -LiteralPath (Join-Path $good 'reaper.ini')
     & $add 'sentinel present but reaper.ini gone is refused' $true (Test-Refused { Assert-HarnessCfgDir $good } '*reaper.ini*')
+    $cases
+}
+
+# What lies in the configuration directory: a link or a hard link would carry the reads and writes of REAPER and of
+# Set-HarnessIniValue out of it, and the checks of the directory itself cannot see that. The top level is looked at on
+# every check, the whole tree when the path is pinned. A pin that is refused pins nothing, so those cases run here; what
+# happens after a real pin is in the child process.
+function Get-CfgEntryCases([string]$Tmp) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $defaultDir = Get-HarnessDefaultCfgDir
+    # Files are written to the default resource directory below, so it has to be the fake one in the scratch directory
+    if (-not $defaultDir.StartsWith($Tmp, [StringComparison]::OrdinalIgnoreCase)) { throw 'not writing to a default resource directory that is not the fake one of this self-test' }
+    $twin = Join-Path $defaultDir 'reaper.ini'
+    $newCfg = { param([string]$DirName) $dir = Join-Path $Tmp $DirName; $null = New-HarnessCfgDir $dir; $dir }
+    # Both directories hold a reaper.ini from here on: same name, different files, which is the normal case
+    [IO.File]::WriteAllText($twin, "[REAPER]`nuser=1`n")
+    try {
+        $plain = & $newCfg 'entries-plain'
+        & $add 'top level: files named like those in the default resource directory but different files pass' $false ((Assert-HarnessCfgDir $plain).Dir -like '*entries-plain')
+        # Puts another name of Source (made first when it is not there) at the path Inside a new configuration directory
+        $hardFor = {
+            param([string]$DirName, [string]$Inside, [string]$Source)
+            $dir = & $newCfg $DirName
+            $at = Join-Path $dir $Inside
+            if (Test-Path -LiteralPath $at) { Remove-Item -LiteralPath $at }
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $at)
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Source)
+            if (-not (Test-Path -LiteralPath $Source)) { [IO.File]::WriteAllText($Source, 'x') }
+            $made = try { $null = New-Item -ItemType HardLink -Path $at -Target $Source -ErrorAction Stop; $true } catch { $false }
+            [pscustomobject]@{ Dir = $dir; Made = $made; At = $at }
+        }
+        $hard = & $hardFor 'entries-hard' 'reaper.ini' $twin
+        $noHard = $hard.Made ? '' : ' (hard links cannot be made here; not run for real)'
+        & $add "top level: reaper.ini as a hard link to the one in the default resource directory is refused$noHard" $true ((-not $hard.Made) -or (Test-Refused { Assert-HarnessCfgDir $hard.Dir } '*hard link*'))
+        $renamed = & $hardFor 'entries-hard-renamed' 'reaper.ini' (Join-Path $defaultDir 'reaper-render.ini')
+        & $add "top level: reaper.ini as a hard link to a file of another name in the default resource directory is refused$noHard" $true ((-not $renamed.Made) -or (Test-Refused { Assert-HarnessCfgDir $renamed.Dir } '*hard link*'))
+        $intoSub = & $hardFor 'entries-hard-into-sub' 'extra.ini' (Join-Path $defaultDir 'Data\reaper-deep.ini')
+        & $add "top level: another file as a hard link to a file in a subdirectory of the default resource directory is refused$noHard" $true ((-not $intoSub.Made) -or (Test-Refused { Assert-HarnessCfgDir $intoSub.Dir } '*hard link*'))
+        $unrelated = & $hardFor 'entries-hard-unrelated' 'extra.ini' (Join-Path $Tmp 'entries-unrelated.txt')
+        & $add "top level: a hard link to a file that has nothing to do with REAPER is refused too$noHard" $true ((-not $unrelated.Made) -or (Test-Refused { Assert-HarnessCfgDir $unrelated.Dir } '*hard link*'))
+        $initHard = & $hardFor 'entries-hard-init' 'reaper.ini' (Join-Path $defaultDir 'reaper-init.ini')
+        $initSentinel = Join-Path $initHard.Dir (Get-HarnessSentinel).Name
+        $sentinelWritten = (Get-Item -LiteralPath $initSentinel).LastWriteTimeUtc
+        & $add "-Init: a directory with the sentinel and a hard link in it is refused before anything is written$noHard" $true ((-not $initHard.Made) -or ((Test-Refused { New-HarnessCfgDir $initHard.Dir } '*hard link*') -and (Get-Item -LiteralPath $initSentinel).LastWriteTimeUtc -eq $sentinelWritten))
+        # The reader itself, and what is done with a count that cannot be read: nothing done to a real file gets there
+        $linkCount = { param([string]$Path) & (Get-Command Assert-HarnessCfgDir).Module { param($p) Get-HarnessFileLinkCount $p } $Path }
+        $ownIni = (Assert-HarnessCfgDir $plain).Ini
+        & $add "link count: a file of its own has one name, a hard link and its source have two$noHard" $false ((& $linkCount $ownIni) -eq 1 -and ((-not $unrelated.Made) -or ((& $linkCount $unrelated.At) -eq 2 -and (& $linkCount (Join-Path $Tmp 'entries-unrelated.txt')) -eq 2)))
+        & $add 'link count: a path that cannot be opened has no count (below 1), a missing file and an invalid name alike' $true ((& $linkCount (Join-Path $Tmp 'nope-nope')) -lt 1 -and (& $linkCount (Join-Path $Tmp 'bad|name')) -lt 1)
+        $countSays = { param($Answer) { param([string]$Path) $Answer }.GetNewClosure() }
+        & $add 'top level: a link count that cannot be read is refused' $true ((Invoke-WithGuardStub 'Get-HarnessFileLinkCount' (& $countSays (-1)) { Test-Refused { Assert-HarnessCfgDir $plain } '*number of names*cannot be read*' }) -and (Invoke-WithGuardStub 'Get-HarnessFileLinkCount' (& $countSays 0) { Test-Refused { Assert-HarnessCfgDir $plain } '*number of names*cannot be read*' }))
+        # A name the default directory does not have is nothing special: the count is what decides
+        $lonely = Join-Path $plain 'only-here.ini'
+        [IO.File]::WriteAllText($lonely, 'x')
+        & $add 'top level: a file of its own that the default resource directory has no namesake for passes' $false ((Assert-HarnessCfgDir $plain).Dir -like '*entries-plain')
+        Remove-Item -LiteralPath $lonely
+        # The whole tree, when the path is pinned
+        $deep = 'plugins\Some Plugin.vst3\Contents'
+        $deepHard = & $hardFor 'tree-hard' "$deep\x.dll" (Join-Path $defaultDir 'reaper-tree.ini')
+        & $add "whole tree: a hard link in a subdirectory is refused when the path is pinned$noHard" $true ((-not $deepHard.Made) -or (Test-Refused { Initialize-HarnessCfg $deepHard.Dir } "*$deep\x.dll*hard link*"))
+        # On purpose: the check before every start stays at the top level, a tree of thousands of entries is walked once
+        & $add "top level only: the check before every start does not look below the top level$noHard" $false ((-not $deepHard.Made) -or (Assert-HarnessCfgDir $deepHard.Dir).Dir -like '*tree-hard')
+        $treeJunction = & $newCfg 'tree-junction'
+        $elsewhere = Join-Path $treeJunction "$deep\elsewhere"
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $elsewhere)
+        $null = New-Item -ItemType Junction -Path $elsewhere -Target $defaultDir
+        try { & $add 'whole tree: a junction in a subdirectory is refused when the path is pinned' $true (Test-Refused { Initialize-HarnessCfg $treeJunction } '*link or junction*') }
+        finally { [IO.Directory]::Delete($elsewhere) } # removes the link only
+        $treeClosed = & $newCfg 'tree-closed'
+        $closedSub = Join-Path $treeClosed 'plugins\deep'
+        $null = New-Item -ItemType Directory -Path $closedSub
+        $refusalOf = { param([scriptblock]$Action) try { $null = & $Action; '' } catch { $_.Exception.Message } }
+        $subDenied = Invoke-WithListingDenied $closedSub { & $refusalOf { Initialize-HarnessCfg $treeClosed } }
+        $noSubDeny = $subDenied.Denied ? '' : ' (a deny entry has no effect here; not run for real)'
+        & $add "whole tree: a subdirectory that cannot be listed is refused when the path is pinned$noSubDeny" $true ((-not $subDenied.Denied) -or $subDenied.Result -like 'REFUSED:*cannot be listed*')
+        & $add "whole tree: that refusal names the level, relative to the configuration directory$noSubDeny" $true ((-not $subDenied.Denied) -or $subDenied.Result -clike 'REFUSED:*cannot be listed (plugins\deep),*')
+        & $add 'whole tree: that deny entry was taken away again' $false ($subDenied.Restored -and (Assert-HarnessCfgDir $treeClosed).Dir -like '*tree-closed' -and @(Get-ChildItem -LiteralPath $closedSub -Force).Count -eq 0)
+        # A symbolic link needs a privilege most sessions do not have (runners do); a junction does not
+        $sym = & $newCfg 'entries-symlink'
+        Remove-Item -LiteralPath (Join-Path $sym 'reaper.ini')
+        $symMade = try { $null = New-Item -ItemType SymbolicLink -Path (Join-Path $sym 'reaper.ini') -Target $twin -ErrorAction Stop; $true } catch { $false }
+        $noSym = $symMade ? '' : ' (symbolic links cannot be made in this session; not run for real)'
+        & $add "top level: reaper.ini as a symbolic link is refused$noSym" $true ((-not $symMade) -or (Test-Refused { Assert-HarnessCfgDir $sym } '*link or junction*'))
+        $junc = & $newCfg 'entries-junction'
+        $plugins = Join-Path $junc 'plugins'
+        Remove-Item -LiteralPath $plugins
+        Remove-Item -LiteralPath (Join-Path $junc 'reaper.ini')
+        $null = New-Item -ItemType Junction -Path $plugins -Target $defaultDir
+        try {
+            & $add 'top level: plugins as a junction is refused' $true (Test-Refused { Assert-HarnessCfgDir $junc } '*link or junction*')
+            & $add '-Init: a directory with the sentinel and a junction in it is refused before anything is written through it' $true ((Test-Refused { New-HarnessCfgDir $junc } '*link or junction*') -and -not (Test-Path -LiteralPath (Join-Path $junc 'reaper.ini')))
+        } finally { [IO.Directory]::Delete($plugins) } # removes the link only
+        # A directory that cannot be listed: nothing in it can be proven to stay inside it
+        $closed = & $newCfg 'entries-closed'
+        $denied = Invoke-WithListingDenied $closed { & $refusalOf { Assert-HarnessCfgDir $closed } }
+        $noDeny = $denied.Denied ? '' : ' (a deny entry has no effect here; not run for real)'
+        & $add "top level: a configuration directory that cannot be listed is refused$noDeny" $true ((-not $denied.Denied) -or $denied.Result -like 'REFUSED:*cannot be listed*')
+        & $add "top level: that refusal names the level as .$noDeny" $true ((-not $denied.Denied) -or $denied.Result -clike 'REFUSED:*cannot be listed (.),*')
+        & $add 'top level: that deny entry was taken away again' $false ($denied.Restored -and (Assert-HarnessCfgDir $closed).Dir -like '*entries-closed')
+    } finally { Get-ChildItem -LiteralPath $defaultDir -Recurse -Filter 'reaper*.ini' -File | Remove-Item } # only this self-test's fake directory
+    $cases
+}
+
+# The drive the directory is on, as spelled and after expanding links. The types come through a stand-in: a real mapped
+# drive would change the machine, so one is only made on a hosted runner, which is thrown away afterwards.
+# The result directory is written during a run: never the default resource directory, whatever leads there
+function Get-ResultDirCases([string]$Tmp) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $defaultDir = Get-HarnessDefaultCfgDir
+    $byPath = '*-ResultDir*never touched'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $defaultDir 'Data')
+    & $add 'result directory: the default resource directory itself is refused' $true (Test-Refused { Assert-HarnessResultDir $defaultDir } $byPath)
+    & $add 'result directory: below the default resource directory is refused, it need not exist' $true (Test-Refused { Assert-HarnessResultDir (Join-Path $defaultDir 'Data\results') } $byPath)
+    & $add 'result directory: upper case and forward slashes change nothing' $true (Test-Refused { Assert-HarnessResultDir ($defaultDir.ToUpperInvariant() -replace '\\', '/') } $byPath)
+    $toDefault = Join-Path $Tmp 'result-to-default'
+    $toData = Join-Path $Tmp 'result-to-data'
+    $null = New-Item -ItemType Junction -Path $toDefault -Target $defaultDir
+    $null = New-Item -ItemType Junction -Path $toData -Target (Join-Path $defaultDir 'Data')
+    try {
+        & $add 'result directory: a junction pointing at the default resource directory is refused' $true (Test-Refused { Assert-HarnessResultDir $toDefault } $byPath)
+        & $add 'result directory: below a junction pointing inside the default resource directory is refused' $true (Test-Refused { Assert-HarnessResultDir (Join-Path $toData 'results') } $byPath)
+    } finally { [IO.Directory]::Delete($toDefault); [IO.Directory]::Delete($toData) } # removes the links only
+    & $add 'result directory: a sibling whose name only starts the same way, elsewhere under AppData, is fine' $false (-not (Test-Refused { Assert-HarnessResultDir "$defaultDir-results" }))
+    & $add 'result directory: anywhere else is fine, it need not exist' $false (-not (Test-Refused { Assert-HarnessResultDir (Join-Path $Tmp 'results\not-yet') }))
+    # No default resource directory yet: there is no identity to compare, only the path can say it
+    $savedAppData = $env:APPDATA
+    $fresh = Join-Path $Tmp 'appdata-without-reaper'
+    $freshLink = Join-Path $Tmp 'appdata-link'
+    $null = New-Item -ItemType Directory -Force -Path $fresh
+    $null = New-Item -ItemType Junction -Path $freshLink -Target $fresh
+    try {
+        $env:APPDATA = $fresh
+        & $add 'result directory: with no default resource directory yet, the place it would be in is refused' $true (Test-Refused { Assert-HarnessResultDir (Join-Path $fresh 'REAPER\results') } $byPath)
+        $env:APPDATA = $freshLink
+        & $add 'result directory: the same when APPDATA itself is a link' $true (Test-Refused { Assert-HarnessResultDir (Join-Path $fresh 'REAPER\results') } $byPath)
+    } finally { $env:APPDATA = $savedAppData; [IO.Directory]::Delete($freshLink) }
+    $cases
+}
+
+function Get-DriveCases([string]$Tmp) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $ok = Join-Path $Tmp 'drive-ok'
+    $null = New-HarnessCfgDir $ok
+    $alwaysType = { param([string]$Answer) { param([string]$Path) $Answer }.GetNewClosure() }
+    $resolveTo = { param([string]$LeadsTo) { param([string]$Path, [int]$Depth = 0) $LeadsTo }.GetNewClosure() }
+    # Network only on the letter Q, every other drive local
+    $networkOnQ = { param([string]$Path) if ($Path -like 'Q:*') { 'Network' } else { 'Fixed' } }
+    foreach ($kind in 'Network', 'Unknown', 'NoRootDirectory', '') {
+        & $add "drive: a configuration directory on a drive of type '$kind' is refused" $true (Invoke-WithGuardStub 'Get-HarnessDriveType' (& $alwaysType $kind) { Test-Refused { Assert-HarnessCfgDir $ok } '*must be on a local drive*' })
+    }
+    foreach ($kind in 'Fixed', 'Removable') {
+        & $add "drive: a configuration directory on a drive of type '$kind' passes" $false (Invoke-WithGuardStub 'Get-HarnessDriveType' (& $alwaysType $kind) { (Assert-HarnessCfgDir $ok).Dir -like '*drive-ok' })
+    }
+    & $add 'drive: a link that leads to a network drive is refused (the real path is checked too)' $true (
+        Invoke-WithGuardStub 'Get-HarnessDriveType' $networkOnQ { Invoke-WithGuardStub 'Resolve-HarnessRealPath' (& $resolveTo 'Q:\cfg') { Test-Refused { Assert-HarnessCfgDir $ok } '*must be on a local drive*' } })
+    & $add 'drive: a link that leads to a UNC path is refused (the real path is checked too)' $true (
+        Invoke-WithGuardStub 'Resolve-HarnessRealPath' (& $resolveTo '\\server\share\cfg') { Test-Refused { Assert-HarnessCfgDir $ok } '*drive letter*' })
+    & $add 'drive: a path on a network drive is refused even when its links lead back to a local path (the spelling is checked too)' $true (
+        Invoke-WithGuardStub 'Get-HarnessDriveType' $networkOnQ { Invoke-WithGuardStub 'Resolve-HarnessRealPath' (& $resolveTo $ok) { Test-Refused { Assert-HarnessCfgDir 'Q:\cfg' } '*must be on a local drive*' } })
+    & $add 'drive: a UNC path is refused even when its links lead back to a local path (the spelling is checked too)' $true (
+        Invoke-WithGuardStub 'Resolve-HarnessRealPath' (& $resolveTo $ok) { Test-Refused { Assert-HarnessCfgDir '\\server\share\cfg' } '*drive letter*' })
+    $used = @([IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() })
+    $free = @($script:SubstLetters | Where-Object { $_ -notin $used }) | Select-Object -First 1
+    if (-not $free) {
+        & $add '(no free letter among Z..U: the cases with a real drive letter did not run for real)' $false $true
+        return $cases
+    }
+    & $add 'drive: a root whose type cannot be read gives no type at all (a UNC root has none)' $true (-not (& (Get-Command Assert-HarnessCfgDir).Module { Get-HarnessDriveType '\\server\share\cfg' }))
+    # Without any stand-in: the real drive type of a letter nothing is mounted on
+    & $add 'drive: a letter with nothing mounted on it is refused (the real type is read)' $true (Test-Refused { Assert-HarnessCfgDir "${free}:\cfg" } '*must be on a local drive*')
+    # A subst drive stands for a local directory: it stays allowed
+    $substHome = Join-Path $Tmp 'drive-subst'
+    $null = New-Item -ItemType Directory -Path $substHome
+    & subst.exe "${free}:" $substHome 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        try { & $add 'drive: a subst drive pointing at a local directory is not refused' $false ((New-HarnessCfgDir "${free}:\cfg").Dir -ieq "${free}:\cfg" -and (Assert-HarnessCfgDir "${free}:\cfg").Dir -ieq "${free}:\cfg") }
+        finally {
+            & subst.exe "${free}:" /d 2>&1 | Out-Null
+            & $add 'drive: that subst drive was removed again' $false ($LASTEXITCODE -eq 0)
+        }
+    } else {
+        & $add '(no subst drive could be made on this machine: the subst drive positive case did not run for real)' $false $true
+    }
+    # A real mapped drive only where the machine is thrown away afterwards
+    $mapped = $false
+    if ($env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted') {
+        $share = '\\localhost\' + $ok.Substring(0, 1) + '$' + $ok.Substring(2)
+        & net.exe use "${free}:" $share 2>&1 | Out-Null
+        $mapped = $LASTEXITCODE -eq 0
+    }
+    if ($mapped) {
+        try { & $add 'drive: a real mapped network drive leading back to this machine is refused' $true (Test-Refused { Assert-HarnessCfgDir "${free}:\" } '*must be on a local drive*') }
+        finally {
+            & net.exe use "${free}:" /delete /y 2>&1 | Out-Null
+            & $add 'drive: that mapped drive was deleted again' $false ($LASTEXITCODE -eq 0)
+        }
+    } else {
+        & $add '(a mapped network drive is only made on a hosted runner, and it could not be made here: the mapped drive case did not run for real)' $false $true
+    }
     $cases
 }
 
@@ -246,7 +483,9 @@ function Get-SubstResidueCases([string]$Tmp) {
             $report = @(Clear-HarnessSelftestSubst -Prefix $stalePrefix -Letters $Scope)
             [pscustomobject]@{ Report = $report; Still = [bool]((& $listed) -match ('(?m)^' + $slot + ':\\: =>')) }
         } finally {
-            & subst.exe "${slot}:" /d 2>&1 | Out-Null # only the mapping made here
+            # Only the mapping made here. Its exit code says nothing when the clean-up under test already removed the
+            # mapping, so what counts is checked once at the end: the letter is free again
+            & subst.exe "${slot}:" /d 2>&1 | Out-Null
             if (Test-Path -LiteralPath $Place) { Remove-Item -LiteralPath $Place } # empty directory, not recursive
         }
     }
@@ -260,6 +499,7 @@ function Get-SubstResidueCases([string]$Tmp) {
     & $add 'subst residue: a letter outside the clean-up range is left alone (even pointing at a scratch directory)' $true ($r -and $r.Still -and $r.Report.Count -eq 0)
     & $add 'subst residue: the clean-up range is Z..U' $false (($script:SubstLetters -join '') -ceq 'ZYXWVU')
     & $add 'subst residue: with nothing left over nothing is done' $false (@(Clear-HarnessSelftestSubst -Prefix $stalePrefix).Count -eq 0)
+    & $add 'subst residue: no mapping made for these cases is left on the letter' $false (-not ((& $listed) -match ('(?m)^' + $slot + ':\\: =>')))
     $cases
 }
 
@@ -329,6 +569,33 @@ function Get-SnapshotCases([string]$Tmp) {
     Add-Content -LiteralPath (Join-Path $odd 'other.ini') -Value 'x'
     $oc = Compare-HarnessDefaultCfgSnapshot -Before $o0 -After (Get-HarnessDefaultCfgSnapshot -Root $odd)
     & $add 'listing: files named Keys, Values and Count: a change to another file is found, and only that one' $true (-not $oc.Same -and $oc.Changed.Count -eq 1 -and $oc.Changed[0] -ceq 'changed:other.ini')
+    # What cannot be listed cannot be called unchanged
+    $halfOpen = [ordered]@{ 'a.ini' = '1|2'; 'sub' = 'unreadable' }
+    $hc = Compare-HarnessDefaultCfgSnapshot -Before $halfOpen -After $halfOpen
+    & $add 'listing: an unreadable entry in both listings is not "unchanged", it is named' $true (-not $hc.Same -and $hc.Changed.Count -eq 0 -and $hc.Unreadable.Count -eq 1 -and $hc.Unreadable[0] -ceq 'sub')
+    $hc = Compare-HarnessDefaultCfgSnapshot -Before ([ordered]@{ 'a.ini' = '1|2' }) -After $halfOpen
+    & $add 'listing: an entry unreadable only afterwards is named too' $true (-not $hc.Same -and $hc.Unreadable.Count -eq 1)
+    $hc = Compare-HarnessDefaultCfgSnapshot -Before $halfOpen -After ([ordered]@{ 'a.ini' = '1|2'; 'sub' = 'dir' })
+    & $add 'listing: an entry unreadable only before is named too' $true (-not $hc.Same -and $hc.Unreadable.Count -eq 1)
+    $hc = Compare-HarnessDefaultCfgSnapshot -Before ([ordered]@{ 'a.ini' = '1|2' }) -After ([ordered]@{ 'a.ini' = '1|2' })
+    & $add 'listing: nothing unreadable, the list is there and empty' $false ($hc.Same -and $hc.Unreadable.Count -eq 0)
+    # A real subdirectory and a real root that cannot be listed: deny entries on directories of this self-test only
+    $aclRoot = Join-Path $Tmp 'snap-acl'
+    $aclSub = Join-Path $aclRoot 'locked'
+    $null = New-Item -ItemType Directory -Path $aclSub
+    Set-Content -LiteralPath (Join-Path $aclRoot 'a.ini') -Value 'a'
+    Set-Content -LiteralPath (Join-Path $aclSub 'b.ini') -Value 'b'
+    $subRun = Invoke-WithListingDenied $aclSub { Get-HarnessDefaultCfgSnapshot -Root $aclRoot }
+    $noDeny = $subRun.Denied ? '' : ' (a deny entry has no effect here; not run for real)'
+    & $add "listing: a subdirectory that cannot be listed is recorded as unreadable$noDeny" $true ((-not $subRun.Denied) -or ($subRun.Result['locked'] -ceq 'unreadable' -and -not $subRun.Result.Contains('locked\b.ini') -and $subRun.Result['a.ini'] -cne 'unreadable'))
+    & $add "listing: listed twice with that subdirectory closed, the comparison does not say unchanged$noDeny" $true ((-not $subRun.Denied) -or -not (Compare-HarnessDefaultCfgSnapshot -Before $subRun.Result -After $subRun.Result).Same)
+    $rootRun = Invoke-WithListingDenied $aclRoot { Get-HarnessDefaultCfgSnapshot -Root $aclRoot }
+    & $add "listing: a root that cannot be listed is recorded as unreadable under the name .$noDeny" $true ((-not $rootRun.Denied) -or $rootRun.Result['.'] -ceq 'unreadable')
+    $openAgain = Get-HarnessDefaultCfgSnapshot -Root $aclRoot
+    & $add 'listing: the deny entries were taken away again' $false ($subRun.Restored -and $rootRun.Restored -and $openAgain.Contains('locked\b.ini') -and -not $openAgain.Contains('.'))
+    # A root that Test-Path says no to but whose identity reads as an error is not a missing directory
+    $weird = Get-HarnessDefaultCfgSnapshot -Root (Join-Path $Tmp 'bad|name')
+    & $add 'listing: a root that cannot even be looked at is unreadable, not an empty listing' $true ($weird.Contains('.') -and $weird['.'] -ceq 'unreadable')
     $cases
 }
 
@@ -342,10 +609,14 @@ function Get-LintCases([string]$Tmp, [string]$RepoRoot, [string]$CollisionSample
         param($Files)
         $dir = Join-Path $Tmp ('lint-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
         $null = New-Item -ItemType Directory -Path $dir
-        foreach ($name in $Files.get_Keys()) { [IO.File]::WriteAllText((Join-Path $dir $name), $Files[$name]) }
-        try { Test-HarnessScriptLint -Paths $dir } finally { foreach ($name in $Files.get_Keys()) { Remove-Item -LiteralPath (Join-Path $dir $name) }; Remove-Item -LiteralPath $dir }
+        foreach ($name in $Files.get_Keys()) {
+            $at = Join-Path $dir $name
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $at)
+            [IO.File]::WriteAllText($at, $Files[$name])
+        }
+        Test-HarnessScriptLint -Paths $dir -Root $dir # the directory stays until the whole scratch directory goes
     }
-    $hostOk = @{ 'Host.psm1' = "$strict`n`$a = '$word'`n" }
+    $hostOk = @{ 'src/Host.psm1' = "$strict`n`$a = '$word'`n" }
     & $add 'lint: a clean sample has no problems' $false ((& $lint $hostOk).Count -eq 0)
     & $add 'lint: $c and $C differing only by case is red' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$c = 1`n`$C = 2`n" })) -match 'differ only by case')
     & $add 'lint: "$c" inside a string and a parameter $C collide too' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`nparam(`$C)`n`"`$c\reaper.ini`"`n" })) -match 'differ only by case')
@@ -357,17 +628,21 @@ function Get-LintCases([string]$Tmp, [string]$RepoRoot, [string]$CollisionSample
     & $add 'lint: .get_Keys(), .get_Values(), .GetEnumerator() and an entry looked up by index are fine' $false ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$h = @{}`n`$a = `$h.get_Keys()`n`$b = `$h.get_Values()`n`$e = `$h.GetEnumerator()`n`$k = `$h['Keys']`n" })).Count -eq 0)
     & $add 'lint: scope prefixes do not hide a collision ($script:Root and $root)' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$script:Root = 1`n`$root = 2`n" })) -match 'differ only by case')
     & $add 'lint: a missing Set-StrictMode is red' $true ((& $lint ($hostOk + @{ 'x.ps1' = "`$a = 1`n" })) -match 'StrictMode')
-    & $add 'lint: the configuration file argument literal outside Host.psm1 is red' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$b = '$word'`n" })) -match 'may only be built in Host')
+    & $add 'lint: the configuration file argument literal outside src/Host.psm1 is red' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$b = '$word'`n" })) -match 'may only be built in src/Host')
+    # The exemptions go by the path from the repository root: another file of the same name gets none
+    & $add 'lint: the literal in a file that is only named like it (tests/Host.psm1) is red' $true (((& $lint ($hostOk + @{ 'tests/Host.psm1' = "$strict`n`$b = '$word'`n" })) -match 'tests/Host\.psm1: .*may only be built in') -and ((& $lint @{ 'tests/Host.psm1' = "$strict`n`$b = '$word'`n" }) -match 'may only be built in'))
+    & $add 'lint: APPDATA in files only named like the exempted ones (tests/Guard.psm1, src/SelfTest.psm1) is red' $true (((& $lint ($hostOk + @{ 'tests/Guard.psm1' = "$strict`n`$p = `$env:APPDATA`n" })) -match 'tests/Guard\.psm1: only') -and ((& $lint ($hostOk + @{ 'src/SelfTest.psm1' = "$strict`n`$p = `$env:APPDATA`n" })) -match 'src/SelfTest\.psm1: only'))
+    & $add 'lint: APPDATA in src/Guard.psm1 and tests/SelfTest.psm1 is fine' $false ((& $lint ($hostOk + @{ 'src/Guard.psm1' = "$strict`n`$p = `$env:APPDATA`n"; 'tests/SelfTest.psm1' = "$strict`n`$p = `$env:APPDATA`n" })).Count -eq 0)
     & $add 'lint: no configuration file argument literal at all is red' $true ((& $lint @{ 'x.ps1' = "$strict`n" }) -match 'exactly once')
-    & $add 'lint: the configuration file argument literal twice is red' $true ((& $lint @{ 'Host.psm1' = "$strict`n`$a = '$word'`n`$b = '$word'`n" }) -match 'exactly once')
-    & $add 'lint: mentioning it in a comment does not count' $false ((& $lint @{ 'Host.psm1' = "$strict`n# $word`n`$a = '$word'`n" }).Count -eq 0)
-    & $add 'lint: a file other than Guard.psm1 or the self-test mentioning APPDATA is red' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$p = `$env:APPDATA`n" })) -match 'APPDATA')
+    & $add 'lint: the configuration file argument literal twice is red' $true ((& $lint @{ 'src/Host.psm1' = "$strict`n`$a = '$word'`n`$b = '$word'`n" }) -match 'exactly once')
+    & $add 'lint: mentioning it in a comment does not count' $false ((& $lint @{ 'src/Host.psm1' = "$strict`n# $word`n`$a = '$word'`n" }).Count -eq 0)
+    & $add 'lint: a file other than src/Guard.psm1 or tests/SelfTest.psm1 mentioning APPDATA is red' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$p = `$env:APPDATA`n" })) -match 'APPDATA')
     & $add 'lint: LOCALAPPDATA (a different directory) is not taken for APPDATA' $false ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$p = `$env:LOCALAPPDATA`n" })).Count -eq 0)
     $cr = [string][char]13; $esc = [string][char]27
     & $add 'lint: a CR not at a line end inside a script is red (invisible in editors; swallowed, it changes a regex)' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$r = '(;|${cr}?`$)'`n" })) -match 'control character')
     & $add 'lint: another C0 control character (ESC) inside a script is red' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$r = 'a${esc}b'`n" })) -match 'control character')
     & $add 'lint: control characters in .lua and .json files are red too' $true (((& $lint ($hostOk + @{ 'x.lua' = "local a = 'b${esc}c'`n" })) -match 'control character') -and ((& $lint ($hostOk + @{ 'x.json' = "{ `"a`": `"b${esc}c`" }`n" })) -match 'control character'))
-    & $add 'lint: CRLF line ends and TAB are not control characters' $false ((& $lint @{ 'Host.psm1' = "$strict${cr}`n`t`$a = '$word'${cr}`n" }).Count -eq 0)
+    & $add 'lint: CRLF line ends and TAB are not control characters' $false ((& $lint @{ 'src/Host.psm1' = "$strict${cr}`n`t`$a = '$word'${cr}`n" }).Count -eq 0)
     $ctl = Find-HarnessControlChars -Text "ab${cr}cd`nx${esc}y`n"
     & $add 'control characters: line, column and code point are reported' $true ($ctl.Count -eq 2 -and $ctl[0] -ceq 'line 1 column 3: U+000D' -and $ctl[1] -ceq 'line 2 column 2: U+001B')
     & $add 'control characters: clean text, empty text and CRLF line ends have none' $false ((Find-HarnessControlChars -Text "a`tb${cr}`nc`n").Count -eq 0 -and (Find-HarnessControlChars -Text '').Count -eq 0)
@@ -402,6 +677,15 @@ function Get-HostCases {
     & $add 'dialog: the render progress window is let be' $false ((& $v '#32770' $true 'Rendering to x.wav').Action -eq 'Benign')
     & $add 'dialog: the plugin scan progress window is let be' $false ((& $v '#32770' $true 'Scanning VST plugins...').Action -eq 'Benign')
     & $add 'dialog: the peak building progress window is let be' $false ((& $v '#32770' $true 'Building Peaks...').Action -eq 'Benign')
+    foreach ($progress in 'Rendering to file...', 'Render', 'Scanning VST', 'Building peaks') {
+        & $add "dialog: '$progress' is a progress window" $false ((& $v '#32770' $true $progress).Action -eq 'Benign')
+    }
+    # A title that reports trouble is no progress window, whatever it starts with: left alone it would only end at the
+    # timeout, and the outcome would not name it
+    foreach ($trouble in 'Render failed', 'Render error', 'RENDER FAILED', 'Scanning error', 'Building peaks failed') {
+        $r = & $v '#32770' $true $trouble
+        & $add "dialog: '$trouble' counts as stuck (unknown-dialog), not as a progress window" $true ($r.Action -eq 'Fatal' -and $r.Name -eq 'unknown-dialog')
+    }
     & $add 'dialog: the evaluation licence reminder is never clicked away; stuck, and named' $true (($nag = & $v '#32770' $true 'About REAPER v7.82/win64 rev 1 (Oct') -and $nag.Action -eq 'Fatal' -and $nag.Name -eq 'license-nag')
     foreach ($pair in @(@('Project Load Warning', 'project-load-warning'), @('REAPER Error', 'reaper-error'), @('Select files to save or delete', 'record-save-prompt'), @('REAPER', 'no-audio-device'), @('Brand New Box', 'unknown-dialog'))) {
         $r = & $v '#32770' $true $pair[0]
@@ -411,6 +695,41 @@ function Get-HostCases {
     & $add 'dialog: the main window and other non-dialogs are ignored' $false ((& $v 'REAPERwnd' $true 'REAPER v7').Action -eq 'Ignore')
     & $add 'paths in dialog titles are masked' $false ((ConvertTo-HarnessSafeTitle 'Error in D:\scratch\proj.rpp now') -notmatch 'scratch')
     & $add 'drive paths and UNC paths in result text are masked' $false ((Hide-HarnessPaths 'a D:\scratch\y.wav b \\host\share\z c E:/fwd/x') -notmatch 'scratch|host|fwd')
+    # Assembled from two parts: the repository's privacy scan flags a complete user directory path, as it should
+    $spaced = 'C:\Us' + 'ers\John Smith\a.rpp'
+    $hide = { param($text, $want) (Hide-HarnessPaths $text) -ceq $want }
+    & $add 'result text: a drive path with spaces is masked to its end, nothing of a user name is left' $true (& $hide "cannot open $spaced" 'cannot open <path>')
+    & $add 'result text: a UNC path with spaces is masked to its end' $true (& $hide 'cannot open \\server\my share\a b.rpp' 'cannot open <path>')
+    & $add 'result text: forward slashes are masked as well, with a drive letter or without' $true ((& $hide 'in D:/my files/a b.rpp' 'in <path>') -and (& $hide 'in //server/my share/a b.rpp' 'in <path>'))
+    & $add 'result text: a double-quoted path is masked up to its closing quote, the rest stays' $true (& $hide "cannot open `"$spaced`" now" 'cannot open "<path>" now')
+    & $add 'result text: a single-quoted path, the way .NET writes them, is masked to its closing quote, the sentence stays' $true (& $hide "Access to the path '$spaced' is denied." "Access to the path '<path>' is denied.")
+    & $add 'result text: an apostrophe does not end a quoted path' $true (& $hide "the path 'D:\o'brien\my files\a.wav' is denied" "the path '<path>' is denied")
+    & $add 'result text: an apostrophe does not end an unquoted path' $true (& $hide "in D:\o'brien\my files\a.wav" 'in <path>')
+    & $add 'result text: an opening quote with no closing one: an apostrophe in a name leaves nothing of the path' $true (& $hide "'D:\Jane O'Neil\x y.wav: boom" "'<path>: boom")
+    & $add 'result text: an apostrophe further on in the sentence is no closing quote' $true (& $hide "'D:\my files\a.wav' isn't there" "'<path>' isn't there")
+    & $add 'result text: a closing quote before punctuation or at the end of the text keeps the sentence' $true ((& $hide "at 'D:\a b'" "at '<path>'") -and (& $hide "'D:\a b': boom" "'<path>': boom") -and (& $hide "'D:\a b', then" "'<path>', then") -and (& $hide "'D:\a b'. Then" "'<path>'. Then") -and (& $hide "('D:\a b')" "('<path>')") -and (& $hide "['D:\a b']" "['<path>']") -and (& $hide "'D:\a b'; then" "'<path>'; then"))
+    & $add 'result text: a semicolon and a comma do not end a path' $true (& $hide 'in D:\a;b c,d\e.wav' 'in <path>')
+    & $add 'result text: a colon ends a path (a Lua error names the file and the line) and the message stays' $true (& $hide 'D:\my ext\a b.lua:12: attempt to index' '<path>:12: attempt to index')
+    & $add 'result text: < > | ? * end a path too: no file name can have them' $true ((& $hide 'D:\a b>c' '<path>>c') -and (& $hide 'D:\a b|c' '<path>|c') -and (& $hide 'D:\a b?c' '<path>?c') -and (& $hide 'D:\a b*c' '<path>*c') -and (& $hide 'D:\a b<c' '<path><c'))
+    & $add 'result text: the end of the line ends a path, the next line stays' $true ((& $hide "D:\a b`nnext" "<path>`nnext") -and (& $hide "D:\a b`r`nnext" "<path>`r`nnext"))
+    & $add 'result text: device path prefixes and file URLs leave nothing of the path' $true ((Hide-HarnessPaths ('\\.\' + $spaced)) -cnotmatch 'John|Smith' -and (Hide-HarnessPaths ('\\?\' + $spaced)) -cnotmatch 'John|Smith' -and (Hide-HarnessPaths ('file:///' + ($spaced -replace '\\', '/'))) -cnotmatch 'John|Smith')
+    & $add 'result text: a text without a path stays as it is' $false (& $hide 'identical=no lag=1 maxdiff=-6.0 head=0 50/50 a: b VST3: Fixture Gain (Vendor)' 'identical=no lag=1 maxdiff=-6.0 head=0 50/50 a: b VST3: Fixture Gain (Vendor)')
+    & $add 'result text: masking twice changes nothing, and nothing stays empty text' $false ((& $hide (Hide-HarnessPaths "in '$spaced' now") "in '<path>' now") -and (Hide-HarnessPaths $null) -ceq '')
+    # What an extension puts into the facts of an outcome goes into the result file
+    $factsIn = [ordered]@{ n = 3; ok = $true; none = $null; text = "at $spaced"; deep = [ordered]@{ list = @('a', 'D:\my files\b', [ordered]@{ x = '\\host\my share\c' }) }; obj = [pscustomobject]@{ p = 'E:/my files/d' }; 'D:\key with space\k' = 1; one = @('D:\my files\e'); empty = @() }
+    $factsOut = Hide-HarnessFacts $factsIn
+    & $add 'facts: strings are masked at any depth, in lists, dictionaries and objects' $true ($factsOut.text -ceq 'at <path>' -and $factsOut.deep.list[1] -ceq '<path>' -and $factsOut.deep.list[2].x -ceq '<path>' -and $factsOut.obj.p -ceq '<path>')
+    & $add 'facts: keys are masked too' $true ($factsOut.Contains('<path>') -and -not $factsOut.Contains('D:\key with space\k'))
+    & $add 'facts: numbers, booleans and nothing stay what they are, and lists stay lists' $false ($factsOut.n -eq 3 -and $factsOut.n -is [int] -and $factsOut.ok -is [bool] -and $factsOut.ok -and $null -eq $factsOut.none -and (ConvertTo-HarnessJsonText $factsOut.one) -ceq '["<path>"]' -and (ConvertTo-HarnessJsonText $factsOut.empty) -ceq '[]' -and $factsOut.deep.list[0] -ceq 'a')
+    $deepFacts = 'D:\my files\bottom'
+    foreach ($level in 1..40) { $deepFacts = [ordered]@{ down = $deepFacts } }
+    & $add 'facts: nesting deeper than any real result is cut off, without a path' $true (($deepText = ConvertTo-HarnessJsonText (Hide-HarnessFacts $deepFacts)) -and $deepText -clike '*<too deep>*' -and $deepText -cnotlike '*my files*')
+    & $add 'dialog title: a drive path with spaces is masked to its end, nothing of a user name is left' $true ((ConvertTo-HarnessSafeTitle "Error in $spaced") -ceq 'Error in <path>')
+    & $add 'dialog title: a UNC path with spaces is masked to its end' $true ((ConvertTo-HarnessSafeTitle 'Error in \\server\my share\a b.rpp') -ceq 'Error in <path>')
+    & $add 'dialog title: forward slashes are masked as well, with a drive letter or without' $true ((ConvertTo-HarnessSafeTitle 'Error in D:/my files/a b.rpp') -ceq 'Error in <path>' -and (ConvertTo-HarnessSafeTitle 'Error in //server/my share/a b.rpp') -ceq 'Error in <path>')
+    & $add 'dialog title: a quoted path is masked up to its closing quote, the rest stays' $true ((ConvertTo-HarnessSafeTitle "Cannot open `"$spaced`" now") -ceq 'Cannot open "<path>" now')
+    & $add 'dialog title: a title without a path is left as it is' $false ((ConvertTo-HarnessSafeTitle 'Brand New Box 50/50') -ceq 'Brand New Box 50/50')
+    & $add 'dialog title: still cut to 40 characters' $false ((ConvertTo-HarnessSafeTitle ('x' * 60)).Length -eq 40)
     # The module proof (which file of the tested binary's name was loaded), with an injected "same file" test
     $same = { param($a, $b) [string]::Equals($a, $b, [StringComparison]::OrdinalIgnoreCase) }
     $exp = @{ 'A.vst3' = 'P:\plugins\A.vst3\Contents\x86_64-win\A.vst3'; 'B.vst3' = 'P:\plugins\B.vst3\Contents\x86_64-win\B.vst3' }
@@ -423,6 +742,7 @@ function Get-HostCases {
     $r = & $mv @{ 'A.vst3' = @($exp['A.vst3']) }
     & $add 'module proof: a tested binary never seen is Unseen (not proven), never Proven' $true ($r.Verdict -eq 'Unseen' -and $r.Binaries['B.vst3'] -eq 'Unseen')
     & $add 'module proof: nothing seen at all is Unseen' $true ((& $mv @{}).Verdict -eq 'Unseen')
+    & $add 'module proof: nothing expected proves nothing: Unseen, not Proven' $true ((Get-HarnessModuleVerdict -Expected @{} -Seen @{ 'A.vst3' = @($exp['A.vst3']) } -SameFile $same).Verdict -eq 'Unseen')
     & $add 'same file: an identity that cannot be read is never the same file' $true (-not (Test-HarnessSameFile 'Q:\does\not\exist.vst3' 'Q:\does\not\exist-either.vst3'))
     $badA = Join-Path ([IO.Path]::GetTempPath()) 'bad|one.vst3'; $badB = Join-Path ([IO.Path]::GetTempPath()) 'bad|two.vst3'
     & $add 'same file: two paths whose identities both fail to read (the same error) are not the same file' $true ((Get-HarnessFileIdentity $badA) -like 'ERROR:*' -and (Get-HarnessFileIdentity $badA) -ceq (Get-HarnessFileIdentity $badB) -and -not (Test-HarnessSameFile $badA $badB))
@@ -468,6 +788,11 @@ function Get-WavCases([string]$Tmp) {
     $one = Get-HarnessRenderVerdict -Facts (New-Facts @{ RmsB = [double[]](0.05, 0.1) }) -EnergyRatioDb (& $cc 'L/R' -6.1 -5.9) -PeakMaxDb 0 -NotSilent
     & $add 'render verdict: one render judged on its own starts with its own facts; criteria within range are PASS' $false ($one.Status -eq 'PASS' -and $one.Detail -cmatch '^frames=96000 channels=2 rate=48000 format=float32 nonfinite=0 peak=-6\.02 rms=-26\.02,-20\.00$')
     & $add 'render verdict: Inf in a render judged on its own is FAIL and counted' $true ((Get-HarnessRenderVerdict -Facts (New-Facts @{ InfB = 1; NonFiniteB = 1 })).Detail -like '* inf=1; failed: NaN or Inf*')
+    $noFrames = { param([hashtable]$Set, [hashtable]$Criteria = @{}) (Get-HarnessCompareVerdict -Facts (New-Facts $Set) @Criteria).Status }
+    & $add 'compare verdict: no frames on both sides is INCOMPLETE, with or without criteria' $true ((& $noFrames @{ FramesA = 0; FramesB = 0 }) -eq 'INCOMPLETE' -and (& $noFrames @{ FramesA = 0; FramesB = 0 } @{ MaxDiffDb = -120 }) -eq 'INCOMPLETE' -and (& $noFrames @{ FramesA = 0; FramesB = 0 } @{ NotSilent = $true }) -eq 'INCOMPLETE')
+    & $add 'compare verdict: no frames on either one side is INCOMPLETE' $true ((& $noFrames @{ FramesA = 0; Identical = $false }) -eq 'INCOMPLETE' -and (& $noFrames @{ FramesB = 0; Identical = $false }) -eq 'INCOMPLETE')
+    & $add 'compare verdict: no frames goes before every other criterion (different rates are not FAIL then)' $true ((& $noFrames @{ FramesA = 0; FramesB = 0; Comparable = $false; RateB = 44100; Identical = $false }) -eq 'INCOMPLETE')
+    & $add 'render verdict: a render with no frames judged on its own is INCOMPLETE, with or without criteria' $true ((Get-HarnessRenderVerdict -Facts (New-Facts @{ FramesA = 0; FramesB = 0 })).Status -eq 'INCOMPLETE' -and (Get-HarnessRenderVerdict -Facts (New-Facts @{ FramesA = 0; FramesB = 0; PeakB = 0 }) -NotSilent).Status -eq 'INCOMPLETE')
     # Hand-made files through the C# reader and comparer
     $n = 4800
     $base = [double[]]::new($n * 2)
@@ -512,6 +837,20 @@ function Get-WavCases([string]$Tmp) {
     $cutHead = Join-Path $Tmp 'cut-header.wav'; [IO.File]::WriteAllBytes($cutHead, $bytes[0..29])
     $ch = & $cmp $cutHead
     & $add 'WAV: a file cut off inside its fmt chunk is INCOMPLETE with a WAV: reason' $true ($ch.Status -eq 'INCOMPLETE' -and $ch.Detail -like '*WAV: *fmt*')
+    # The fmt chunk declares a length that int addition cannot hold: the check must not overflow into "fine"
+    $hugeFmt = [byte[]]$bytes.Clone(); [BitConverter]::GetBytes([uint32]::MaxValue).CopyTo($hugeFmt, 16)
+    $hf = Join-Path $Tmp 'huge-fmt.wav'; [IO.File]::WriteAllBytes($hf, $hugeFmt)
+    $hr = & $cmp $hf
+    & $add 'WAV: a fmt chunk declaring an enormous length is INCOMPLETE and names the fmt chunk' $true ($hr.Status -eq 'INCOMPLETE' -and $hr.Detail -like '*WAV: fmt chunk is too short or truncated*')
+    # A render with no frames: the header of a.wav with data length 0
+    $emptyBytes = [byte[]]$bytes[0..43]; [BitConverter]::GetBytes([uint32]0).CopyTo($emptyBytes, 40)
+    $emptyA = Join-Path $Tmp 'empty-a.wav'; [IO.File]::WriteAllBytes($emptyA, $emptyBytes)
+    $emptyB = Join-Path $Tmp 'empty-b.wav'; [IO.File]::WriteAllBytes($emptyB, $emptyBytes)
+    $e2 = Compare-HarnessWavFiles -A $emptyA -B $emptyB
+    & $add 'WAV: two empty renders are INCOMPLETE, not a bit-identical PASS; the fixed facts still start the line' $true ($e2.Status -eq 'INCOMPLETE' -and $e2.Detail -cmatch '^identical=yes lag=0 maxdiff=n/a head=n/a frames=0/0 .*; incomplete: a render has no frames')
+    & $add 'WAV: one empty render on its own is INCOMPLETE, with notSilent as well (not FAIL)' $true ((Test-HarnessWavFile -Path $emptyA).Status -eq 'INCOMPLETE' -and (Test-HarnessWavFile -Path $emptyA -NotSilent).Status -eq 'INCOMPLETE')
+    & $add 'WAV: an empty render against a real one is INCOMPLETE, either way round' $true ((Compare-HarnessWavFiles -A $emptyA -B $a).Status -eq 'INCOMPLETE' -and (Compare-HarnessWavFiles -A $a -B $emptyA).Status -eq 'INCOMPLETE')
+    & $add 'WAV: two empty renders with a tolerance or notSilent are INCOMPLETE too' $true ((Compare-HarnessWavFiles -A $emptyA -B $emptyB -MaxDiffDb -120).Status -eq 'INCOMPLETE' -and (Compare-HarnessWavFiles -A $emptyA -B $emptyB -NotSilent).Status -eq 'INCOMPLETE')
     $cutData = Join-Path $Tmp 'cut-data.wav'; [IO.File]::WriteAllBytes($cutData, $bytes[0..(44 + 8 * 100 - 1)])
     $cd = & $cmp $cutData
     & $add 'WAV: a file cut off inside its data (100 whole frames left) is INCOMPLETE, not a shorter render' $true ($cd.Status -eq 'INCOMPLETE' -and $cd.Detail -like '*WAV: data chunk is truncated*')
@@ -519,10 +858,20 @@ function Get-WavCases([string]$Tmp) {
     $pf = Join-Path $Tmp 'partial-frame.wav'; [IO.File]::WriteAllBytes($pf, $partial)
     $pr = & $cmp $pf
     & $add 'WAV: a data chunk that ends inside a frame is INCOMPLETE' $true ($pr.Status -eq 'INCOMPLETE' -and $pr.Detail -like '*WAV: data chunk does not hold whole frames*')
-    # A streaming writer's placeholder length 0xFFFFFFFF: the data runs to the end of the file (whole frames), not cut off
+    # The placeholder length 0xFFFFFFFF: the writer never filled in the length, so the file is not finished. This one holds
+    # every frame of a.wav and nothing else, so reading it to its end would find nothing wrong and compare as identical
     $open = [byte[]]$bytes.Clone(); [BitConverter]::GetBytes([uint32]::MaxValue).CopyTo($open, 40)
-    $of = Join-Path $Tmp 'open-length.wav'; [IO.File]::WriteAllBytes($of, [byte[]]($open + [byte[]](1, 2, 3)))
-    & $add 'WAV: a data length of 0xFFFFFFFF (length unknown) reads to the end of the file; a partial last frame is dropped' $false ((& $cmp $of).Detail -cmatch '^identical=yes lag=0 ')
+    $of = Join-Path $Tmp 'open-length.wav'; [IO.File]::WriteAllBytes($of, $open)
+    $ofp = Join-Path $Tmp 'open-length-partial.wav'; [IO.File]::WriteAllBytes($ofp, [byte[]]($open + [byte[]](1, 2, 3)))
+    $neverWritten = 'WAV: the data length was never written*'
+    $readError = { param($p) try { $null = Read-HarnessWav $p; '' } catch { $_.Exception.Message } }
+    & $add 'WAV: a data length of 0xFFFFFFFF does not read, with a reason of its own, also when the file ends inside a frame' $true ((& $readError $of) -like $neverWritten -and (& $readError $ofp) -like $neverWritten)
+    $openB = & $cmp $of
+    $openA = Compare-HarnessWavFiles -A $of -B $a
+    & $add 'WAV: a data length of 0xFFFFFFFF compared on either side is INCOMPLETE, not bit-identical' $true ($openB.Status -eq 'INCOMPLETE' -and $openB.Detail -like "cannot read render B: $neverWritten" -and $openA.Status -eq 'INCOMPLETE' -and $openA.Detail -like "cannot read render A: $neverWritten")
+    $openAlone = Test-HarnessWavFile -Path $of
+    $openLoud = Test-HarnessWavFile -Path $of -NotSilent -PeakMaxDb 6
+    & $add 'WAV: a data length of 0xFFFFFFFF on its own is INCOMPLETE, with or without criteria the frames would meet (never PASS)' $true ($openAlone.Status -eq 'INCOMPLETE' -and $openAlone.Detail -like "cannot read the render: $neverWritten" -and $openLoud.Status -eq 'INCOMPLETE')
     & $add 'WAV: a missing render is INCOMPLETE' $true ((& $cmp (Join-Path $Tmp 'none.wav')).Status -eq 'INCOMPLETE')
     $silent = & $file 'silent.wav' ([double[]]::new(200))
     & $add 'WAV: one render on its own: silent with notSilent is FAIL; the signal passes' $true ((Test-HarnessWavFile -Path $silent -NotSilent).Status -eq 'FAIL' -and (Test-HarnessWavFile -Path $a -NotSilent).Status -eq 'PASS')
@@ -553,17 +902,36 @@ function Get-VerdictCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'summary: FAIL beats INCOMPLETE' $true ((Get-HarnessWorstStatus @('INCOMPLETE', 'FAIL', 'PASS')) -eq 'FAIL')
     & $add 'summary: only all SKIPPED is SKIPPED; mixed with PASS it is INCOMPLETE' $false ((Get-HarnessWorstStatus @('SKIPPED', 'SKIPPED')) -eq 'SKIPPED' -and (Get-HarnessWorstStatus @('PASS', 'SKIPPED')) -eq 'INCOMPLETE')
     & $add 'summary: an empty list (nothing ran) is never PASS' $true ((Get-HarnessWorstStatus @()) -eq 'INCOMPLETE' -and (Get-HarnessWorstStatus $null) -eq 'INCOMPLETE')
-    & $add 'round: a round without any rows is not PASS' $true ((Get-HarnessRunVerdict -RowStatuses @() -CfgUnchanged $true -Residual 0) -eq 'INCOMPLETE')
-    & $add 'round: all rows green but the default resource directory changed is FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $false -Residual 0) -eq 'FAIL')
-    & $add 'round: all rows green but a reaper.exe left after the round is FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 1) -eq 'FAIL')
-    & $add 'round: all green, directory unchanged, nothing left: PASS' $false ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $true -Residual 0) -eq 'PASS')
-    & $add 'rounds: a changed default resource directory stops all further rounds' $true ((Get-HarnessRoundStop -CfgUnchanged $false) -ne '' -and (Get-HarnessRoundStop -CfgUnchanged $true) -eq '')
+    & $add 'round: a round without any rows is not PASS' $true ((Get-HarnessRunVerdict -RowStatuses @() -CfgChanged $false -Residual 0) -eq 'INCOMPLETE')
+    & $add 'round: all rows green but the default resource directory changed is FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'PASS') -CfgChanged $true -Residual 0) -eq 'FAIL')
+    & $add 'round: all rows green but a process of this round left after it is FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -CfgChanged $false -Residual 1) -eq 'FAIL')
+    & $add 'round: all green, directory unchanged, nothing left: PASS' $false ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'PASS') -CfgChanged $false -Residual 0) -eq 'PASS')
+    & $add 'round: all rows green but the directory could not be listed in full: INCOMPLETE, neither PASS nor FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -CfgUnreadable $true) -ceq 'INCOMPLETE')
+    & $add 'round: a change that was seen stays FAIL when something else could not be listed too' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -CfgChanged $true -CfgUnreadable $true) -ceq 'FAIL')
+    & $add 'round: a FAIL row stays FAIL when the directory could not be listed' $true ((Get-HarnessRunVerdict -RowStatuses @('FAIL') -CfgUnreadable $true) -ceq 'FAIL')
+    & $add 'round: all rows green but a process that could not be ended: INCOMPLETE, neither PASS nor FAIL' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -StillRunning $true) -ceq 'INCOMPLETE')
+    & $add 'round: a FAIL row stays FAIL when a process could not be ended' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS', 'FAIL') -StillRunning $true) -ceq 'FAIL')
+    & $add 'round: a process nobody reported stays FAIL next to one that was reported' $true ((Get-HarnessRunVerdict -RowStatuses @('PASS') -Residual 1 -StillRunning $true) -ceq 'FAIL')
+    & $add 'rounds: a changed default resource directory stops all further rounds' $true ((Get-HarnessRoundStop -CfgChanged $true) -like '*changed*')
+    & $add 'rounds: a default resource directory that could not be listed stops all further rounds' $true ((Get-HarnessRoundStop -CfgUnreadable $true) -like '*could not be listed*')
+    & $add 'rounds: a process that could not be ended stops all further rounds' $true ((Get-HarnessRoundStop -StillRunning $true) -like '*could not be ended*')
+    & $add 'rounds: a round that broke on an unexpected error stops all further rounds' $true ((Get-HarnessRoundStop -RoundBroke $true) -like '*unexpected error*')
+    & $add 'rounds: with none of those the next round runs' $false ((Get-HarnessRoundStop) -ceq '')
+    # What was seen to change, next to what could not be read
+    $seen = { param([string[]]$Changed, [string[]]$Unreadable) @(Get-HarnessCfgChangesSeen -Changed $Changed -Unreadable $Unreadable) -join '|' }
+    & $add 'directory changes: with nothing unreadable every change counts' $true ((& $seen @('changed:a.ini', 'added:b\c', 'removed:d') @()) -ceq 'changed:a.ini|added:b\c|removed:d')
+    & $add 'directory changes: an entry that could not be read and all below it are no change that was seen, in any case of letters' $false ((& $seen @('changed:DATA', 'removed:data\x.ini') @('Data')) -ceq '')
+    & $add 'directory changes: a change next to an unreadable entry counts, also when its name only starts the same' $true ((& $seen @('changed:Data2\x.ini', 'changed:a.ini') @('Data')) -ceq 'changed:Data2\x.ini|changed:a.ini')
+    & $add 'directory changes: when the directory itself could not be read nothing was seen' $false ((& $seen @('removed:a.ini') @('.')) -ceq '')
     # Negative rows need both the outcome and the reason. The outcome alone can be reached without the case running:
     # with the GUI lock busy REAPER is not started, and a watchdog case is INCOMPLETE then too, without any watchdog
     $negs = @{}
     foreach ($neg in (Get-HarnessBuiltinNegatives)) { $negs[$neg.id] = $neg }
     $verdict = { param($id, $observed, $detail) Get-HarnessNegativeVerdict -Expect $negs[$id].expect -ExpectDetail $negs[$id].expectDetail -Observed $observed -Detail $detail }
     $hang = { param($state, $exitCode = 0) $w = Get-HarnessHostFailure ([pscustomobject]@{ Status = $state; Seconds = 8.2; ExitCode = $exitCode; Modal = 'license-nag'; Windows = @('license-nag') }); "$w; the process has ended and the GUI locks are free" } # the shape the hang kind builds
+    # A process that could not be ended cannot verify the watchdog cases, even with the "free" text glued on
+    $stuckText = Get-HarnessHostFailure ([pscustomobject]@{ Status = 'Timeout'; Seconds = 8.2; ExitCode = $null; Modal = $null; Windows = @(); Pid = 77; StillRunning = $true })
+    & $add 'negative verdict: a process the watchdog could not end has its own text and verifies neither watchdog case' $true ($stuckText -like 'the watchdog could not end process 77*' -and (& $verdict 'neg-timeout' 'INCOMPLETE' "$stuckText; the process has ended and the GUI locks are free").Status -ceq 'INCOMPLETE' -and (& $verdict 'neg-killed' 'INCOMPLETE' "$stuckText; the process has ended and the GUI locks are free").Status -ceq 'INCOMPLETE')
     & $add 'negative verdict (built-in): the timeout case is PASS only when ended at the timeout' $false ((& $verdict 'neg-timeout' 'INCOMPLETE' (& $hang 'Timeout')).Status -eq 'PASS')
     & $add 'negative verdict (built-in): the kill case is PASS only when ended at the kill point' $false ((& $verdict 'neg-killed' 'INCOMPLETE' (& $hang 'Killed')).Status -eq 'PASS')
     $busy = & $verdict 'neg-timeout' 'INCOMPLETE' 'the GUI locks were not available in time; REAPER was not started; the watchdog could not be checked'
@@ -577,6 +945,9 @@ function Get-VerdictCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'negative verdict: the -6 dB case cannot pass on a lag=1 FAIL' $true ((& $verdict 'neg-track-minus-6db' 'FAIL' (Get-HarnessCompareVerdict -Facts (New-Facts @{ Identical = $false; BestLag = 1 })).Detail).Status -eq 'INCOMPLETE')
     & $add 'negative verdict: observed INCOMPLETE (the case could not run) when FAIL is expected is INCOMPLETE, not FAIL' $true ((& $verdict 'neg-offset-1-sample' 'INCOMPLETE' 'cannot read render A: WAV: no RIFF header').Status -eq 'INCOMPLETE')
     & $add 'negative verdict: what should have turned red did not (observed PASS, expected FAIL) is FAIL' $true ((& $verdict 'neg-offset-1-sample' 'PASS' 'identical=yes lag=0 ').Status -eq 'FAIL')
+    # A render with no frames says nothing, so a comparer case cannot pass on one: not PASS, and not FAIL either
+    $noFrames = Get-HarnessCompareVerdict -Facts (New-Facts @{ FramesA = 0; FramesB = 0; Identical = $false; BestLag = 1 })
+    & $add 'negative verdict: an empty render when the comparer cases expect FAIL is INCOMPLETE, whatever else its facts say' $true ($noFrames.Status -ceq 'INCOMPLETE' -and (& $verdict 'neg-offset-1-sample' $noFrames.Status $noFrames.Detail).Status -ceq 'INCOMPLETE' -and (& $verdict 'neg-track-minus-6db' $noFrames.Status $noFrames.Detail).Status -ceq 'INCOMPLETE')
     $refusal = { param($block) try { $null = & $block; 'NOTHROW' } catch { $_.Exception.Message -replace '\s+', ' ' } } # the shape Invoke-HarnessGuardNegative records
     $msgDefault = & $refusal { Assert-HarnessCfgDir (Get-HarnessDefaultCfgDir) }
     $bareDir = Join-Path $Tmp 'neg-bare'
@@ -598,6 +969,19 @@ function Get-VerdictCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'build label: up to three plugins, 12 hex digits each joined by -; more plugins fewer digits; above five one hash; always within the label pattern' $false (
         $labels[0] -cmatch '^[0-9a-f]{12}$' -and $labels[1] -cmatch '^[0-9a-f]{12}-[0-9a-f]{12}$' -and $labels[3] -cmatch '^([0-9a-f]{9}-){3}[0-9a-f]{9}$' -and $labels[5] -cmatch '^[0-9a-f]{12}$' -and
         $labels[5] -cne $labels[6] -and @($labels | Where-Object { $_ -cnotmatch '^[0-9A-Za-z._-]{1,40}$' }).Count -eq 0 -and (Get-HarnessDefaultLabel ([ordered]@{})) -ceq 'unknown')
+    # What a round counts as left over: a process it started itself, by PID and start time
+    $t0 = [DateTime]::new(2026, 11, 2, 1, 0, 0, [DateTimeKind]::Utc)
+    $startedRows = @(
+        [pscustomobject]@{ Pid = 11; StartUtc = $t0 }, [pscustomobject]@{ Pid = 22; StartUtc = $t0 }, [pscustomobject]@{ Pid = 33; StartUtc = $t0 }, [pscustomobject]@{ Pid = 44; StartUtc = $null }, [pscustomobject]@{ Pid = 55; StartUtc = $null }
+    )
+    $startOf = { param($id) switch ($id) { 11 { $t0 } 22 { $t0.AddSeconds(30) } 33 { $null } 44 { $t0 } 55 { $null } } }.GetNewClosure()
+    $leftIds = @((Get-HarnessOwnProcessesLeft -Started $startedRows -StartOf $startOf) | ForEach-Object { $_.Pid })
+    & $add 'left over: a process of this round still alive, same PID and same start time, counts' $true (11 -in $leftIds)
+    & $add 'left over: the same PID with another start time is a later process that got the number: it does not count' $false (22 -notin $leftIds)
+    & $add 'left over: a PID that is gone does not count, with or without a start time' $false (33 -notin $leftIds -and 55 -notin $leftIds)
+    & $add 'left over: a start time that was never read cannot tell it apart, so a live PID counts' $true (44 -in $leftIds)
+    & $add 'left over: nothing started, nothing left' $false (@(Get-HarnessOwnProcessesLeft -Started @() -StartOf $startOf).Count -eq 0)
+    & $add 'left over: this very process found through the real lookup, with its real start time' $true (@(Get-HarnessOwnProcessesLeft -Started @([pscustomobject]@{ Pid = $PID; StartUtc = (Get-HarnessProcessStartUtc (Get-Process -Id $PID)) })).Count -eq 1)
     $cases
 }
 
@@ -620,6 +1004,7 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     $mutations = @(
         @{ L = 'an unknown key at the top'; E = { param($c) $c['surprise'] = 1 }; M = "unknown key 'surprise'" }
         @{ L = 'an unknown key in a scenario'; E = { param($c) (& $scenario $c 'bus')['speed'] = 2 }; M = "unknown key 'speed'" }
+        @{ L = 'a configuration without any plugin (a run would have no binary to prove)'; E = { param($c) $c['plugins'] = [ordered]@{} }; M = 'config.plugins: needs at least 1 entry' }
         @{ L = 'schema 2'; E = { param($c) $c['schema'] = 2 }; M = 'schema' }
         @{ L = 'a string where a number belongs'; E = { param($c) $c['signal']['seconds'] = 'long' }; M = 'seconds' }
         @{ L = 'a sample rate out of range'; E = { param($c) (& $scenario $c 'bus')['sr'] = 100 }; M = 'sr' }
@@ -633,6 +1018,8 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a negative case without expectDetail'; E = { param($c) $c['negative'][0].Remove('expectDetail') }; M = 'expectDetail' }
         @{ L = 'a negative case whose expectDetail is not a valid regex'; E = { param($c) $c['negative'][0]['expectDetail'] = '(' }; M = 'expectDetail' }
         @{ L = 'a negative case with an empty expectDetail (it would match any reason)'; E = { param($c) $c['negative'][0]['expectDetail'] = '' }; M = 'expectDetail' }
+        @{ L = 'a negative case whose expectDetail is .* (it matches the empty text, so any reason)'; E = { param($c) $c['negative'][0]['expectDetail'] = '.*' }; M = 'empty text' }
+        @{ L = 'a negative case whose expectDetail is ^ (it matches the empty text, so any reason)'; E = { param($c) $c['negative'][0]['expectDetail'] = '^' }; M = 'empty text' }
         @{ L = 'an unknown expected outcome'; E = { param($c) $c['negative'][0]['expect'] = 'MAYBE' }; M = 'expect' }
         @{ L = 'a matrix in a negative case'; E = { param($c) $c['negative'][0]['matrix'] = [ordered]@{ sr = @(48000) } }; M = 'matrix' }
         @{ L = 'an axis both in the matrix and given directly'; E = { param($c) (& $scenario $c 'chain')['sr'] = 48000 }; M = 'both directly and in matrix' }
@@ -903,11 +1290,11 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
         (Test-HarnessParamValue 'missing' '' @{ Normalized = 0.5; Display = $null }) -eq 'no such parameter')
     $reopen = @{ before_t0_fx0_param1 = '0.5'; after1_t0_fx0_param1 = '0.5'; after2_t0_fx0_param1 = '0.5'; after3_t0_fx0_param1 = '0.5'; before_tracks = '1'; after1_tracks = '1'; after2_tracks = '1'; after3_tracks = '1' }
     & $add 'savereopen: the same values after each of 3 reopens are no problem' $false ((Test-HarnessReopenFacts -Facts $reopen -Cycles 3).Count -eq 0)
-    $changed = $reopen.Clone(); $changed['after2_t0_fx0_param1'] = '0.6'
+    $drifted = $reopen.Clone(); $drifted['after2_t0_fx0_param1'] = '0.6'
     $missing = $reopen.Clone(); $missing.Remove('after3_tracks')
     & $add 'savereopen: a value changed on the second of 3 reopens, or missing after the third, is a problem naming the reopen' $true (
-        ((Test-HarnessReopenFacts -Facts $changed -Cycles 3) -join ';') -ceq "t0_fx0_param1 changed on reopen 2 of 3: '0.5' -> '0.6'" -and
-        ((Test-HarnessReopenFacts -Facts $missing -Cycles 3) -join ';') -ceq "tracks changed on reopen 3 of 3: '1' -> ''" -and (Test-HarnessReopenFacts -Facts $changed -Cycles 1).Count -eq 0)
+        ((Test-HarnessReopenFacts -Facts $drifted -Cycles 3) -join ';') -ceq "t0_fx0_param1 changed on reopen 2 of 3: '0.5' -> '0.6'" -and
+        ((Test-HarnessReopenFacts -Facts $missing -Cycles 3) -join ';') -ceq "tracks changed on reopen 3 of 3: '1' -> ''" -and (Test-HarnessReopenFacts -Facts $drifted -Cycles 1).Count -eq 0)
     # A report as the driver writes it, and a saved project, for two variants
     $installed = @{
         gain = [pscustomobject]@{ Binary = 'P:\plugins\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3'; Info = [pscustomobject]@{ Name = 'Fixture Gain'; Vendor = 'Fixture Audio'; Cid = '5A1B2C3D4E5F60718293A4B5C6D7E8F9' } }
@@ -1143,6 +1530,16 @@ function Get-WiringCases([string]$RepoRoot) {
         (& $at $launch 'Enter-HarnessLocks')[0] -lt (& $at $launch 'Invoke-HarnessHost')[0] -and @(& $at $launch 'Get-HarnessSkipMarkerHit').Count -eq 2 -and (& $at $launch 'Get-HarnessSkipMarkerHit')[1] -lt (& $at $launch 'Invoke-HarnessHost')[0])
     $hostCalls = & $callsIn (Join-Path $RepoRoot 'src/Host.psm1') 'Invoke-HarnessHost'
     & $add 'wiring: Invoke-HarnessHost builds the command line from Get-HarnessCfgArgument (which checks the directory again)' $false ('Get-HarnessCfgArgument' -in $hostCalls.Name)
+    # REAPER cannot run here, so only the text of the driver can be looked at: the sampler waits for this mark, and with
+    # warmup 0 the loop never gets to write it
+    $driverText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'lua/driver.lua'))
+    & $add 'wiring: with warmup 0 the driver writes the warm-up mark before the first cycle' $true ($driverText -cmatch '(?s)if job\.warmup == 0 then[^\n]*\n\s*touch\(job\.warmMark\).*?for i = 1, job\.cycles do')
+    & $add 'wiring: with warm-up cycles the driver writes the mark after the last of them' $true ($driverText -cmatch '(?s)for i = 1, job\.cycles do.*?if i == job\.warmup then\s*touch\(job\.warmMark\)')
+    # Below 7.4 the real path resolution meets members that do not exist; both entry points say so up front
+    foreach ($script in 'run.ps1', 'doctor.ps1') {
+        $wanted = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot $script), [ref]$null, [ref]$null)).ScriptRequirements.RequiredPSVersion
+        & $add "wiring: $script requires PowerShell 7.4 (the minimum the README states)" $false ($wanted -eq [version]'7.4')
+    }
     $self = & $callsIn (Join-Path $PSScriptRoot 'SelfTest.psm1') 'Invoke-HarnessSelfTest'
     $clearAt = @(& $at $self 'Clear-HarnessSelftestSubst')
     $makeAt = @(& $at $self 'New-HarnessTempDir')
@@ -1155,9 +1552,11 @@ function Get-WiringCases([string]$RepoRoot) {
 
 # ---------------------------------------------------------------- child process
 function Get-ChildCases([string]$Tmp, [string]$RepoRoot, [string[]]$ExtraGuiLock) {
-    $cfgA = Join-Path $Tmp 'child-cfg-a'; $cfgB = Join-Path $Tmp 'child-cfg-b'
+    # A space in the pinned directory, and a space and an apostrophe in the work directory: real paths have them, and the
+    # command lines of the launch and of the stand-ins have to survive them
+    $cfgA = Join-Path $Tmp 'child cfg a'; $cfgB = Join-Path $Tmp 'child-cfg-b'
     $null = New-HarnessCfgDir $cfgA; $null = New-HarnessCfgDir $cfgB
-    $work = Join-Path $Tmp 'child-work'; $null = New-Item -ItemType Directory -Path $work
+    $work = Join-Path $Tmp "child work o'brien"; $null = New-Item -ItemType Directory -Path $work
     $run = Invoke-Native -Exe (Get-Process -Id $PID).Path -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $PSScriptRoot 'SelfTestChild.ps1'),
         '-RepoRoot', $RepoRoot, '-CfgA', $cfgA, '-CfgB', $cfgB, '-Work', $work, '-ExtraLocks', ($ExtraGuiLock -join ';'))
     $cases = New-CaseList
@@ -1166,6 +1565,41 @@ function Get-ChildCases([string]$Tmp, [string]$RepoRoot, [string[]]$ExtraGuiLock
         if ($f.Count -eq 4 -and $f[0] -eq 'RESULT') { $cases.Add([pscustomobject]@{ Label = $f[3]; Bad = ($f[1] -eq '1'); Passed = ($f[2] -eq '1') }) }
     }
     if ($run.Exit -ne 0 -or $cases.Count -eq 0) { $cases.Add([pscustomobject]@{ Label = "the child self-test failed (exit code $($run.Exit)): $(($run.Err + $run.Out).Trim() -replace '\s+', ' ')"; Bad = $false; Passed = $false }) }
+    # A child that stops early with exit code 0 (an exit in the wrong place) must not look green: its last statement
+    # prints a case, and the parent has to see it, with or without a desktop.
+    $reachedEnd = @($cases | Where-Object { $_.Label -ceq 'child: reached its last statement' }).Count
+    $cases.Add([pscustomobject]@{ Label = "child: the child process ran to its last statement (seen: $reachedEnd)"; Bad = $false; Passed = ($reachedEnd -eq 1) })
+    # The real message box cases may only be missing where this session really has no desktop, and then the child has
+    # to say so: a run that left them out by mistake must not look green
+    $dialogs = @($cases | Where-Object { $_.Label -like 'dialog:*' }).Count
+    $skipLines = @($cases | Where-Object { $_.Label -clike '(no interactive desktop in this session:*' }).Count
+    $desktop = [Environment]::UserInteractive
+    $cases.Add([pscustomobject]@{ Label = "child: the real message box cases ran whenever this session has a desktop; without one the child said they did not run (desktop: $desktop, cases: $dialogs, skip lines: $skipLines)"; Bad = $false; Passed = ($desktop ? $dialogs -ge 5 : $skipLines -eq 1) })
+    $cases
+}
+
+# ---------------------------------------------------------------- summary
+# A case whose precondition this machine lacks says so in its label with these words, which makes it countable: the
+# summary line gives the number, and on GitHub Actions a warning annotation repeats it, so a green run that proved less
+# than usual shows on the run's page and not only deep in its log.
+$script:NotRunWords = 'run for real'
+function Get-NotRunCount([object[]]$CaseList) { @($CaseList | Where-Object { $_.Label -clike "*$($script:NotRunWords)*" }).Count }
+function Get-NotRunWarning([int]$NotRun, [string]$ActionsFlag) {
+    if ($NotRun -lt 1 -or -not $ActionsFlag) { return $null }
+    "::warning::reaper-harness self-test: $NotRun case line(s) did not $($script:NotRunWords) on this runner; search the log for '$($script:NotRunWords)'"
+}
+
+function Get-SummaryCases {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $sample = @(
+        [pscustomobject]@{ Label = "first (this volume has no 8.3 short names; not $($script:NotRunWords))" }
+        [pscustomobject]@{ Label = "(no subst drive could be made: the cases did not $($script:NotRunWords))" }
+        [pscustomobject]@{ Label = 'an ordinary case that ran' }
+    )
+    & $add 'summary: only the cases whose label says they did not really run are counted' $false ((Get-NotRunCount $sample) -eq 2 -and (Get-NotRunCount @()) -eq 0)
+    & $add 'summary: on GitHub Actions the count also goes out as a warning annotation, at the start of its line' $false ((Get-NotRunWarning -NotRun 2 -ActionsFlag 'true') -cmatch '^::warning::.* 2 case line')
+    & $add 'summary: no warning outside GitHub Actions, and none when everything ran' $true ($null -eq (Get-NotRunWarning -NotRun 2 -ActionsFlag '') -and $null -eq (Get-NotRunWarning -NotRun 0 -ActionsFlag 'true'))
     $cases
 }
 
@@ -1189,7 +1623,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-WiringCases $RepoRoot },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {
@@ -1203,14 +1637,17 @@ function Invoke-HarnessSelfTest {
     }
     $after = Get-HarnessDefaultCfgSnapshot
     $cmp = Compare-HarnessDefaultCfgSnapshot -Before $before -After $after
-    $cases.Add([pscustomobject]@{ Label = "the real default resource directory is unchanged after the self-test ($($cmp.Count) entries)"; Bad = $false; Passed = $cmp.Same })
+    $cases.Add([pscustomobject]@{ Label = "the real default resource directory is unchanged after the self-test ($($cmp.Count) entries, $($cmp.Unreadable.Count) unreadable)"; Bad = $false; Passed = $cmp.Same })
     $badCount = 0; $goodCount = 0; $red = 0
     foreach ($c in $cases) {
         if ($c.Bad) { $badCount++ } else { $goodCount++ }
         if (-not $c.Passed) { $red++ }
         Write-Host ('  [{0}] {1}{2}' -f ($c.Passed ? 'PASS' : 'FAIL'), ($c.Bad ? 'negative: ' : ''), $c.Label)
     }
-    Write-Host ('reaper-harness self-test: {0} ({1} negative, {2} positive, {3} failed, {4:N0} s)' -f ($red -eq 0 ? 'passed' : 'FAILED'), $badCount, $goodCount, $red, $sw.Elapsed.TotalSeconds)
+    $notRunCount = Get-NotRunCount $cases
+    Write-Host ('reaper-harness self-test: {0} ({1} negative, {2} positive, {3} failed, {4} not run for real, {5:N0} s)' -f ($red -eq 0 ? 'passed' : 'FAILED'), $badCount, $goodCount, $red, $notRunCount, $sw.Elapsed.TotalSeconds)
+    $warning = Get-NotRunWarning -NotRun $notRunCount -ActionsFlag $env:GITHUB_ACTIONS
+    if ($warning) { Write-Host $warning }
     $red -eq 0 ? 0 : 1
 }
 

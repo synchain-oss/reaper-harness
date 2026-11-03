@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: MIT
+#
+# Second pr-agent for cross-checking: Claude Haiku 5.5 (effort high) on Claude API credit (organisation secret
+# CLAUDE_API_KEY_FOR_PR_REVIEW), pay per use. Runs on PRs to every base and again on every push to the PR; promotion
+# PRs (dev -> prod), drafts, forks and bot PRs are skipped by the called workflow. It only comments: not a required
+# check and not part of the merge criteria.
+# describe: false: describe appends a generated paragraph to the PR body, and the body's last line here must be the
+# sign-off (branch-gate checks it), so no base runs it. review_labels: false: no Review effort / Possible security
+# concern labels (.github/labels.json is the single source of labels). secondary_on_bases is the base the OpenCode Go
+# pr-agent runs on (dev): both share one comment identity. persistent_comments: false as in pr-agent.yml: persistent
+# mode rewrites "the latest comment with a pr-agent marker", whichever pr-agent wrote it, and would also rewrite the
+# comment in place on every push; here every push posts a new comment and neither overwrites the other.
+# The reference is pinned to a 40-character SHA with the tag in a trailing comment; when moving the SHA, check again
+# that the shared workflow still puts the untrusted-data statement into extra_instructions.
+name: PR Agent (Claude Haiku 5.5)
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-agent-claude:
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@070537914c9af4c2742b8fc5c7f63e06daef82ae # v1.3.3
+    with:
+      provider: anthropic
+      base_branches: '["*"]'
+      secondary_on_bases: '["dev"]'
+      describe: false
+      review_labels: false
+      persistent_comments: false
+      # Keep in step with pr-agent.yml (check-workflows.mjs compares them).
+      ignore_globs: '["tests/fixtures/**/*.wav"]'
+    secrets:
+      api_key: ${{ secrets.CLAUDE_API_KEY_FOR_PR_REVIEW }}

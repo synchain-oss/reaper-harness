@@ -27,8 +27,9 @@ function Get-HarnessDefaultGuiLock { $script:DefaultGui }
 
 # A full mutex name the harness accepts for -ExtraGuiLock: Local\ followed by 1..100 of [A-Za-z0-9._-].
 # Global\ is not accepted: an existing Global\ object that denies the current token cannot be opened, and silently
-# falling back to some other name would mean thinking a lock is held when it is not.
-function Test-HarnessLockName([string]$Name) { $Name -cmatch '^Local\\[A-Za-z0-9._-]{1,100}$' }
+# falling back to some other name would mean thinking a lock is held when it is not. \z and not $: in .NET $ also matches
+# right before a final line end, and a name with one in it is a different mutex.
+function Test-HarnessLockName([string]$Name) { $Name -cmatch '\ALocal\\[A-Za-z0-9._-]{1,100}\z' }
 
 # The lock set for one REAPER launch: the default lock plus the extras, de-duplicated (mutex names are case
 # sensitive) and sorted ordinally. A bad name is a usage error.
@@ -85,18 +86,35 @@ function Exit-HarnessLocks {
     }
 }
 
-# Runs the script block while holding the set; always releases (including on errors and Ctrl-C). Throws a
-# TimeoutException and does not run the block when the locks cannot be taken.
+# Whether a lock object from Enter-HarnessLocks holds this exact name right now: anything else (no object, an object of
+# another shape, a name it does not hold, a set already released) is false.
+function Test-HarnessLockHeld {
+    param($Lock, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Lock -or -not $Lock.PSObject.Properties['Held']) { return $false }
+    foreach ($entry in @($Lock.Held)) {
+        if ($null -eq $entry -or -not $entry.PSObject.Properties['Name'] -or -not $entry.PSObject.Properties['Mutex']) { continue }
+        if ($entry.Name -ceq $Name -and $entry.Mutex -is [System.Threading.Mutex] -and -not $entry.Mutex.SafeWaitHandle.IsClosed) { return $true }
+    }
+    $false
+}
+
+# Runs the script block while holding the set, handing it the lock object; always releases afterwards (including on
+# errors and Ctrl-C). Throws a TimeoutException and does not run the block when the locks cannot be taken.
+# Because it always releases, a caller that can start REAPER must not use it: when a launch reports StillRunning the
+# window may still be on the desktop and the locks have to stay held, which a block has no way to arrange. Such a caller
+# takes and releases them itself with Enter-HarnessLocks and Exit-HarnessLocks.
 function Invoke-WithHarnessLocks {
     param([Parameter(Mandatory)][string[]]$Names, [Parameter(Mandatory)][scriptblock]$ScriptBlock, [double]$TimeoutSeconds = 1800)
     $Lock = Enter-HarnessLocks -Names $Names -TimeoutSeconds $TimeoutSeconds
     if (-not $Lock) { throw [System.TimeoutException]::new("waited more than $TimeoutSeconds s for $($Names -join ', ')") }
-    try { & $ScriptBlock } finally { Exit-HarnessLocks $Lock }
+    try { & $ScriptBlock $Lock } finally { Exit-HarnessLocks $Lock }
 }
 
 # Starts a pwsh child that tries to take one exact mutex name without waiting; returns whether it could (taken and
 # released at once). Mutexes have thread affinity, so "held by someone else" cannot be observed inside this process.
 function Test-HarnessLockFree([Parameter(Mandatory)][string]$FullName) {
+    # The name goes into a command line of the child, so only a name of the accepted form gets that far
+    if (-not (Test-HarnessLockName $FullName)) { throw [System.InvalidOperationException]::new("USAGE: '$FullName' is not a full Local\ mutex name (Local\ followed by 1 to 100 of A-Z a-z 0-9 . _ -)") }
     $cmd = "`$m = [Threading.Mutex]::new(`$false, '$($FullName -replace "'", "''")'); try { `$got = `$m.WaitOne(0) } catch [Threading.AbandonedMutexException] { `$got = `$true }; if (`$got) { `$m.ReleaseMutex(); exit 0 } else { exit 1 }"
     $psi = [System.Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
     foreach ($a in '-NoProfile', '-NonInteractive', '-Command', $cmd) { $psi.ArgumentList.Add($a) }
@@ -123,5 +141,5 @@ function Start-HarnessLockChild([string]$Command) {
     [System.Diagnostics.Process]::Start($psi)
 }
 
-Export-ModuleMember -Function Get-HarnessDefaultGuiLock, Test-HarnessLockName, Get-HarnessGuiLockSet, Enter-HarnessLocks, Exit-HarnessLocks, Invoke-WithHarnessLocks,
+Export-ModuleMember -Function Get-HarnessDefaultGuiLock, Test-HarnessLockName, Get-HarnessGuiLockSet, Enter-HarnessLocks, Exit-HarnessLocks, Test-HarnessLockHeld, Invoke-WithHarnessLocks,
     Test-HarnessLockFree, Start-HarnessLockChild

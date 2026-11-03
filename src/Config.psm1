@@ -607,8 +607,9 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
     $o = [ordered]@{ id = [string]$Raw['id']; kind = $Kind; negative = $Negative; builtin = $false }
     if ($Negative) {
         $o.expect = [string]$Raw['expect']; $o.expectDetail = [string]$Raw['expectDetail']
-        try { $null = [regex]::new($o.expectDetail) } catch { $Problems.Add("${Path}: expectDetail is not a valid regex") }
-        if (-not $o.expectDetail) { $Problems.Add("${Path}: expectDetail must not be empty") }
+        # A regex that matches the empty text (nothing at all, .*, ^, a?) matches every reason: the case would pass on its outcome alone
+        try { if ([regex]::IsMatch('', $o.expectDetail)) { $Problems.Add("${Path}: expectDetail must not match an empty text: it would accept any reason") } }
+        catch { $Problems.Add("${Path}: expectDetail is not a valid regex") }
     }
     if ($Kind -cnotin $script:BuiltinKinds) {
         # Extension kinds: a string 'layout' is checked here and its plugin variants are learned like any other

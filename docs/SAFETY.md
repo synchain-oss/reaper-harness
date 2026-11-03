@@ -11,31 +11,82 @@ directory, `%APPDATA%\REAPER`, and writes your own configuration. So before ever
 
 1. `-CfgDir` must be an explicit absolute path starting with a drive letter. `\\?\` prefixes, `\\.\` device paths,
    UNC paths and admin shares such as `\\localhost\C$\` name the same directory in ways string comparison cannot
-   see, so they are refused.
+   see, so they are refused. The drive must be local: a mapped network drive can lead back to this very machine, and
+   a drive of unknown type, or one whose type cannot be read, proves nothing, so they are refused too. Both the path
+   as spelled and the path after expanding links have to pass, because a link can lead to either. A subst drive stands
+   for a local directory and stays allowed; rule 3 still sees where it points.
 2. The path, after expanding `..`, junctions and symbolic links, must not be under `%APPDATA%`.
 3. The directory itself and every parent up to the drive root is compared with `%APPDATA%` by file identity
    (volume serial number and file ID): this catches 8.3 short names, subst drives and any other spelling. A path
    whose identity cannot be read is refused: what cannot be proven is not allowed.
 4. The directory must hold the sentinel file `doctor.ps1 -Init` writes, and `reaper.ini`.
+5. Nothing in the directory may lead out of it, since REAPER and the harness read and write through those names. Any
+   link or junction is refused. So is any file with more than one name on its volume, which is what a hard link is:
+   writing it changes the file under its other name too, and that name can be anywhere and called anything, so its link
+   count decides and not a search for it. A count that cannot be read is refused, and so is a directory that cannot be
+   listed. The top level is checked before every start, because a link can appear at any time and that is where files
+   are opened by a fixed name. The whole tree, at every level and without following a link, is walked once per process
+   when the path is pinned: a configuration directory can hold thousands of entries and each start checks several
+   times, so that walk is left out of the check before every start on purpose. A hard link made below the top level
+   after the pin is therefore not seen by that process.
 
 `doctor.ps1 -Init` only takes over a directory that does not exist, an empty one, or one it initialised before.
 A directory with content but no sentinel (for example a portable REAPER) is refused and nothing is written; there
-is no switch to override that.
+is no switch to override that. The top level is checked by rule 5 there as well, before anything is written.
 
 The checked ini path is pinned into a read-only constant for the rest of the process; the `-cfgfile` argument can
 only come from it, and is checked again right before every start. A lint rule keeps the `-cfgfile` literal in
 exactly one place in the code (`src/Host.psm1`).
 
-Before and after every round the harness lists `%APPDATA%\REAPER` (file sizes and write times, read only). If
-anything changed the round is FAIL and no further round runs.
+`-ResultDir` is written during a run too, so it is refused (exit 64) when it is the default resource directory or below
+it: after expanding links, and by file identity for any other spelling. Nothing else is asked of it: unlike `-CfgDir` it
+may be elsewhere under `%APPDATA%` or on a network drive, because REAPER never runs from it.
+
+Arguments reach REAPER one by one, not as one command line, so a space in a path cannot split it and the private ini
+is always the element right after `-cfgfile`. Before the start, `-ReaperArgs` holding a double quote (a caller still
+quoting for itself, which would hand REAPER literal quotes) or naming the `-cfgfile` switch again is refused.
+
+Before and after every round the harness lists `%APPDATA%\REAPER` (file sizes and write times, read only), and the
+self-test does so before and after it runs. If anything was seen to change the round is FAIL and no further round runs. A file or
+directory that cannot be listed is recorded as `unreadable` (the directory itself under the name `.`), and a comparison
+with anything unreadable on either side is not "unchanged", also when both listings say the same: what cannot be read
+cannot be proven to have stayed as it was. The comparison names those entries. A round where that happens is
+INCOMPLETE, not FAIL (nothing was seen to change, it just cannot be shown that nothing did), and no further round runs.
+An entry listed once and unreadable the other time, and what was below it, counts as that same lack of evidence and not
+as a change. A change anywhere else in the directory is still FAIL, whatever could not be listed next to it.
+
+The self-test reaches a mapped network drive and a link count that cannot be read through stand-ins for the functions
+that read them, and uses a real letter with nothing mounted on it. A real mapped drive changes the machine, so one is
+only made on a hosted runner, where it is deleted again; everywhere else that case, like a symbolic link in a session
+without the privilege for one, is counted as not run for real in the summary line. What the self-test undoes on the
+machine (a deny entry, a subst drive, a mapped drive) is checked as undone, and a failure there turns a case red.
 
 ## Only its own processes, one GUI run at a time
 
 - The watchdog ends only the process ID it started, at the time limit (`Timeout`) or at a kill point (`Killed`).
   A `reaper.exe` that was already running makes the whole suite SKIPPED: the harness does not run alongside it,
-  and changes to the default resource directory could not be attributed. A `reaper.exe` left over after a round
-  makes the round FAIL.
-- Before every launch the harness takes its GUI lock, `Local\ReaperHarness-gui`, a kernel mutex. `-ExtraGuiLock
+  and changes to the default resource directory could not be attributed. After a round only the processes that round
+  started count, each recognised by its process ID and start time: one of them still there and reported by no launch
+  makes the round FAIL. A `reaper.exe` of somebody else that appeared during the round is not looked for, since the
+  locks are free between launches and it says nothing about this round, and neither is a later process that got the
+  same number.
+- A process the watchdog could not end is reported, not assumed gone: the launch result has `StillRunning`, true when
+  the stop failed or the process was still there after the wait, and false when it is gone (a process that had already
+  exited is no failure). A caller that sees `StillRunning` true records `INCOMPLETE`, does not release its GUI lock and
+  does not start the next launch: that window may still be on the desktop. `Invoke-WithHarnessLocks` always releases
+  when its block ends, so a caller that can start REAPER must not use it: it takes and releases the locks itself with
+  `Enter-HarnessLocks` and `Exit-HarnessLocks`. The run command does just that: `Invoke-HarnessLaunch` keeps the locks
+  and notes the process, every later launch of that context starts nothing and reports `Blocked`, the round is
+  INCOMPLETE and no further round runs. The kernel takes the locks back when the run's process ends.
+- Watching a process can fail too (its counters cannot be read, for one), and only the host knows the process at that
+  point. So nothing there throws past it: the process is ended by its PID as at a timeout, the status is `Error` with
+  the reason, the launch is INCOMPLETE, and a process that could not be ended is treated as above. The next launch never
+  starts next to it.
+- Before every launch the GUI lock has to be held: `Invoke-HarnessHost` enforces it, and without the object
+  `Enter-HarnessLocks` returned for a set holding the default lock it refuses before anything starts. The other two
+  checks before a launch, that no other `reaper.exe` is running and the listing of the default directory, are the job
+  of the run command, once at its start and once per round.
+- The default lock is `Local\ReaperHarness-gui`, a kernel mutex. `-ExtraGuiLock
   <Local\name>` adds more (for example the lock another tool on the same machine uses for its GUI tests); locks can
   only be added, never removed. All locks of a set are taken in a fixed order, all or nothing, so two runs with
   different sets cannot deadlock. If they cannot be taken within `limits.lockWaitSec` the scenario is INCOMPLETE
@@ -54,7 +105,7 @@ only those, are classified:
 | title | action |
 |---|---|
 | `REAPER Query` (save changes?) | answered No |
-| `Render…`, `Scanning…`, `Building peaks…` | progress windows, left alone |
+| `Render…`, `Scanning…`, `Building peaks…` | progress windows, left alone, unless the title has `fail` or `error` in it in any case: those report trouble and do not go away on their own, so they are stuck, `unknown-dialog` |
 | `About REAPER…` (the evaluation licence reminder) | never clicked away: stuck, `license-nag` |
 | `Project Load Warning`, `REAPER Error`, `Select files to save or delete`, `REAPER` (no audio device) | stuck, named |
 | anything else | stuck, `unknown-dialog` with the title (paths masked) |
@@ -67,7 +118,11 @@ only (about one in six in our runs); buy a licence or run again.
 - PASS, FAIL, INCOMPLETE (no conclusion: something did not run or could not be checked), SKIPPED (the suite did not
   run at all), REFUSED (a guard said no). INCOMPLETE is never counted as PASS; an empty set of outcomes is
   INCOMPLETE; SKIPPED mixed with PASS is INCOMPLETE.
-- A handler that throws gives INCOMPLETE, never PASS.
+- A handler that throws gives INCOMPLETE, never PASS. So does any other unexpected error past the guards: it is
+  something that could not be done, not a criterion that was checked, so the exit code is 2 and never 1. A round that
+  breaks still gets the checks of the end of a round (a change in the default resource directory, or a process it left,
+  is still FAIL), and no further round runs. A guard that refuses inside a round is treated the same way: REAPER may
+  have run already, so exit 64 (nothing was started) would be wrong, and leaving early would skip those checks.
 - Negative cases pass only when the outcome and the reason both match (see [CONFIG.md](CONFIG.md#negative-cases)).
   The built-in ones prove the comparer, the watchdog and the entry guards in every round.
 
@@ -141,13 +196,34 @@ that one block is read: other tracks, other plugins and file paths in it never r
 result file, and the block itself only goes into projects in the work directory. A JSFX shipped with the tool is
 copied into the private configuration directory and checked by the name REAPER shows and by its path there.
 
+A path in a recorded title is masked from its drive letter, `\\` or `//` up to the next double quote or the end of the
+title: a path can hold spaces, and a user name is often right after one. Everything else that reaches a result file or
+the console (reasons, exception messages, the facts of a row, usage errors) is masked the same way, see
+[RESULTS.md](RESULTS.md). The console names the result file without its directory.
+
+The self-test exercises this with real message boxes. A session without a desktop (a service, for example some CI
+runners) cannot show them: the self-test then states that those cases did not run. The classification in the table
+above is a pure function and is tested everywhere.
+
+## No evidence is not a pass
+
+- A render with no frames is `INCOMPLETE`, before every other criterion and with or without a tolerance: nothing was
+  compared, and two empty files being bit-identical says nothing.
+- A render whose data length is still the placeholder `0xFFFFFFFF` is unreadable, so `INCOMPLETE` in a comparison and on
+  its own alike: the writer never came back to fill in the length, so the file is not finished, and what is in it says
+  nothing about what is missing. REAPER's finished renders hold the real length.
+- With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven. A configuration
+  cannot get there: it needs at least one plugin (the schema refuses an empty `plugins`), so every run has a binary to
+  prove, and a test that only needs JSFX still names one.
+
 ## Scripts
 
 Every script runs under `Set-StrictMode -Version Latest`. PowerShell variable names are case insensitive, so a loop
 variable `$cfgDir` silently overwrites a parameter `$CfgDir`; a lint rule refuses variable names in one file that
 differ only by case. Scripts and data files must not contain invisible control characters (a stray carriage
-return inside a regex changes its meaning without showing in an editor or a diff). Only `src/Guard.psm1` and the
-self-test mention `APPDATA`. `.Keys` and `.Values` are never read as properties: on a dictionary with an entry named
+return inside a regex changes its meaning without showing in an editor or a diff). Only `src/Guard.psm1` and
+`tests/SelfTest.psm1` mention `APPDATA`; this exemption and the one for `src/Host.psm1` go by the path from the
+repository root, so another file of the same name has none. `.Keys` and `.Values` are never read as properties: on a dictionary with an entry named
 `Keys` (a configuration key, a file name, a variable name) the property returns that entry, and a check that walks the
 keys silently walks one value instead. The lint rule found exactly that in its own case scan: a script with a
 variable `$keys` was not scanned at all. `.get_Keys()`, `.get_Values()` and `.GetEnumerator()` cannot be shadowed.

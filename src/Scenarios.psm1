@@ -32,10 +32,40 @@ function New-HarnessOutcome([string]$Status, [string]$Detail = '', $Facts = $nul
     [pscustomobject]$o
 }
 
-# Paths in any text that leaves the machine (result json, console) are masked.
+# Paths in any text that leaves the machine (result json, console) are masked, from a drive letter, \\ or // on. A path
+# can hold spaces, apostrophes, semicolons and commas (a user name, for one), so none of those ends it; what does is a
+# character no Windows file name can have (a double quote, < > | ? *, a colon that is not followed by a slash) or the end
+# of the line. So whatever follows an unquoted path on its line goes with it: a sentence cut short is the price, a user
+# name in a result file is not. A path in single quotes, the way .NET and PowerShell write them, ends at the last single
+# quote of that stretch that a blank, a punctuation mark or the end of the text follows, and the sentence around it stays.
+# Any other single quote is an apostrophe in a name: with no closing quote the path is masked like an unquoted one.
+$script:PathStart = '(?:[A-Za-z]:[\\/]|\\\\|//)'
+$script:PathBody = '(?:[^"<>|?*:\r\n]|:[\\/])*'
+$script:QuoteEnd = '(?=[\s.,;:)\]]|$)'
 function Hide-HarnessPaths([AllowNull()][string]$Text) {
     if (-not $Text) { return '' }
-    $Text -replace '[A-Za-z]:[\\/][^\s"'';,]*', '<path>' -replace '\\\\[^\s"'';,]*', '<path>'
+    $Text -replace "'$($script:PathStart)$($script:PathBody)'$($script:QuoteEnd)", "'<path>'" -replace "$($script:PathStart)$($script:PathBody)", '<path>'
+}
+
+# The same for the facts of an outcome, which an extension fills with whatever it likes: every string at any depth, keys
+# too. Numbers and booleans stay as they are. Anything nested deeper than any real result is cut off, not written out.
+function Hide-HarnessFacts([AllowNull()]$Value, [int]$Depth = 0) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) { return Hide-HarnessPaths $Value }
+    if ($Value -is [bool] -or $Value -is [ValueType]) { return $Value }
+    if ($Depth -ge 32) { return '<too deep>' }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $props = [ordered]@{}
+        foreach ($p in $Value.PSObject.Properties) { $props[$p.Name] = $p.Value }
+        return Hide-HarnessFacts $props $Depth
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $masked = [ordered]@{}
+        foreach ($k in @($Value.get_Keys())) { $masked[(Hide-HarnessPaths ([string]$k))] = Hide-HarnessFacts $Value[$k] ($Depth + 1) }
+        return $masked
+    }
+    if ($Value -is [System.Collections.IEnumerable]) { return , @(foreach ($item in $Value) { , (Hide-HarnessFacts $item ($Depth + 1)) }) }
+    Hide-HarnessPaths ([string]$Value)
 }
 
 # The context of one round. Installed: rows from Install-HarnessPlugins. Locks: full mutex names (fixed order).
@@ -54,7 +84,9 @@ function New-HarnessContext {
         Locks = $Locks; LockWaitSec = [double]$Config.Limits.lockWaitSec; SkipMarkers = $SkipMarkers; LuaExtensions = $LuaExtensions; Kinds = $Kinds
         Installed = $byId; Jsfx = $jsById; States = ($States ?? [ordered]@{}); Blocks = @{}; Names = @{}; AddNames = @{}; Launches = 0; LaunchLog = [Collections.Generic.List[object]]::new()
         Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new()
-        Launcher = $null; ModuleSampler = $null # self-test only
+        Started = [Collections.Generic.List[object]]::new() # every process started: Pid, StartUtc
+        StillRunning = $null # set when the watchdog could not end a process: Pid, Label, Lock
+        Launcher = $null; ModuleSampler = $null; Stopper = $null # self-test only
         Api = $null # filled in below
     }
 }
@@ -80,37 +112,55 @@ function Set-HarnessAudioConfig([int]$Sr, [int]$Block, [bool]$AnticipativeFx = $
 
 function Get-HarnessSkipMarkerHit([string[]]$Markers) { @($Markers | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) | Select-Object -First 1 }
 
+# The locks of a launch whose process could not be ended stay held until this process exits, when the kernel takes them
+# back. Referenced from here so that no garbage collection closes them earlier, which would end them just the same.
+$script:KeptLocks = [Collections.Generic.List[object]]::new()
+
 # Starts REAPER once while holding every lock of the set. Lock not available -> Status LockBusy; a skip marker that
-# appeared since the preflight -> Status SkipMarker. In both cases REAPER is not started (the caller records
-# INCOMPLETE; the harness never runs REAPER without its locks).
+# appeared since the preflight -> Status SkipMarker; an earlier process of this context that could not be ended ->
+# Status Blocked. In all three REAPER is not started (the caller records INCOMPLETE; the harness never runs REAPER
+# without its locks, nor next to a REAPER it could not end). The launch that reports StillRunning keeps its locks: its
+# window may still be on the desktop, and the next start of any harness has to wait for it.
 function Invoke-HarnessLaunch {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs, [string]$Label = '')
-    $none = { param($s) [pscustomobject]@{ Status = $s; ExitCode = $null; Seconds = 0; Pid = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{}; SampleLost = @(); Modules = @{}; ModuleScans = 0; PluginModules = @() } }
+    $none = { param($s) [pscustomobject]@{ Status = $s; ExitCode = $null; Seconds = 0; Pid = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{}; SampleLost = @(); Modules = @{}; ModuleScans = 0; PluginModules = @(); StillRunning = $false } }
+    if ($Ctx.StillRunning) { return & $none 'Blocked' }
     if (Get-HarnessSkipMarkerHit $Ctx.SkipMarkers) { return & $none 'SkipMarker' }
     $lock = Enter-HarnessLocks -Names $Ctx.Locks -TimeoutSeconds $Ctx.LockWaitSec
     if (-not $lock) { return & $none 'LockBusy' }
+    $keepLock = $false
     try {
         # The marker is checked again while holding the locks: someone may have started a manual test meanwhile
         if (Get-HarnessSkipMarkerHit $Ctx.SkipMarkers) { return & $none 'SkipMarker' }
         $Ctx.Launches++
         $Watch = @($Ctx.Installed.get_Values() | ForEach-Object { $_.BinaryLeaf })
-        $extra = @{ WatchModules = $Watch }
+        $extra = @{ WatchModules = $Watch; StartedList = $Ctx.Started }
         if ($Ctx.Launcher) { $extra.Launcher = $Ctx.Launcher }
         if ($Ctx.ModuleSampler) { $extra.ModuleSampler = $Ctx.ModuleSampler }
-        $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work @HostArgs @extra
+        if ($Ctx.Stopper) { $extra.Stopper = $Ctx.Stopper }
+        $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work -Lock $lock @HostArgs @extra
         $Ctx.LaunchLog.Add([pscustomobject]@{ Label = $Label; Status = $Run.Status; Modules = $Run.Modules; PluginModules = @($Run.PluginModules) })
+        if ($Run.StillRunning) {
+            $keepLock = $true
+            $script:KeptLocks.Add($lock)
+            $Ctx.StillRunning = [pscustomobject]@{ Pid = $Run.Pid; Label = $Label; Lock = $lock }
+        }
         $Run
-    } finally { Exit-HarnessLocks $lock }
+    } finally { if (-not $keepLock) { Exit-HarnessLocks $lock } }
 }
 
-# Did this launch end normally; if not, how it ended (the start of these texts is what the negative cases match).
+# Did this launch end normally; if not, how it ended (the start of these texts is what the negative cases match, so a
+# process that is still there has a text of its own: the watchdog did not do its job).
 function Get-HarnessHostFailure($Run) {
+    if ($Run.PSObject.Properties['StillRunning'] -and $Run.StillRunning) { return "the watchdog could not end process $($Run.Pid) ($($Run.Status) after $($Run.Seconds) s): the GUI locks stay held and REAPER is not started again" }
     switch ($Run.Status) {
+        'Blocked' { return 'an earlier REAPER of this round could not be ended; REAPER was not started' }
         'LockBusy' { return 'the GUI locks were not available in time; REAPER was not started' }
         'SkipMarker' { return 'a skip marker appeared; REAPER was not started' }
         'Timeout' { return "timed out after $($Run.Seconds) s and was ended" }
         'Killed' { return "killed at the deadline ($($Run.Seconds) s)" }
         'Modal' { return "stuck on dialog $($Run.Modal) (seen: $($Run.Windows -join ', ')), ended" }
+        'Error' { return "watching the process failed and it was ended: $($Run.Error)" }
     }
     if ($Run.ExitCode -ne 0) { return "exit code $($Run.ExitCode)" }
     $null
@@ -162,7 +212,7 @@ function New-HarnessRun {
 
 # Renders a project. Also: further files the render must produce (stems).
 function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Label = 'render', [string[]]$Also = @()) {
-    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Label -HostArgs @{ ReaperArgs = @('-renderproject', "`"$Project`""); TimeoutSec = [double]$Ctx.Limits.renderTimeoutSec }
+    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Label -HostArgs @{ ReaperArgs = @('-renderproject', $Project); TimeoutSec = [double]$Ctx.Limits.renderTimeoutSec }
     $why = Get-HarnessHostFailure $Run
     if (-not $why -and -not (Test-Path -LiteralPath $Wav)) { $why = 'the render produced no file' }
     if (-not $why) {
@@ -185,7 +235,7 @@ function Invoke-HarnessLuaStep {
     foreach ($k in $Job.get_Keys()) { $full[$k] = $Job[$k] }
     Write-HarnessText -Path $jobFile -Text (ConvertTo-HarnessLuaTable $full)
     $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -HostArgs @{
-        ReaperArgs = @("`"$($Ctx.Driver)`""); Environment = @{ REAPER_HARNESS_JOB = $jobFile }; WatchFiles = $Watch
+        ReaperArgs = @($Ctx.Driver); Environment = @{ REAPER_HARNESS_JOB = $jobFile }; WatchFiles = $Watch
         TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
     }
     $report = @{}
@@ -472,13 +522,17 @@ function Invoke-HarnessInstancesScenario($Ctx, $s) {
 
 # A driver step that never finishes: timeout and kill must both end as INCOMPLETE, with the process gone and every
 # lock of the set free again. Returns INCOMPLETE when the watchdog did that; PASS (the hang ended by itself) or FAIL
-# (process still alive, lock still held) otherwise. A lock that is busy because another process took it right after
-# ours was released cannot be told apart from ours not being released: that is INCOMPLETE without the "free" text.
+# (process still alive though the launch says it is gone: the PID and its start time, since Windows hands out the number
+# again once a process is gone) otherwise. A process the watchdog says it could not end is
+# INCOMPLETE like every launch with StillRunning, and without the "free" text, so the negative case is not verified. A
+# lock that is busy because another process took it right after ours was released cannot be told apart from ours not
+# being released: that is INCOMPLETE without the "free" text as well.
 function Invoke-HarnessHangScenario($Ctx, $s) {
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step hang -TimeoutSec ([double]$s.timeoutSec) -KillAfterSec ([double]$s.killAfterSec)
     if (-not $lua.Why) { return New-HarnessOutcome PASS 'the driver that should hang finished normally (the negative case did not take effect)' }
-    if ($lua.Run.Status -in 'LockBusy', 'SkipMarker') { return New-HarnessOutcome INCOMPLETE "$($lua.Why); the watchdog could not be checked" }
-    if ($lua.Run.Pid -and (Get-Process -Id $lua.Run.Pid -ErrorAction SilentlyContinue)) { return New-HarnessOutcome FAIL "process $($lua.Run.Pid) is still alive" }
+    if ($lua.Run.Status -in 'LockBusy', 'SkipMarker', 'Blocked') { return New-HarnessOutcome INCOMPLETE "$($lua.Why); the watchdog could not be checked" }
+    if ($lua.Run.StillRunning) { return New-HarnessOutcome INCOMPLETE $lua.Why }
+    if (@(Get-HarnessOwnProcessesLeft -Started $Ctx.Started.ToArray() | Where-Object { $_.Pid -eq $lua.Run.Pid }).Count) { return New-HarnessOutcome FAIL "process $($lua.Run.Pid) is still alive" }
     $busy = @()
     $deadline = (Get-Date).AddSeconds(20)
     do {
@@ -523,7 +577,7 @@ function Invoke-HarnessScenario {
     $o | Add-Member -NotePropertyName Seconds -NotePropertyValue ([math]::Round($sw.Elapsed.TotalSeconds, 1)) -PassThru -Force
 }
 
-Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
+Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, Hide-HarnessFacts, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
     Get-HarnessLayout, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
     Get-HarnessScenarioKinds, Get-HarnessApi, Invoke-HarnessScenario, Get-HarnessSkipMarkerHit, Get-HarnessWorkrender, Test-HarnessStateProof, Invoke-HarnessCompare,
     Test-HarnessHostReadback, Test-HarnessReopenFacts

@@ -61,7 +61,8 @@ problem; they are listed with the scenario's path. The harness checks `id` (and,
 Called with the round context and the scenario. The scenario has `id`, `kind`, `raw` (the dictionary from the
 configuration, all fields), `layout` when it has one, and `negative`, `expect`, `expectDetail` for negative cases.
 Return an outcome made with `& $Ctx.Api.Outcome <PASS|FAIL|INCOMPLETE> '<one line>' [<facts>]`. Anything else, or
-an exception, is recorded as INCOMPLETE.
+an exception, is recorded as INCOMPLETE. The detail and every string in the facts go into the result file with local
+paths masked.
 
 Scenarios of extension kinds always get the learned plugin blocks: by the time `Run` is called, `$Ctx.Blocks` and
 `$Ctx.Names` (plugin id → the name REAPER shows) are filled, and the private copies are proven.
