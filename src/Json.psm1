@@ -74,7 +74,9 @@ function ConvertFrom-HarnessJson([Parameter(Mandatory)][AllowEmptyString()][stri
 }
 
 # Writes dictionaries, objects ([pscustomobject], properties in their order), arrays, strings, numbers and booleans
-# as JSON (dictionary keys in their own order).
+# as JSON (dictionary keys in their own order). JSON has no NaN or infinity: those are written as the strings "NaN",
+# "Infinity" and "-Infinity". Dates are written as ISO 8601 strings, enums by name; any other value type (an
+# extension's facts can hold anything) as its invariant text, so a result file is never lost to a value it cannot spell.
 function ConvertTo-HarnessJsonText {
     param([AllowNull()]$Value, [int]$Indent = 0, [int]$Level = 0)
     $pad = { param($n) ' ' * ($Indent * $n) }
@@ -101,8 +103,17 @@ function ConvertTo-HarnessJsonText {
         $items = foreach ($x in $arr) { (& $pad ($Level + 1)) + (ConvertTo-HarnessJsonText -Value $x -Indent $Indent -Level ($Level + 1)) }
         return '[' + $nl + ($items -join (',' + $nl)) + $nl + (& $pad $Level) + ']'
     }
-    if ($Value -is [double] -or $Value -is [single] -or $Value -is [decimal]) { return ([double]$Value).ToString('R', [Globalization.CultureInfo]::InvariantCulture) }
-    if ($Value -is [ValueType]) { return ([long]$Value).ToString([Globalization.CultureInfo]::InvariantCulture) }
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    if ($Value -is [double] -or $Value -is [single] -or $Value -is [decimal]) {
+        $d = [double]$Value
+        if ([double]::IsNaN($d)) { return [HarnessJson]::Quote('NaN') }
+        if ([double]::IsInfinity($d)) { return [HarnessJson]::Quote(($d -gt 0) ? 'Infinity' : '-Infinity') }
+        return $d.ToString('R', $inv)
+    }
+    if ($Value -is [DateTime] -or $Value -is [DateTimeOffset]) { return [HarnessJson]::Quote($Value.ToString('o', $inv)) }
+    if ($Value -is [Enum]) { return [HarnessJson]::Quote($Value.ToString()) }
+    if ($Value -is [ValueType] -and [int][Type]::GetTypeCode($Value.GetType()) -in 5..12) { return ([IFormattable]$Value).ToString($null, $inv) }
+    if ($Value -is [ValueType]) { return [HarnessJson]::Quote([Convert]::ToString($Value, $inv)) }
     throw "cannot write a $($Value.GetType().Name) as JSON"
 }
 

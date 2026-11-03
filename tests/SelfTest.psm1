@@ -283,8 +283,6 @@ function Get-CfgEntryCases([string]$Tmp) {
     $cases
 }
 
-# The drive the directory is on, as spelled and after expanding links. The types come through a stand-in: a real mapped
-# drive would change the machine, so one is only made on a hosted runner, which is thrown away afterwards.
 # The result directory is written during a run: never the default resource directory, whatever leads there
 function Get-ResultDirCases([string]$Tmp) {
     $cases = New-CaseList
@@ -305,6 +303,16 @@ function Get-ResultDirCases([string]$Tmp) {
     } finally { [IO.Directory]::Delete($toDefault); [IO.Directory]::Delete($toData) } # removes the links only
     & $add 'result directory: a sibling whose name only starts the same way, elsewhere under AppData, is fine' $false (-not (Test-Refused { Assert-HarnessResultDir "$defaultDir-results" }))
     & $add 'result directory: anywhere else is fine, it need not exist' $false (-not (Test-Refused { Assert-HarnessResultDir (Join-Path $Tmp 'results\not-yet') }))
+    # An identity that cannot be read proves nothing: that of the default resource directory, or of a parent on the way up
+    $errorFor = { param([string]$Bad) { param([string]$Path) ([IO.Path]::GetFullPath($Path).TrimEnd('\') -ieq $Bad) ? 'ERROR:5' : [HarnessFileId]::Get($Path) }.GetNewClosure() }
+    $unread = '*file identity*cannot be read (ERROR:5)*'
+    & $add 'result directory: a default resource directory whose file identity cannot be read is refused' $true (
+        Invoke-WithGuardStub 'Get-HarnessFileIdentity' (& $errorFor $defaultDir) { Test-Refused { Assert-HarnessResultDir (Join-Path $Tmp 'results\elsewhere') } $unread })
+    $upper = Join-Path $Tmp 'result-parent'
+    $null = New-Item -ItemType Directory -Force -Path $upper
+    & $add 'result directory: a parent whose file identity cannot be read is refused' $true (
+        Invoke-WithGuardStub 'Get-HarnessFileIdentity' (& $errorFor $upper) { Test-Refused { Assert-HarnessResultDir (Join-Path $upper 'results') } $unread })
+    & $add 'result directory: the same directory with every identity readable is fine' $false (-not (Test-Refused { Assert-HarnessResultDir (Join-Path $upper 'results') }))
     # No default resource directory yet: there is no identity to compare, only the path can say it
     $savedAppData = $env:APPDATA
     $fresh = Join-Path $Tmp 'appdata-without-reaper'
@@ -320,6 +328,8 @@ function Get-ResultDirCases([string]$Tmp) {
     $cases
 }
 
+# The drive the directory is on, as spelled and after expanding links. The types come through a stand-in: a real mapped
+# drive would change the machine, so one is only made on a hosted runner, which is thrown away afterwards.
 function Get-DriveCases([string]$Tmp) {
     $cases = New-CaseList
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
@@ -686,6 +696,15 @@ function Get-HostCases {
         $r = & $v '#32770' $true $trouble
         & $add "dialog: '$trouble' counts as stuck (unknown-dialog), not as a progress window" $true ($r.Action -eq 'Fatal' -and $r.Name -eq 'unknown-dialog')
     }
+    foreach ($window in 'VST3: Fixture Gain (Fixture Audio) - Track 1', 'VST3i: Synth (Vendor) - Track 2', 'VST: Old (Vendor)', 'VSTi: Old Synth (Vendor)', 'CLAP: Gain (Vendor)', 'CLAPi: Synth (Vendor)', 'JS: reaper-harness PDC delay - Track 1', 'FX: Track 1 "Voice"', 'VST3: Render failed (Vendor) - Track 1') {
+        $r = & $v '#32770' $true $window
+        & $add "dialog: '$window' is the floating window of a plugin or an FX chain, no dialog: left alone" $false ($r.Action -eq 'Benign' -and $r.Name -eq 'plugin-window')
+    }
+    # The prefix must start the title, in REAPER's case, with the blank after it; a dialog a plugin opens itself has a title of its own
+    foreach ($box in 'Fake VST3: x', ' VST3: x', 'vst3: x', 'VST3:x', 'JSFX: x', 'Fixture Gain - Activation', 'FXs: x') {
+        $r = & $v '#32770' $true $box
+        & $add "dialog: '$box' is no plugin window: stuck (unknown-dialog)" $true ($r.Action -eq 'Fatal' -and $r.Name -eq 'unknown-dialog')
+    }
     & $add 'dialog: the evaluation licence reminder is never clicked away; stuck, and named' $true (($nag = & $v '#32770' $true 'About REAPER v7.82/win64 rev 1 (Oct') -and $nag.Action -eq 'Fatal' -and $nag.Name -eq 'license-nag')
     foreach ($pair in @(@('Project Load Warning', 'project-load-warning'), @('REAPER Error', 'reaper-error'), @('Select files to save or delete', 'record-save-prompt'), @('REAPER', 'no-audio-device'), @('Brand New Box', 'unknown-dialog'))) {
         $r = & $v '#32770' $true $pair[0]
@@ -707,6 +726,9 @@ function Get-HostCases {
     & $add 'result text: an apostrophe does not end an unquoted path' $true (& $hide "in D:\o'brien\my files\a.wav" 'in <path>')
     & $add 'result text: an opening quote with no closing one: an apostrophe in a name leaves nothing of the path' $true (& $hide "'D:\Jane O'Neil\x y.wav: boom" "'<path>: boom")
     & $add 'result text: an apostrophe further on in the sentence is no closing quote' $true (& $hide "'D:\my files\a.wav' isn't there" "'<path>' isn't there")
+    & $add 'result text: an apostrophe and a blank inside a name, the path going on after it: nothing of the name is left' $true (& $hide "'D:\Jane O' Neil\x.wav: boom" "'<path>: boom")
+    & $add 'result text: a closing quote with another path later on its line: the line goes with it, nothing of either path is left' $true ((& $hide "'D:\a b' then D:\c d" "'<path>") -and (& $hide "'D:\a b' then //host/c" "'<path>"))
+    & $add 'result text: a closing quote with no separator after it keeps the sentence, on this line only' $false (& $hide "'D:\a b' now`nnext D:\c" "'<path>' now`nnext <path>")
     & $add 'result text: a closing quote before punctuation or at the end of the text keeps the sentence' $true ((& $hide "at 'D:\a b'" "at '<path>'") -and (& $hide "'D:\a b': boom" "'<path>': boom") -and (& $hide "'D:\a b', then" "'<path>', then") -and (& $hide "'D:\a b'. Then" "'<path>'. Then") -and (& $hide "('D:\a b')" "('<path>')") -and (& $hide "['D:\a b']" "['<path>']") -and (& $hide "'D:\a b'; then" "'<path>'; then"))
     & $add 'result text: a semicolon and a comma do not end a path' $true (& $hide 'in D:\a;b c,d\e.wav' 'in <path>')
     & $add 'result text: a colon ends a path (a Lua error names the file and the line) and the message stays' $true (& $hide 'D:\my ext\a b.lua:12: attempt to index' '<path>:12: attempt to index')
@@ -723,6 +745,10 @@ function Get-HostCases {
     & $add 'facts: numbers, booleans and nothing stay what they are, and lists stay lists' $false ($factsOut.n -eq 3 -and $factsOut.n -is [int] -and $factsOut.ok -is [bool] -and $factsOut.ok -and $null -eq $factsOut.none -and (ConvertTo-HarnessJsonText $factsOut.one) -ceq '["<path>"]' -and (ConvertTo-HarnessJsonText $factsOut.empty) -ceq '[]' -and $factsOut.deep.list[0] -ceq 'a')
     $deepFacts = 'D:\my files\bottom'
     foreach ($level in 1..40) { $deepFacts = [ordered]@{ down = $deepFacts } }
+    $twoStrings = [Collections.Generic.KeyValuePair[string, string]]::new('file', 'D:\my files\f')
+    $kept = Hide-HarnessFacts ([ordered]@{ pair = $twoStrings; when = [DateTime]::new(2026, 11, 2, 0, 0, 0, [DateTimeKind]::Utc); day = [DayOfWeek]::Monday; c = [char]'x'; big = [uint64]::MaxValue; half = 0.5 })
+    & $add 'facts: a value type whose text can hold a path (a pair of strings) is masked as text; dates, enums, characters and numbers stay what they are' $true (
+        $kept.pair -ceq '[file, <path>' -and $kept.when -is [DateTime] -and $kept.day -is [DayOfWeek] -and $kept.c -is [char] -and $kept.big -is [uint64] -and $kept.half -is [double])
     & $add 'facts: nesting deeper than any real result is cut off, without a path' $true (($deepText = ConvertTo-HarnessJsonText (Hide-HarnessFacts $deepFacts)) -and $deepText -clike '*<too deep>*' -and $deepText -cnotlike '*my files*')
     & $add 'dialog title: a drive path with spaces is masked to its end, nothing of a user name is left' $true ((ConvertTo-HarnessSafeTitle "Error in $spaced") -ceq 'Error in <path>')
     & $add 'dialog title: a UNC path with spaces is masked to its end' $true ((ConvertTo-HarnessSafeTitle 'Error in \\server\my share\a b.rpp') -ceq 'Error in <path>')
@@ -1056,11 +1082,13 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a range of three numbers'; E = { param($c) (& $scenario $c 'routing')['energyRatioDb']['L/R'] = @(1, 2, 3) }; M = 'has more than 2 items' }
         @{ L = 'savereopen with 0 cycles'; E = { param($c) (& $scenario $c 'states-reopen')['cycles'] = 0 }; M = 'cycles' }
         @{ L = 'an unknown host setting'; E = { param($c) (& $scenario $c 'pdc')['host']['lowLatency'] = $true }; M = "unknown key 'lowLatency'" }
+        @{ L = 'a render mode axis in the matrix of a device scenario (the device step renders nothing)'; E = { param($c) (& $scenario $c 'bus-device')['matrix'] = [ordered]@{ mode = @('offline', '1x') } }; M = "matrix: unknown key 'mode'" }
     )
     foreach ($mu in $mutations) {
         $found = & $problems $mu.E
         & $add "configuration: $($mu.L) is a problem ($($found -join ' | '))" $true (@($found | Where-Object { $_ -match [regex]::Escape($mu.M) }).Count -gt 0)
     }
+    & $add 'configuration: a device scenario still takes a matrix of rates and block sizes' $false (@(& $problems { param($c) $d = & $scenario $c 'bus-device'; $d.Remove('block'); $d['matrix'] = [ordered]@{ sr = @(44100, 48000); block = @(64, 1024) } }).Count -eq 0)
     & $add 'configuration: every problem is listed at once, not just the first' $true (@(& $problems { param($c) $c['surprise'] = 1; $c['signal']['seconds'] = 'long' }).Count -ge 2)
     $badFile = Join-Path $Tmp 'config-bad.json'
     [IO.File]::WriteAllText($badFile, $text.Replace('"schema": 1,', '"schema": 1, "surprise": true,').Replace('"ext/', '"../fixtures/ext/'))
@@ -1080,6 +1108,13 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     & $add "configuration: parameters named Keys, Values, Count and count are four parameters ($(@($r.Problems) -join ' | '))" $false (
         @($r.Problems).Count -eq 0 -and $null -ne $fx0 -and (@($fx0.Params.get_Keys()) -join ',') -ceq 'count,Count,Keys,Values' -and $fx0.Variant -ceq 'gain|count=1;Count=0.75;Keys=0.25;Values=0.5')
     $jsonText = '{"Count":0,"Keys":{"Values":[1]},"Values":"v"}'
+    $unusual = [ordered]@{ nan = [double]::NaN; up = [double]::PositiveInfinity; down = [double]::NegativeInfinity; f = [single]::NaN; list = @(1, [double]::NaN)
+        when = [DateTime]::new(2026, 11, 2, 3, 4, 5, [DateTimeKind]::Utc); off = [DateTimeOffset]::new(2026, 11, 2, 3, 4, 5, [TimeSpan]::FromHours(1)); day = [DayOfWeek]::Monday
+        c = [char]'x'; big = [uint64]::MaxValue; small = [byte]7; id = [guid]'00000000-0000-0000-0000-000000000001'; span = [TimeSpan]::FromSeconds(90); half = 0.5; n = 3 }
+    $unusualText = try { ConvertTo-HarnessJsonText -Value $unusual } catch { "threw: $($_.Exception.Message)" }
+    $want = '{"nan":"NaN","up":"Infinity","down":"-Infinity","f":"NaN","list":[1, "NaN"],"when":"2026-11-02T03:04:05.0000000Z","off":"2026-11-02T03:04:05.0000000+01:00","day":"Monday","c":"x","big":18446744073709551615,"small":7,"id":"00000000-0000-0000-0000-000000000001","span":"00:01:30","half":0.5,"n":3}'
+    & $add "JSON: NaN and infinities and dates are written as strings, enums by name, other value types as their text, numbers as numbers ($unusualText)" $true ($unusualText -ceq $want)
+    & $add 'JSON: what is written for them reads back as JSON' $false $(try { $null = ConvertFrom-HarnessJson $unusualText; $true } catch { $false })
     & $add 'JSON: keys named Count, Keys and Values are written back as they were read' $false ((ConvertTo-HarnessJsonText -Value (ConvertFrom-HarnessJson $jsonText)) -ceq $jsonText)
     # Selection
     $picked = Select-HarnessScenarios -Config $conf
@@ -1122,13 +1157,13 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     $agree = { param([string]$Json, [bool]$Accepted) $schemaOk = try { Test-Json -Json $Json -Schema $schemaText -ErrorAction Stop } catch { $false }; $schemaOk -eq $Accepted }
     & $add 'schema: Test-Json accepts the fixture configuration, like the validator' $false (& $agree $text $true)
     $structural = @($mutations | Where-Object { $_.L -in 'an unknown key at the top', 'an unknown key in a scenario', 'schema 2', 'a string where a number belongs', 'a sample rate out of range', 'a scenario id that breaks the pattern', 'an unknown expected outcome', 'a negative case without expectDetail',
-            'a state with both a template and a state file', 'a template state without the FX number', 'an unknown JSFX', 'an unknown send mode', 'a pan out of range', 'a range of one number', 'a range of three numbers', 'savereopen with 0 cycles', 'an unknown host setting' })
+            'a state with both a template and a state file', 'a template state without the FX number', 'an unknown JSFX', 'an unknown send mode', 'a pan out of range', 'a range of one number', 'a range of three numbers', 'savereopen with 0 cycles', 'an unknown host setting', 'a render mode axis in the matrix of a device scenario (the device step renders nothing)' })
     $disagree = @(foreach ($mu in $structural) {
             $raw = ConvertFrom-HarnessJson $text
             & $mu.E $raw
             if (-not (& $agree (ConvertTo-HarnessJsonText -Value $raw) $false)) { $mu.L }
         })
-    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 17 -and $disagree.Count -eq 0)
+    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 18 -and $disagree.Count -eq 0)
     $cases
 }
 

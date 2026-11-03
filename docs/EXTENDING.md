@@ -62,7 +62,9 @@ Called with the round context and the scenario. The scenario has `id`, `kind`, `
 configuration, all fields), `layout` when it has one, and `negative`, `expect`, `expectDetail` for negative cases.
 Return an outcome made with `& $Ctx.Api.Outcome <PASS|FAIL|INCOMPLETE> '<one line>' [<facts>]`. Anything else, or
 an exception, is recorded as INCOMPLETE. The detail and every string in the facts go into the result file with local
-paths masked.
+paths masked. Numbers, booleans, characters, dates and enums in the facts stay what they are; any other value type is
+written as its text, masked the same way. JSON has no NaN or infinity, so those are written as the strings `"NaN"`,
+`"Infinity"` and `"-Infinity"`, and dates as ISO 8601 strings.
 
 Scenarios of extension kinds always get the learned plugin blocks: by the time `Run` is called, `$Ctx.Blocks` and
 `$Ctx.Names` (plugin id → the name REAPER shows) are filled, and the private copies are proven.

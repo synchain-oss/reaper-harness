@@ -224,7 +224,8 @@ is the default. `device` reads `workrender` back from the running REAPER and che
 
 `"matrix": { "mode": [...], "sr": [...], "block": [...] }` expands one scenario into the cross product. The
 expanded ids are `<id>-<mode>-<sr>-<block>` for the axes present, in that order (for example `chain-offline-48000`).
-An axis cannot also be given directly. Negative cases cannot have a matrix.
+An axis cannot also be given directly. Negative cases cannot have a matrix. A `device` scenario renders nothing, so
+its matrix has no `mode` axis (a usage error), only `sr` and `block`.
 
 ### render
 

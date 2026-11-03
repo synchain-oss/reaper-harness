@@ -520,6 +520,34 @@
       },
       "additionalProperties": false
     },
+    "deviceMatrix": {
+      "type": "object",
+      "properties": {
+        "sr": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 8000,
+            "maximum": 384000,
+            "description": "sample rate in Hz"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "block": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "description": "audio device block size in samples"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
     "host": {
       "type": "object",
       "properties": {
@@ -858,7 +886,7 @@
                 "$ref": "#/$defs/host"
               },
               "matrix": {
-                "$ref": "#/$defs/matrix"
+                "$ref": "#/$defs/deviceMatrix"
               }
             },
             "required": ["id", "kind", "layout"],

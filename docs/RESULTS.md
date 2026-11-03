@@ -10,6 +10,8 @@ stays a FAIL (exit 1), anything else has no record and so no conclusion (exit 2)
 Local paths never appear in a result file: drive paths and UNC paths in any text, the `facts` of a row included, are
 replaced by `<path>`. A path can hold spaces, apostrophes, semicolons and commas, so what ends it is a closing quote,
 a character no file name can have, or the end of the line; whatever follows an unquoted path on its line goes with it.
+A single quote is only taken as the closing one when no `\` or `/` comes after it on that line (otherwise it was an
+apostrophe inside a name, and the path goes on).
 Plugin hashes are cut to their first 12 hex digits.
 
 ## Top level

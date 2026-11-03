@@ -166,17 +166,22 @@ function Assert-HarnessOutsideDefaultDir([string]$CfgDir) {
 
 # -ResultDir and the work files below it are written during a run, so it must not be the default resource directory or
 # below it: after expanding links, and by file identity for any other spelling (a subst drive). A part that does not
-# exist yet has no identity, and without a default resource directory the path is all there is. Nothing else is asked of
-# it: unlike -CfgDir it may be elsewhere under AppData or on a network drive, because REAPER never runs from it.
+# exist yet has no identity, and without a default resource directory the path is all there is. An identity that cannot
+# be read proves nothing and is refused, as for -CfgDir: that of the default resource directory (it exists, so the
+# comparison has to be made), and that of the directory or of any parent on the way to the drive root. Nothing else is
+# asked of it: unlike -CfgDir it may be elsewhere under AppData or on a network drive, because REAPER never runs from it.
 function Assert-HarnessResultDir([string]$ResultDir) {
     $default = Get-HarnessDefaultCfgDir
     $real = Resolve-HarnessRealPath $ResultDir
     $said = '-ResultDir is the default REAPER resource directory, or below it, or points there: that directory is never touched'
     if (Test-HarnessUnder $real (Resolve-HarnessRealPath $default)) { Stop-Refuse $said }
     $baseId = Get-HarnessFileIdentity $default
-    if (-not $baseId -or $baseId.StartsWith('ERROR:')) { return }
+    if (-not $baseId) { return }
+    if ($baseId.StartsWith('ERROR:')) { Stop-Refuse "the default REAPER resource directory exists but its file identity cannot be read ($baseId), so -ResultDir cannot be proven not to be it" }
     for ($p = $real; $p; $p = [IO.Path]::GetDirectoryName($p)) {
-        if ((Get-HarnessFileIdentity $p) -ceq $baseId) { Stop-Refuse "$said (detected by file identity)" }
+        $id = Get-HarnessFileIdentity $p
+        if ($id -and $id.StartsWith('ERROR:')) { Stop-Refuse "the file identity of -ResultDir or one of its parents cannot be read ($id), so it cannot be proven not to be the default REAPER resource directory" }
+        if ($id -ceq $baseId) { Stop-Refuse "$said (detected by file identity)" }
     }
 }
 

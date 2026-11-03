@@ -94,6 +94,8 @@ function New-HarnessSpec {
     $bypass = SAny @((SBool), (SArr (SStr $script:IdPattern) -Min 1 -Unique)) 'true (every FX) or a list of plugin ids'
     $defs.compareVariant = SObj ([ordered]@{ layout = (SStr $script:IdPattern); block = $block; mode = $mode; bypass = $bypass })
     $defs.matrix = SObj ([ordered]@{ mode = (SArr $mode -Min 1 -Unique); sr = (SArr $rate -Min 1 -Unique); block = (SArr $block -Min 1 -Unique) })
+    # The device step renders nothing, so a render mode would only multiply identical scenarios
+    $defs.deviceMatrix = SObj ([ordered]@{ sr = (SArr $rate -Min 1 -Unique); block = (SArr $block -Min 1 -Unique) })
     $defs.host = SObj ([ordered]@{ anticipativeFx = (SBool -Doc 'REAPER''s anticipative FX processing (default true, as REAPER ships)') })
     # Criteria of one render file, also used by stems
     $criteria = [ordered]@{
@@ -122,7 +124,7 @@ function New-HarnessSpec {
     $renderProps.matrix = SRef matrix
     $p = & $common 'render'; foreach ($e in $renderProps.GetEnumerator()) { $p[$e.Key] = $e.Value }
     $Kinds.render = SObj $p @('id', 'kind', 'layout')
-    $p = & $common 'device'; foreach ($e in ([ordered]@{ layout = (SStr $script:IdPattern); sr = $rate; block = $block; host = (SRef host); matrix = (SRef matrix) }).GetEnumerator()) { $p[$e.Key] = $e.Value }
+    $p = & $common 'device'; foreach ($e in ([ordered]@{ layout = (SStr $script:IdPattern); sr = $rate; block = $block; host = (SRef host); matrix = (SRef deviceMatrix) }).GetEnumerator()) { $p[$e.Key] = $e.Value }
     $Kinds.device = SObj $p @('id', 'kind', 'layout')
     $p = & $common 'savereopen'
     foreach ($e in ([ordered]@{ layout = (SStr $script:IdPattern); mode = $mode; sr = $rate; block = $block; bypass = $bypass; cycles = (SInt 1 100 -Doc 'save and reopen this many times, default 1'); host = (SRef host); matrix = (SRef matrix) }).GetEnumerator()) { $p[$e.Key] = $e.Value }
@@ -739,7 +741,7 @@ function Test-HarnessConfigData {
             if ($section -eq 'negative' -and $item.Contains('matrix')) { $Problems.Add("${Path}: matrix is not allowed in negative cases"); continue }
             if ($item.Contains('matrix')) {
                 foreach ($axis in $item['matrix'].get_Keys()) { if ($item.Contains($axis)) { $Problems.Add("${Path}: '$axis' is given both directly and in matrix") } }
-                if ($item['matrix'].get_Count() -eq 0) { $Problems.Add("${Path}.matrix: needs at least one of mode, sr, block") }
+                if ($item['matrix'].get_Count() -eq 0) { $Problems.Add("${Path}.matrix: needs at least one of mode, sr, block (device: sr, block)") }
             }
             foreach ($expanded in (Expand-Matrix $item)) { $all.Add((ConvertTo-Scenario $expanded $Path ($section -eq 'negative') $Layouts $Plugins $Limits $Problems $Kinds)) }
         }

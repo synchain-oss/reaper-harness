@@ -37,22 +37,29 @@ function New-HarnessOutcome([string]$Status, [string]$Detail = '', $Facts = $nul
 # character no Windows file name can have (a double quote, < > | ? *, a colon that is not followed by a slash) or the end
 # of the line. So whatever follows an unquoted path on its line goes with it: a sentence cut short is the price, a user
 # name in a result file is not. A path in single quotes, the way .NET and PowerShell write them, ends at the last single
-# quote of that stretch that a blank, a punctuation mark or the end of the text follows, and the sentence around it stays.
-# Any other single quote is an apostrophe in a name: with no closing quote the path is masked like an unquoted one.
+# quote of that stretch that a blank, a punctuation mark or the end of the text follows, and the sentence around it stays,
+# unless a \ or / still comes after it on that line: then that quote was an apostrophe followed by a blank inside a name
+# ('D:\Jane O' Neil\x.wav' goes on past it), and the whole stretch is masked like an unquoted path, the rest of the line
+# with it. Any other single quote is an apostrophe in a name: with no closing quote the path is masked like an unquoted
+# one. What cannot be told apart: an apostrophe followed by a blank in the last part of a path, with no separator after
+# it on the line ('D:\a\Jane O' Neil.wav'), reads as the closing quote, and the end of that file name stays in the text.
 $script:PathStart = '(?:[A-Za-z]:[\\/]|\\\\|//)'
 $script:PathBody = '(?:[^"<>|?*:\r\n]|:[\\/])*'
-$script:QuoteEnd = '(?=[\s.,;:)\]]|$)'
+$script:QuoteEnd = '(?=[\s.,;:)\]]|$)(?![^\r\n]*[\\/])'
 function Hide-HarnessPaths([AllowNull()][string]$Text) {
     if (-not $Text) { return '' }
     $Text -replace "'$($script:PathStart)$($script:PathBody)'$($script:QuoteEnd)", "'<path>'" -replace "$($script:PathStart)$($script:PathBody)", '<path>'
 }
 
 # The same for the facts of an outcome, which an extension fills with whatever it likes: every string at any depth, keys
-# too. Numbers and booleans stay as they are. Anything nested deeper than any real result is cut off, not written out.
+# too. Numbers, booleans, characters, dates and enums stay as they are; any other value type (a pair of strings, for one)
+# can hold a path in its text, so it is masked as text. Anything nested deeper than any real result is cut off, not
+# written out.
 function Hide-HarnessFacts([AllowNull()]$Value, [int]$Depth = 0) {
     if ($null -eq $Value) { return $null }
     if ($Value -is [string]) { return Hide-HarnessPaths $Value }
-    if ($Value -is [bool] -or $Value -is [ValueType]) { return $Value }
+    if ($Value -is [bool] -or $Value -is [decimal] -or $Value -is [DateTime] -or $Value -is [DateTimeOffset] -or $Value -is [Enum] -or ($Value -is [ValueType] -and $Value.GetType().IsPrimitive)) { return $Value }
+    if ($Value -is [ValueType]) { return Hide-HarnessPaths ([string]$Value) }
     if ($Depth -ge 32) { return '<too deep>' }
     if ($Value -is [System.Management.Automation.PSCustomObject]) {
         $props = [ordered]@{}
