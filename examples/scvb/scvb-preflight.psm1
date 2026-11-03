@@ -28,7 +28,7 @@ function Register-HarnessExtension {
                 } catch [IO.FileNotFoundException] {
                     # no such section: no SCVB instance of this group in this session
                 } catch {
-                    "the SCVB section of group $group could not be probed ($($_.Exception.GetType().Name)), so it may be live"
+                    "the SCVB section of group $group could not be probed ($($_.Exception.GetBaseException().GetType().Name)), so it may be live"
                 }
             }
         }
