@@ -585,7 +585,7 @@ function Get-HarnessApi {
         Outcome = ${function:New-HarnessOutcome}; NewRun = ${function:New-HarnessRun}; Render = ${function:Invoke-HarnessRender}; LuaStep = ${function:Invoke-HarnessLuaStep}
         Compare = ${function:Compare-HarnessWavFiles}; HostFailure = ${function:Get-HarnessHostFailure}; Layout = ${function:Get-HarnessLayout}; Signal = ${function:Get-HarnessSignal}
         Reference = ${function:Get-HarnessReference}; HidePaths = ${function:Hide-HarnessPaths}; FxReport = ${function:Test-HarnessFxReport}; ParamReads = ${function:Get-HarnessParamReads}
-        Judge = ${function:Invoke-HarnessCompare}; StateProof = ${function:Test-HarnessStateProof}
+        Judge = ${function:Invoke-HarnessCompare}; StateProof = ${function:Test-HarnessStateProof}; FxBlocks = ${function:Get-HarnessFxBlocks}
     }
 }
 

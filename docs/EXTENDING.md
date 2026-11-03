@@ -75,11 +75,13 @@ Scenarios of extension kinds always get the learned plugin blocks: by the time `
 |---|---|
 | `Outcome` | `& $Ctx.Api.Outcome PASS 'detail' $facts` |
 | `Layout` | `& $Ctx.Api.Layout $Ctx '<layout id>'`: the normalised layout |
-| `NewRun` | `& $Ctx.Api.NewRun -Ctx $Ctx -Name <file name> -Layout <layout> [-Sr] [-Block] [-Mode] [-Channels] [-Bypass] [-NoFx]`: writes the project (from the learned blocks) and sets the audio device; returns `Project` and `Wav` |
-| `Render` | `& $Ctx.Api.Render $Ctx <project> <wav>`: one render launch; returns `Run` and `Why` (empty when it worked) |
+| `NewRun` | `& $Ctx.Api.NewRun -Ctx $Ctx -Name <file name> -Layout <layout> [-Sr] [-Block] [-Mode] [-Channels] [-Bypass] [-NoFx] [-Stems <track names>] [-AnticipativeFx <bool>]`: writes the project (from the learned blocks) and sets the audio device (anticipative FX on unless `-AnticipativeFx $false`); returns `Project`, `Wav` (the master) and `Stems` (track name → file). The master is `<Name>.wav`; with stems REAPER writes `<Name>-stem-<track>.wav` per stem and the master as `<Name>-stem-Master.wav`. Start your names with the scenario id: names starting with `_` are the harness's own |
+| `Render` | `& $Ctx.Api.Render $Ctx <project> <wav> [-Also <files>]`: one render launch; returns `Run` and `Why` (empty when it worked; a file of `-Also`, such as the stems of `NewRun`, that the render did not produce is a reason too) |
 | `LuaStep` | `& $Ctx.Api.LuaStep -Ctx $Ctx -Name <file name> -Step <step> [-Job @{...}] [-Watch @{ label = <mark file> }] [-TimeoutSec]`: one driver launch; returns `Run`, `Result` (the key=value lines as a hashtable) and `Why` |
 | `Compare` | `& $Ctx.Api.Compare -A <wav> -B <wav> [-MaxDiffDb] [-Lag] [-PeakMaxDb] [-NotSilent]`: the comparer; returns an outcome |
-| `Reference` | `& $Ctx.Api.Reference $Ctx <layout id> <sr> <block> <mode> <channels>`: the dry reference render, cached per round |
+| `Reference` | `& $Ctx.Api.Reference $Ctx <layout id> <sr> <block> <mode> <channels> [-Stems <track names>] [-AnticipativeFx <bool>]`: the dry reference render, cached per round; returns `Wav`, `Stems` and `Why` (empty when it worked) |
+| `Judge` | `& $Ctx.Api.Judge $Ctx <criteria> <reference wav, or '' for none> <test wav>`: one file against criteria as `render` judges it (an object with all of `maxDiffDb`, `lag`, `peakMaxDb`, `notSilent`, `rmsDb`, `energyRatioDb`, `rmsChangeDb`, `$null` for those not used; without a reference the file is judged on its own); returns an outcome |
+| `StateProof`, `FxBlocks` | `& $Ctx.Api.StateProof -Layout <layout> -Blocks $Ctx.Blocks -States $Ctx.States -Saved (& $Ctx.Api.FxBlocks <text of a project REAPER saved>)`: whether every FX with a named state holds it, as `device` and `savereopen` check; returns `Problems` and `Proven` |
 | `FxReport`, `ParamReads` | check a driver report of tracks and FX against a layout, as `device` does |
 | `HostFailure` | the one-line reason for a launch that did not end normally |
 | `HidePaths` | masks local paths in a text |

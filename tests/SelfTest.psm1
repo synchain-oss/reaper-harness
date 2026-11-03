@@ -1450,6 +1450,11 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
     $sp = Test-HarnessStateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (& $spSaved)
     & $add 'state proof: blocks saved back as loaded (the header line aside) prove both states, named with their hashes' $false ($sp.Problems.Count -eq 0 -and ($sp.Proven -join ',') -ceq 'gain quiet aaaaaaaaaaaa,gain loud bbbbbbbbbbbb')
     & $add 'state proof: a block saved back changed is a problem naming the track' $true (@((Test-HarnessStateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (& $spSaved 'Q' 'X')).Problems -match "^track 'Loud' FX 1 .*differs").Count -eq 1)
+    # The same through the extension API, from the text of the saved project
+    $api = Get-HarnessApi
+    $one = { param($name, $body) "  <TRACK`n    NAME `"$name`"`n    <FXCHAIN`n      BYPASS 0 0 0`n      <VST `"VST3: x`" x 0 `"`" 1{0123456789ABCDEF0123456789ABCDEF} `"`"`n        $body`n      >`n    >`n  >`n" }
+    $apiProof = & $api.StateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (& $api.FxBlocks ("<REAPER_PROJECT`n" + (& $one 'Quiet' 'Q') + (& $one 'Loud' 'L') + ">`n"))
+    & $add 'extension API: StateProof over FxBlocks of a saved project text proves the states as device does' $false ($apiProof.Problems.Count -eq 0 -and ($apiProof.Proven -join ',') -ceq 'gain quiet aaaaaaaaaaaa,gain loud bbbbbbbbbbbb')
     & $add 'state proof: state FX missing from the saved project are problems' $true (@((Test-HarnessStateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (Get-HarnessFxBlocks "<REAPER_PROJECT`n>`n")).Problems -match 'not in the saved project').Count -eq 2)
     $cases
 }
