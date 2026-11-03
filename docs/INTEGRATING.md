@@ -36,9 +36,11 @@ pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Init
   refuses, and there is no option to override that.
 - Keep one directory per machine and reuse it. It is not part of your project and never goes into a repository.
 - The first start in a new directory lists every plugin file on the machine for the scan shield (see SAFETY.md),
-  which can take a minute. If that is too slow you may copy a scan cache (`reaper-vstplugins64.ini`) into the
-  private directory: copy it, never move or link it, and only read the source. The cache names every plugin
-  installed on the machine, so it never goes into a repository, a result or a log; the harness never puts it there.
+  which can take a minute; the private scan cache it builds makes later starts fast. Do not copy a scan cache from
+  another REAPER into it: a real cache holds full entries for the plugins installed on the machine, which the shield
+  then leaves as they are, and on most machines the only one is in the default resource directory, which tests leave
+  alone. The private cache names every plugin file on the machine, so it never goes into a repository, a result or
+  a log; the harness never puts it there.
 
 ## 3. Write the configuration
 
