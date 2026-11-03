@@ -207,8 +207,11 @@ bit-identical; that is right only for a plugin documented to pass audio through 
     reopens the project with every FX bypassed (`"bypass": true`): every state must still be saved back unchanged,
     and the reopened render, which then does not depend on the handover, must be bit-identical. `device` checks that
     every state is saved back unchanged as well.
-  - The online render of this layout is not judged: measured, the master stays silent for 1.2 to 1.3 s after the
-    handover there.
+  - The online render of this layout is not judged: measured on a second desktop, the master stays silent for 1.2
+    to 1.3 s after the handover there. SCVB's developers traced that to the desktop (REAPER's main thread pauses
+    there for about 1.5 s at the start of a render, and the handover waits for it); on the visible desktop they saw
+    no silence. If you run the harness on a second desktop, expect a plugin that does its work on the main thread
+    to behave differently in online renders there.
   - The negative case `neg-passthrough-is-not-routing` applies the vocal-track criterion to the all-default layout
     and must come out FAIL, which shows that the criterion tells routing from passthrough.
 - `device` checks the reported latency (`expectPdc`, from the documentation), the block size, the sample rate and
