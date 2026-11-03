@@ -2,7 +2,7 @@
   "$schema": "../../schema/config.schema.json",
   "schema": 1,
   "name": "scvb",
-  "notes": "Example: SCVB v0.10.0-beta.1 (SCVB Input on each vocal track, SCVB Output first on the vocal bus, SCVB Monitor read only). Passthrough part: every instance in its default state (no Input has a channel), where the plugins leave the audio untouched. Routing part: Inputs with channels 1..3 and an Output in group 8, states taken from routing-template.rpp, judged by levels (the master within 0.5 dB RMS of dry, each vocal track at least 6 dB below dry because its Input silences it; repeat and bypass bit-identical); its online render is not judged. See docs/INTEGRATING.md.",
+  "notes": "Example: SCVB v0.10.0-beta.1 (SCVB Input on each vocal track, SCVB Output first on the vocal bus, SCVB Monitor read only). Passthrough part: every instance in its default state (no Input has a channel), where the plugins leave the audio untouched. Routing part: Inputs with channels 1..3 and an Output in group 8, states taken from routing-template.rpp, judged by levels (the master within 0.5 dB RMS of dry, each vocal track at least 6 dB below dry because its Input silences it; a second render judged by the same master levels, its vocal tracks to within -400 dBFS; every FX bypassed bit-identical to dry; save and reopen with every FX bypassed); its online render is not judged. See docs/INTEGRATING.md.",
   "plugins": {
     "input": {
       "bundle": "SCVB Input.vst3",
@@ -86,10 +86,11 @@
       "stems": [ { "track": "Vox 1", "rmsChangeDb": { "L": [-400, -6], "R": [-400, -6] } }, { "track": "Vox 2", "rmsChangeDb": { "L": [-400, -6], "R": [-400, -6] } }, { "track": "Vox 3", "rmsChangeDb": { "L": [-400, -6], "R": [-400, -6] } } ] },
     { "id": "routing-blocks", "kind": "render", "layout": "routing", "matrix": { "sr": [44100, 48000], "block": [64, 1024] }, "maxDiffDb": 12, "rmsChangeDb": { "L": [-0.5, 0.5], "R": [-0.5, 0.5] },
       "stems": [ { "track": "Vox 1", "rmsChangeDb": { "L": [-400, -6], "R": [-400, -6] } }, { "track": "Vox 2", "rmsChangeDb": { "L": [-400, -6], "R": [-400, -6] } }, { "track": "Vox 3", "rmsChangeDb": { "L": [-400, -6], "R": [-400, -6] } } ] },
-    { "id": "routing-repeat", "kind": "render", "layout": "routing", "compare": "repeat", "stems": ["Vox 1", "Vox 2", "Vox 3"] },
+    { "id": "routing-repeat", "kind": "render", "layout": "routing", "compare": "repeat", "maxDiffDb": 12, "rmsChangeDb": { "L": [-0.5, 0.5], "R": [-0.5, 0.5] },
+      "stems": [ { "track": "Vox 1", "maxDiffDb": -400 }, { "track": "Vox 2", "maxDiffDb": -400 }, { "track": "Vox 3", "maxDiffDb": -400 } ] },
     { "id": "routing-bypass", "kind": "render", "layout": "routing", "bypass": true, "stems": ["Vox 1", "Vox 2", "Vox 3"] },
     { "id": "routing-device", "kind": "device", "layout": "routing" },
-    { "id": "routing-reopen", "kind": "savereopen", "layout": "routing", "cycles": 3 }
+    { "id": "routing-reopen", "kind": "savereopen", "layout": "routing", "bypass": true, "cycles": 3 }
   ],
   "negative": [
     { "id": "neg-system-quieter-track", "kind": "render", "layout": "system-quiet", "compare": { "layout": "system" }, "expect": "FAIL", "expectDetail": "^identical=no lag=0 " },
