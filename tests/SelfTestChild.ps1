@@ -656,6 +656,14 @@ Write-Case 'end to end: the work files of an all-green round are removed' $false
 $extRow = @($rowsOut | Where-Object { $_.id -ceq 'ext-count' })[0]
 Write-Case 'end to end: a local path in the facts of an extension is masked in the row and in the result file' $true ($extRow.facts.count -eq 3 -and $extRow.facts.workDir -ceq '<path>' -and $json -cnotlike '*brien*')
 Write-Case 'result file: a run with nothing wrong has no error' $false ($back.Contains('error') -and $null -eq $back['error'] -and $null -eq $r.error)
+# Only a JSFX, no plugin binary: learning does not ask the module list, which would have nothing to prove, and says so
+$jsOnly = & $writeVariant { param($c) & $noExt $c; $c.plugins = @{ delay = $c.plugins['delay'] }; $c.layouts = @{ js = @{ tracks = @(@{ name = 'Voice'; source = $true; fx = @(@{ plugin = 'delay' }) }) } }; $c.scenarios = @(@{ id = 'js-only'; kind = 'render'; layout = 'js' }); $c.negative = @() }
+$jsOnly.ReaperExe = $pwshExe; $jsOnly.ResultDir = $e2e.ResultDir
+$r = Invoke-HarnessSuite @jsOnly -NoNegative -SelfTestHooks $hooks
+$jsLearn = @($r.runs[0].scenarios)[0]
+Write-Case 'end to end: a configuration of only a JSFX learns without a module proof: learn PASS, its facts say there was no plugin binary, the round PASS' $false (
+    $r.verdict -ceq 'PASS' -and $jsLearn.id -ceq 'learn' -and $jsLearn.status -ceq 'PASS' -and $jsLearn.facts.modules -ceq 'NoBinary' -and $jsLearn.facts.binaries.get_Count() -eq 0 -and
+    $jsLearn.detail -clike '*no plugin binary to check (only JSFX)*' -and $r.runs[0].moduleCheck.status -ceq 'PASS' -and $r.runs[0].moduleCheck.detail -clike 'no plugin binary to check*' -and @($r.plugins).Count -eq 1)
 
 # ---- what a round counts as left behind ----
 $oneScenario = @{ Only = '^chain-offline-48000$'; NoNegative = $true }
@@ -685,6 +693,11 @@ $r = Invoke-HarnessSuite @e2e @oneScenario -Repeat 2 -SelfTestHooks $faultHooks
 $lastRow = @($r.runs[0].scenarios)[-1]
 Write-Case 'round breaks: the round and the run are INCOMPLETE, a row says why without a path' $true ($r.verdict -ceq 'INCOMPLETE' -and $r.runs[0].verdict -ceq 'INCOMPLETE' -and $lastRow.id -ceq 'round-error' -and $lastRow.status -ceq 'INCOMPLETE' -and $lastRow.detail -ceq 'the round stopped on an unexpected error: boom at <path>')
 Write-Case 'round breaks: no further round runs, and the module check says it did not run' $true (@($r.runs).Count -eq 1 -and $r.runs[0].stoppedBecause -clike '*unexpected error*' -and $r.runs[0].moduleCheck.status -ceq 'INCOMPLETE')
+# The facts of the learn row are masked like those of every other row, keys too
+$learnFacts = [ordered]@{ variants = 1; modules = 'Proven'; place = "at $faultPath"; $faultPath = 1 }
+$r = Invoke-WithSuiteCommand 'Invoke-HarnessLearn' { [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = 'stub learn'; Facts = $learnFacts } }.GetNewClosure() { Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $hooks }
+$learnRow = @($r.runs[0].scenarios)[0]
+Write-Case 'learn row: a path in its facts is masked, in a value and in a key' $true ($learnRow.id -ceq 'learn' -and $learnRow.facts.place -ceq 'at <path>' -and $learnRow.facts.Contains('<path>') -and -not $learnRow.facts.Contains($faultPath))
 $refusedHooks = $hooks.Clone()
 $refusedHooks.RoundFault = { throw 'REFUSED: stub' }
 $r = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $refusedHooks

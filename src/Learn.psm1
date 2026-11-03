@@ -145,7 +145,10 @@ function Invoke-HarnessLearn {
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name 'learn' -Step learn -Job @{ fx = $fx; saveAs = $saveAs; project = $project } -TimeoutSec ([double]$Ctx.Limits.learnTimeoutSec)
     $expected = @{}
     foreach ($row in $Ctx.Installed.get_Values()) { $expected[$row.BinaryLeaf] = $row.Binary }
-    $mod = Get-HarnessModuleVerdict -Expected $expected -Seen $lua.Run.Modules -SameFile $same
+    # Only JSFX shipped with the tool, no plugin binary: the module list has nothing to prove (asked about nothing it
+    # says Unseen, which is right for it and wrong here), so it is not asked, and the facts say there was nothing to
+    # check. A JSFX is proven by fx_ident and its saved block instead.
+    $mod = $expected.get_Count() ? (Get-HarnessModuleVerdict -Expected $expected -Seen $lua.Run.Modules -SameFile $same) : [pscustomobject]@{ Verdict = 'NoBinary'; Binaries = [ordered]@{} }
     $facts = [ordered]@{ variants = $Variants.Count; modules = $mod.Verdict; binaries = $mod.Binaries }
     $used = @($Variants | Where-Object { $_.State } | ForEach-Object { "$($_.Plugin)@$($_.State)" } | Select-Object -Unique)
     if ($used.Count) { $facts.states = @($used | ForEach-Object { [ordered]@{ plugin = $Ctx.States[$_].Plugin; state = $Ctx.States[$_].State; sha256 = $Ctx.States[$_].Sha } }) }
@@ -156,13 +159,14 @@ function Invoke-HarnessLearn {
     $why = @($check.Foreign) + @($foreignMods | ForEach-Object { "a module named $_ was loaded from outside the private plugins directory" })
     if ($why.Count) { return New-HarnessOutcome INCOMPLETE ("not the private copy: " + ($why -join '; ')) $facts }
     if ($check.Fail.Count) { return New-HarnessOutcome FAIL ($check.Fail -join '; ') $facts }
-    if ($mod.Verdict -ne 'Proven') {
+    if ($mod.Verdict -cnotin 'Proven', 'NoBinary') {
         $unseen = @($mod.Binaries.get_Keys() | Where-Object { $mod.Binaries[$_] -eq 'Unseen' })
         return New-HarnessOutcome INCOMPLETE "the module list never showed $($unseen -join ', ') loaded, so the private copy is not proven" $facts
     }
     foreach ($k in $check.Blocks.get_Keys()) { $Ctx.Blocks[$k] = $check.Blocks[$k] }
     foreach ($k in $check.Names.get_Keys()) { $Ctx.Names[$k] = $check.Names[$k]; $Ctx.AddNames[$k] = $check.AddNames[$k] }
-    New-HarnessOutcome PASS "$($Variants.Count) plugin variants learned; every tested binary loaded from the private copy (module list and fx_ident)" $facts
+    $proof = ($mod.Verdict -ceq 'NoBinary') ? 'no plugin binary to check (only JSFX), each JSFX found at its private path (fx_ident)' : 'every tested binary loaded from the private copy (module list and fx_ident)'
+    New-HarnessOutcome PASS "$($Variants.Count) plugin variants learned; $proof" $facts
 }
 
 # Over every launch of the round (Ctx.LaunchLog): any module with a tested binary's file name that is not the
@@ -182,7 +186,8 @@ function Get-HarnessModuleCheck {
         foreach ($p in $launch.PluginModules) { if (-not ($expected.get_Values() | Where-Object { & $same $_ $p })) { $null = $others.Add($p) } }
     }
     $status = $foreign.Count ? 'INCOMPLETE' : 'PASS'
-    $detail = $foreign.Count ? "a tested binary was loaded from outside the private plugins directory: $(@($foreign) -join ', ')" : "no tested binary was loaded from anywhere but the private copy in $($Ctx.LaunchLog.Count) launches"
+    $detail = $foreign.Count ? "a tested binary was loaded from outside the private plugins directory: $(@($foreign) -join ', ')" : (
+        $expected.get_Count() ? "no tested binary was loaded from anywhere but the private copy in $($Ctx.LaunchLog.Count) launches" : "no plugin binary to check (only JSFX) in $($Ctx.LaunchLog.Count) launches")
     if ($others.Count) { $detail += "; $($others.Count) other plugin binaries were loaded" }
     New-HarnessOutcome $status $detail ([ordered]@{ launches = $Ctx.LaunchLog.Count; foreign = @($foreign); otherPlugins = $others.Count })
 }

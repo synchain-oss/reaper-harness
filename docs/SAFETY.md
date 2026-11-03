@@ -213,8 +213,10 @@ above is a pure function and is tested everywhere.
   its own alike: the writer never came back to fill in the length, so the file is not finished, and what is in it says
   nothing about what is missing. REAPER's finished renders hold the real length.
 - With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven. A configuration
-  cannot get there: it needs at least one plugin (the schema refuses an empty `plugins`), so every run has a binary to
-  prove, and a test that only needs JSFX still names one.
+  needs at least one plugin (the schema refuses an empty `plugins`), but every one of them can be a JSFX shipped with
+  the tool, and then there is no binary to prove: learning does not ask the module list at all, its facts say
+  `modules: NoBinary`, and each JSFX is proven by its path in the private configuration directory (`fx_ident` and
+  the saved block) instead.
 
 ## Scripts
 

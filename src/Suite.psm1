@@ -305,7 +305,8 @@ function Invoke-HarnessSuite {
                     $t0 = [Diagnostics.Stopwatch]::StartNew()
                     $o = try { Invoke-HarnessLearn -Ctx $ctx -Variants $variants } catch { New-HarnessOutcome INCOMPLETE "learning threw: $($_.Exception.Message -replace '\s+', ' ')" }
                     $row = [ordered]@{ id = 'learn'; kind = 'learn'; status = $o.Status; seconds = [math]::Round($t0.Elapsed.TotalSeconds, 1); detail = (Hide-HarnessPaths $o.Detail) }
-                    if ($o.PSObject.Properties['Facts']) { $row.facts = $o.Facts }
+                    # No path in these today (counts, verdicts, file names, state names); masked like every other row all the same
+                    if ($o.PSObject.Properties['Facts']) { $row.facts = Hide-HarnessFacts $o.Facts }
                     $rows.Add($row)
                     Write-HarnessLine ("  [{0}] learn  {1} s  {2}" -f $o.Status, $row.seconds, $o.Detail)
                     if ($o.Status -ne 'PASS') { $NotRun = 'not run: learning the plugin blocks did not succeed (see the learn row)' }

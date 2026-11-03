@@ -59,7 +59,7 @@ Plugin hashes are cut to their first 12 hex digits.
 | `status` | string | `PASS`, `FAIL` or `INCOMPLETE` |
 | `seconds` | number | |
 | `detail` | string | one line; for renders the comparer line (`identical= lag= maxdiff= head= frames= channels= rate= format= nonfinite= peak=`, then `rms=` and `nan= inf=` when they apply), then ` \| stem <track>: <its line>` per stem; `device` and `savereopen` end with `states saved back unchanged: <plugin> <state> <sha256>, ...` when the layout has states |
-| `facts` | object | some kinds only; `learn`: `variants`, `modules` (`Proven`, `Foreign` or `Unseen`), `binaries` (file name → `Private` / `Foreign` / `Unseen`), `states` (the states learned: `plugin`, `state`, `sha256`) |
+| `facts` | object | some kinds only; `learn`: `variants`, `modules` (`Proven`, `Foreign` or `Unseen`; `NoBinary` when every plugin is a JSFX, so there is no binary to prove), `binaries` (file name → `Private` / `Foreign` / `Unseen`), `states` (the states learned: `plugin`, `state`, `sha256`) |
 
 Negative rows also have `negative` (true), `builtin`, `expected` (the expected outcome) and `observed`; their
 `status` is PASS only when the observed outcome and the reason both match the case.
