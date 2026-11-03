@@ -144,10 +144,11 @@ function New-HarnessProjectText {
     $sb.ToString()
 }
 
-# The project the learn launch opens: track learn-<n> per variant, empty (the driver adds the plugin by name) or with
-# the variant's state block (States: variant key -> block lines), which REAPER then loads like any saved project.
+# The project the learn launch opens: one track per variant, empty (the driver adds the plugin by name) or with the
+# variant's state block (States: variant key -> block lines), which REAPER then loads like any saved project. Track n
+# is named TrackNames[n-1] (from Get-HarnessLearnTrackNames, which only gives names safe in quotes), learn-<n> without.
 function New-HarnessLearnProjectText {
-    param([Parameter(Mandatory)][object[]]$Variants, [hashtable]$States = @{})
+    param([Parameter(Mandatory)][object[]]$Variants, [hashtable]$States = @{}, [string[]]$TrackNames = @())
     $sb = [Text.StringBuilder]::new()
     $add = { param([string]$Line) $null = $sb.Append($Line).Append("`n") }
     & $add '<REAPER_PROJECT 0.1 "7.0/win64" 0 0'
@@ -155,8 +156,9 @@ function New-HarnessLearnProjectText {
     & $add '  TEMPO 120 4 4 0'
     for ($n = 1; $n -le $Variants.Count; $n++) {
         $v = $Variants[$n - 1]
+        $trackName = ($TrackNames.Count -ge $n -and $TrackNames[$n - 1]) ? $TrackNames[$n - 1] : "learn-$n"
         & $add '  <TRACK'
-        & $add "    NAME `"learn-$n`""
+        & $add "    NAME `"$trackName`""
         & $add '    NCHAN 2'
         if ($v.State) {
             if (-not $States.ContainsKey($v.Key)) { throw "no state block for variant $($v.Key)" }

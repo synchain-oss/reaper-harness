@@ -1234,6 +1234,10 @@ function Get-ProjectCases([string]$Tmp, [string]$RepoRoot) {
     $lp = New-HarnessLearnProjectText -Variants @([pscustomobject]@{ Key = 'gain|'; State = '' }, [pscustomobject]@{ Key = 'gain@quiet|'; State = 'quiet' }) -States @{ 'gain@quiet|' = @('<VST "q"', 'Q', '>') }
     & $add 'learn project: an empty track per variant, the state block already on the track of a named state' $false ($lp -match '(?s)NAME "learn-1"\n    NCHAN 2\n  >\n  <TRACK\n    NAME "learn-2"\n    NCHAN 2\n    <FXCHAIN\n      BYPASS 0 0 0\n      <VST "q"\n      Q\n      >\n    >')
     & $add 'learn project: a named state without its block is an error' $true ($(try { $null = New-HarnessLearnProjectText -Variants @([pscustomobject]@{ Key = 'k'; State = 's' }); $false } catch { $true }))
+    $lpn = New-HarnessLearnProjectText -Variants @([pscustomobject]@{ Key = 'gain|'; State = '' }, [pscustomobject]@{ Key = 'gain@quiet|'; State = 'quiet' }) -States @{ 'gain@quiet|' = @('<VST "q"', 'Q', '>') } -TrackNames @('learn-1', 'Vox 1')
+    & $add 'learn project: a track gets the name it is given (the template track of its state) and keeps its block' $false (
+        $lpn -match '(?s)NAME "learn-1"\n    NCHAN 2\n  >\n  <TRACK\n    NAME "Vox 1"\n    NCHAN 2\n    <FXCHAIN\n      BYPASS 0 0 0\n      <VST "q"' -and
+        (New-HarnessLearnProjectText -Variants @([pscustomobject]@{ Key = 'gain|'; State = '' }) -TrackNames @('')) -match 'NAME "learn-1"')
     $jsb = Get-HarnessFxBlocks "<REAPER_PROJECT`n  <TRACK`n    NAME t`n    <FXCHAIN`n      BYPASS 1 0 0`n      <JS `"reaper-harness/a b.jsfx`" `"`"`n        0 -`n      >`n    >`n  >`n>`n"
     & $add 'saved project: a JS block is found with its path under Effects (quoted when it holds a space); an unquoted track name is read too' $false (
         @($jsb['t']).Count -eq 1 -and @($jsb['t'])[0].Kind -ceq 'JS' -and @($jsb['t'])[0].File -ceq 'reaper-harness/a b.jsfx' -and @($jsb['t'])[0].Bypass)
@@ -1412,6 +1416,22 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'learn report: a named state the plugin saves back changed is a failure (it does not hold the state as given)' $true (@((& $sc $sReport (& $sSaved 'FAKESTATE b3RoZXI=')).Fail -match 'saved its state back changed').Count -eq 1)
     $r2 = $sReport.Clone(); $r2.fx1_idx = '-1'
     & $add 'learn report: a named state whose block did not load is a failure saying so' $true (@((& $sc $r2 (& $sSaved 'FAKESTATE QUlFRA==')).Fail -match 'state quiet did not load from its state block').Count -eq 1)
+    # The learn project names a template state's track after its template track: the block is looked up there
+    $nSaved = Get-HarnessFxBlocks ("<REAPER_PROJECT`n  <TRACK`n    NAME `"Vox 1`"`n    <FXCHAIN`n      BYPASS 0 0 0`n      $($stBlock[0])`n        FAKESTATE QUlFRA==`n      >`n    >`n  >`n>`n")
+    $okN = Test-HarnessLearnReport -Variants $sv -Installed $installed -States $stTable -Report $sReport -Saved $nSaved -TrackNames @('Vox 1') -SameFile $same
+    & $add 'learn report: the block is taken from the track the learn project named (a template track name)' $false ($okN.Fail.Count -eq 0 -and $okN.Blocks.ContainsKey('gain@quiet|'))
+    & $add 'learn report: a block on a track of another name is not taken for the variant' $true (
+        @((Test-HarnessLearnReport -Variants $sv -Installed $installed -States $stTable -Report $sReport -Saved $nSaved -SameFile $same).Fail -match 'has 0 plugin blocks on its track').Count -eq 1)
+    $tnStates = [ordered]@{
+        'input@ch1' = [pscustomobject]@{ Track = 'Vox 1' }; 'input@ch2' = [pscustomobject]@{ Track = 'VOX 1' }; 'input@file' = [pscustomobject]@{ Track = '' }
+        'input@q' = [pscustomobject]@{ Track = 'say "hi"' }; 'input@gen' = [pscustomobject]@{ Track = 'Learn-2' }; 'bus@b' = [pscustomobject]@{ Track = 'Bus' }
+    }
+    $tnV = { param($p, $s) [pscustomobject]@{ Plugin = $p; State = $s } }
+    $tn = Get-HarnessLearnTrackNames -Variants @((& $tnV 'input' ''), (& $tnV 'input' 'ch1'), (& $tnV 'input' 'ch2'), (& $tnV 'input' 'file'), (& $tnV 'input' 'q'), (& $tnV 'input' 'gen'), (& $tnV 'bus' 'b'), (& $tnV 'input' 'ch1')) -States $tnStates
+    & $add "learn track names: a template state's track is named after its template track, the others learn-<n> ($($tn -join ', '))" $false (
+        $tn.Count -eq 8 -and $tn[0] -ceq 'learn-1' -and $tn[1] -ceq 'Vox 1' -and $tn[6] -ceq 'Bus')
+    & $add 'learn track names: a name taken already (in any case), a state file, a name with a double quote, one like a generated name and a second variant of the same state get learn-<n>' $true (
+        ($tn[2..5] + $tn[7]) -join ',' -ceq 'learn-3,learn-4,learn-5,learn-6,learn-8')
     # The same state alone and with a parameter on top (the variants above): a plugin that ignores the state is caught
     # on the track that has it alone, although the parameter reads back fine
     $pReport = $sReport.Clone()
@@ -1514,6 +1534,8 @@ function Get-StateCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'states: the fixture template block (track Lead, FX 1) and the state file block (custom name emptied) are read, each with a 12-digit hash' $false (
         (@($st.get_Keys()) -join ',') -ceq 'gain@quiet,gain@loud' -and $st['gain@quiet'].Lines[1] -ceq 'FAKESTATE VHJpbT0wLjI1Ow==' -and $st['gain@loud'].Lines[0] -ceq (& $hdr) -and
         $st['gain@loud'].Lines[1] -ceq 'FAKESTATE VHJpbT0xOw==' -and $st['gain@quiet'].Sha -cmatch '^[0-9a-f]{12}$' -and $st['gain@quiet'].Sha -cne $st['gain@loud'].Sha -and $st['gain@loud'].Cid -ceq $cid)
+    & $add 'states: a template state keeps the name of the track it came from (the learn project names its track so); a state file has none' $false (
+        $st['gain@quiet'].Track -ceq 'Lead' -and $st['gain@loud'].Track -ceq '')
     $msg = { param([scriptblock]$Edit) try { $null = & $read $Edit; '' } catch { $_.Exception.Message } }
     $out = & $msg { param($c) $c.Plugins['gain'].States['quiet'].Template = '../config.json' }
     & $add "states: a path outside the configuration's directory is a usage error ($out)" $true ($out -like 'USAGE: states: *plugins.gain.states.quiet*')
@@ -1605,6 +1627,36 @@ function Get-ExtensionCases([string]$Tmp, [string]$RepoRoot) {
     $cases
 }
 
+# ---------------------------------------------------------------- the worked example
+# examples/scvb is what docs/INTEGRATING.md walks plugin projects through, and docs/validation records its rows, so
+# it is read here as a run reads it, without REAPER: its extension registers, the configuration validates with the
+# rows the notes count, and the five states come out of the template, each the plugin it is meant for and from the
+# track the routing layout names the same way. The preflight check itself is not run: its answer depends on what
+# else runs on the machine.
+function Get-ExampleCases([string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $exampleFile = Join-Path $RepoRoot 'examples/scvb/reaper-harness.json'
+    $exampleExt = Import-HarnessExtensions (Read-HarnessConfigExtensions $exampleFile)
+    & $add 'example: the SCVB preflight module registers one preflight check and no kinds' $false (($exampleExt.Modules -join ',') -ceq 'scvb-preflight' -and $exampleExt.Preflight.Count -eq 1 -and $exampleExt.Kinds.get_Count() -eq 0)
+    $exampleConf = Read-HarnessConfig -Path $exampleFile -Kinds $exampleExt.Kinds # a problem is a usage error, which fails the group
+    & $add 'example: the SCVB configuration validates, with the 47 scenario rows and 2 negative cases its validation notes count' $false ($exampleConf.Scenarios.Count -eq 47 -and $exampleConf.Negative.Count -eq 2)
+    $exampleStates = Read-HarnessStates -Config $exampleConf
+    $wantStates = [ordered]@{
+        'input@ch1'       = @('VST3: SCVB Input (Synchain)', 'ABCDEF019182FAEB536E636853637669', 'Vox 1')
+        'input@ch2'       = @('VST3: SCVB Input (Synchain)', 'ABCDEF019182FAEB536E636853637669', 'Vox 2')
+        'input@ch3'       = @('VST3: SCVB Input (Synchain)', 'ABCDEF019182FAEB536E636853637669', 'Vox 3')
+        'output@group-8'  = @('VST3: SCVB Output (Synchain)', 'ABCDEF019182FAEB536E63685363766F', 'Bus')
+        'monitor@group-8' = @('VST3: SCVB Monitor (Synchain)', 'ABCDEF019182FAEB536E63685363766D', 'Bus')
+    }
+    $stateKeys = @($exampleStates.get_Keys())
+    $wrongStates = @($wantStates.get_Keys() | Where-Object { -not $exampleStates.Contains($_) -or $exampleStates[$_].Name -cne $wantStates[$_][0] -or $exampleStates[$_].Cid -cne $wantStates[$_][1] -or $exampleStates[$_].Track -cne $wantStates[$_][2] })
+    & $add 'example: the five states come out of routing-template.rpp, each block the plugin it is configured for, from its track' $false (($stateKeys -join ',') -ceq (@($wantStates.get_Keys()) -join ',') -and $wrongStates.Count -eq 0)
+    $routingNames = @($exampleConf.Layouts['routing'].Tracks | ForEach-Object { $_.Name })
+    & $add 'example: the routing layout names its tracks as the template does' $false (($routingNames -join ',') -ceq 'Bus,Vox 1,Vox 2,Vox 3')
+    $cases
+}
+
 # ---------------------------------------------------------------- wiring
 function Get-WiringCases([string]$RepoRoot) {
     $cases = New-CaseList
@@ -1627,6 +1679,19 @@ function Get-WiringCases([string]$RepoRoot) {
     $launch = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessLaunch'
     & $add 'wiring: every launch takes the GUI locks before starting REAPER and checks the skip marker again while holding them' $false (
         (& $at $launch 'Enter-HarnessLocks')[0] -lt (& $at $launch 'Invoke-HarnessHost')[0] -and @(& $at $launch 'Get-HarnessSkipMarkerHit').Count -eq 2 -and (& $at $launch 'Get-HarnessSkipMarkerHit')[1] -lt (& $at $launch 'Invoke-HarnessHost')[0])
+    # The learn project and the check of what REAPER saved must agree on the track names, so both get the same list
+    $learnAst = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Learn.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-HarnessLearn' }, $true)
+    $namesArg = {
+        param([string]$Command)
+        @($learnAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq $Command }, $true) | ForEach-Object {
+                $el = $_.CommandElements
+                for ($i = 1; $i -lt $el.Count - 1; $i++) { if ($el[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and $el[$i].ParameterName -eq 'TrackNames') { [string]$el[$i + 1].Extent.Text } }
+            })
+    }
+    $learnCalls = & $callsIn (Join-Path $RepoRoot 'src/Learn.psm1') 'Invoke-HarnessLearn'
+    & $add 'wiring: Invoke-HarnessLearn names the learn tracks once and gives the same names to the learn project and to the check of the saved one' $false (
+        @(& $at $learnCalls 'Get-HarnessLearnTrackNames').Count -eq 1 -and (& $at $learnCalls 'Get-HarnessLearnTrackNames')[0] -lt (& $at $learnCalls 'New-HarnessLearnProjectText')[0] -and
+        ((& $namesArg 'New-HarnessLearnProjectText') -join ',') -ceq '$learnNames' -and ((& $namesArg 'Test-HarnessLearnReport') -join ',') -ceq '$learnNames')
     $hostCalls = & $callsIn (Join-Path $RepoRoot 'src/Host.psm1') 'Invoke-HarnessHost'
     & $add 'wiring: Invoke-HarnessHost builds the command line from Get-HarnessCfgArgument (which checks the directory again)' $false ('Get-HarnessCfgArgument' -in $hostCalls.Name)
     # REAPER cannot run here, so only the text of the driver can be looked at: the sampler waits for this mark, and with
@@ -1722,7 +1787,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {

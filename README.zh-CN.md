@@ -50,10 +50,17 @@ pwsh run.ps1 -SelfTest
 
 退出码：0 PASS，1 FAIL，2 INCOMPLETE，3 SKIPPED，64 被护栏拒绝或用法错误。
 
+## 在你的插件项目里使用
+
+工具单独克隆一份，钉在一个提交上；你自己的仓里只放配置文件（需要时再加模板工程和扩展模块），不要把工具复制进去。
+[docs/INTEGRATING.md](docs/INTEGRATING.md) 带着一个完整示例（[examples/scvb/](examples/scvb/)）一步步讲：
+怎么拿工具、私有配置目录、写配置、从模板工程取插件 state、读结果、跳过标记与 GUI 锁的约定，以及哪些事绝对不能做。
+
 ## 文档
 
 文档正文是英文：
 
+- [docs/INTEGRATING.md](docs/INTEGRATING.md)：在你的插件项目里使用，附完整示例
 - [docs/USAGE.md](docs/USAGE.md)：怎么运行、各个参数、退出码
 - [docs/CONFIG.md](docs/CONFIG.md)：配置文件；`schema/config.schema.json` 是它的 JSON Schema
 - [docs/SAFETY.md](docs/SAFETY.md)：保证了什么、为什么

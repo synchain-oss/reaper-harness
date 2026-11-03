@@ -59,8 +59,18 @@ pwsh run.ps1 -SelfTest
 
 Exit codes: 0 PASS, 1 FAIL, 2 INCOMPLETE, 3 SKIPPED, 64 refused or usage error.
 
+## Using it in your plugin project
+
+Keep the harness as a separate clone pinned to one commit, and keep only your configuration (plus a template
+project and extension modules, if you need them) in your own repository; do not copy the harness into it.
+[docs/INTEGRATING.md](docs/INTEGRATING.md) walks through it step by step with a complete example
+([examples/scvb/](examples/scvb/)): getting the tool, the private configuration directory, writing the
+configuration, plugin states from a template project, reading the results, the skip-marker and GUI-lock
+conventions, and what never to do.
+
 ## Documentation
 
+- [docs/INTEGRATING.md](docs/INTEGRATING.md): using it in your plugin project, with a worked example
 - [docs/USAGE.md](docs/USAGE.md): running it, options, exit codes
 - [docs/CONFIG.md](docs/CONFIG.md): the configuration file; `schema/config.schema.json` is its JSON Schema
 - [docs/SAFETY.md](docs/SAFETY.md): what it guarantees and why
