@@ -67,8 +67,8 @@ need to.
 | code | |
 |---|---|
 | 0 | PASS: every row of every round passed |
-| 1 | FAIL |
-| 2 | INCOMPLETE: some row could not run or could not be checked, or the run stopped on an unexpected error; this is never a PASS |
+| 1 | FAIL, also when the result file could not be written |
+| 2 | INCOMPLETE: some row could not run or could not be checked, the run stopped on an unexpected error, or the result file of anything but a FAIL could not be written; this is never a PASS |
 | 3 | SKIPPED: the suite did not run (the reasons are printed and in the result file) |
 | 64 | refused by a guard, or a usage error (including any problem in the configuration); nothing was started |
 

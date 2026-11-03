@@ -9,8 +9,9 @@
 #                by case>]   no REAPER needed; its dialog cases take the GUI locks like a real run
 #   pwsh run.ps1 -WriteSchema    regenerates schema/config.schema.json from the validator in src/Config.psm1
 # -CfgDir only accepts an explicit absolute path holding the sentinel written by doctor.ps1 -Init; the default REAPER
-# resource directory (%APPDATA%\REAPER) is never touched.
-# Exit codes: 0 all PASS, 1 a FAIL, 2 an INCOMPLETE (no conclusion, an unexpected error included; never counted as PASS),
+# resource directory (%APPDATA%\REAPER) is never touched, and -ResultDir may not be in it either.
+# Exit codes: 0 all PASS, 1 a FAIL, 2 an INCOMPLETE (no conclusion, an unexpected error or a result file that could not be
+# written included; never counted as PASS),
 # 3 the whole suite SKIPPED, 64 refused by a guard or usage error (including a configuration with problems, or -Only
 # picking nothing).
 [CmdletBinding()]
@@ -59,7 +60,7 @@ try {
         ReaperExe = $ReaperExe; SkipMarker = $SkipMarker; ExtraGuiLock = $ExtraGuiLock; Only = $Only; Repeat = $Repeat; NoNegative = $NoNegative; BuildLabel = $BuildLabel; KeepWork = $KeepWork
     }
     $outcome = Invoke-HarnessSuite @params
-    $resultFile = Write-HarnessResult -Data $outcome -ResultDir $params.ResultDir
+    $exitCode = Complete-HarnessRun -Outcome $outcome -ResultDir $params.ResultDir
 } catch {
     $message = Hide-HarnessPaths $_.Exception.Message
     if ($message -like 'REFUSED:*' -or $message -like 'USAGE:*') { Write-Host $message; exit 64 }
@@ -67,7 +68,4 @@ try {
     Write-Host "INCOMPLETE: the run stopped on an unexpected error and left no result file: $($message -replace '\s+', ' ')"
     exit 2
 }
-if ($outcome.verdict -eq 'SKIPPED') { Write-Host "SKIPPED: $($outcome.skipReasons -join '; ')" }
-Write-Host ('reaper-harness {0}  config {1}  build {2}  {3} rounds  REAPER started {4} times  result {5}' -f $outcome.verdict, $outcome.config, $outcome.buildLabel, $outcome.runs.Count, $outcome.launches, (Split-Path -Leaf $resultFile))
-$exitCodes = @{ PASS = 0; FAIL = 1; INCOMPLETE = 2; SKIPPED = 3 }
-exit $exitCodes[$outcome.verdict]
+exit $exitCode

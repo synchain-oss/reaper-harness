@@ -146,6 +146,7 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
         try {
             & $add 'with a subst drive pointing at APPDATA, \REAPER on that drive is refused (the directory and its parents up to the root compared by identity)' $true ((Test-Refused { Assert-HarnessCfgDir "${letter}:\REAPER" } $byIdentity) -and (Test-Refused { Assert-HarnessCfgDir "${letter}:\REAPER\Data\not-yet" } $byIdentity) -and (Test-Refused { Assert-HarnessCfgDir "${letter}:\" } $byIdentity))
             & $add 'file identity: the root of a subst drive equals the directory it points at' $false ((Get-HarnessFileIdentity "${letter}:\") -ceq (Get-HarnessFileIdentity $roam))
+            & $add 'result directory: on a subst drive pointing at APPDATA it is refused by file identity, also when it does not exist yet' $true ((Test-Refused { Assert-HarnessResultDir "${letter}:\REAPER" } '*-ResultDir*detected by file identity*') -and (Test-Refused { Assert-HarnessResultDir "${letter}:\REAPER\Data\not-yet" } '*-ResultDir*detected by file identity*'))
         } finally {
             & subst.exe "${letter}:" /d 2>&1 | Out-Null
             & $add 'the subst drive pointing at APPDATA was removed again' $false ($LASTEXITCODE -eq 0)
@@ -166,6 +167,7 @@ function Get-GuardCases([string]$Tmp, [string]$RepoRoot) {
     foreach ($c in (Get-InitCases $Tmp $RepoRoot)) { $cases.Add($c) }
     foreach ($c in (Get-CfgEntryCases $Tmp)) { $cases.Add($c) }
     foreach ($c in (Get-DriveCases $Tmp)) { $cases.Add($c) }
+    foreach ($c in (Get-ResultDirCases $Tmp)) { $cases.Add($c) }
     $gone = Join-Path $Tmp 'not-there'
     & $add 'a directory that does not exist is refused' $true (Test-Refused { Assert-HarnessCfgDir $gone } '*does not exist*')
     $bare = Join-Path $Tmp 'bare'; $null = New-Item -ItemType Directory -Path $bare; Set-Content -LiteralPath (Join-Path $bare 'reaper.ini') -Value '[REAPER]'
@@ -283,6 +285,41 @@ function Get-CfgEntryCases([string]$Tmp) {
 
 # The drive the directory is on, as spelled and after expanding links. The types come through a stand-in: a real mapped
 # drive would change the machine, so one is only made on a hosted runner, which is thrown away afterwards.
+# The result directory is written during a run: never the default resource directory, whatever leads there
+function Get-ResultDirCases([string]$Tmp) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $defaultDir = Get-HarnessDefaultCfgDir
+    $byPath = '*-ResultDir*never touched'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $defaultDir 'Data')
+    & $add 'result directory: the default resource directory itself is refused' $true (Test-Refused { Assert-HarnessResultDir $defaultDir } $byPath)
+    & $add 'result directory: below the default resource directory is refused, it need not exist' $true (Test-Refused { Assert-HarnessResultDir (Join-Path $defaultDir 'Data\results') } $byPath)
+    & $add 'result directory: upper case and forward slashes change nothing' $true (Test-Refused { Assert-HarnessResultDir ($defaultDir.ToUpperInvariant() -replace '\\', '/') } $byPath)
+    $toDefault = Join-Path $Tmp 'result-to-default'
+    $toData = Join-Path $Tmp 'result-to-data'
+    $null = New-Item -ItemType Junction -Path $toDefault -Target $defaultDir
+    $null = New-Item -ItemType Junction -Path $toData -Target (Join-Path $defaultDir 'Data')
+    try {
+        & $add 'result directory: a junction pointing at the default resource directory is refused' $true (Test-Refused { Assert-HarnessResultDir $toDefault } $byPath)
+        & $add 'result directory: below a junction pointing inside the default resource directory is refused' $true (Test-Refused { Assert-HarnessResultDir (Join-Path $toData 'results') } $byPath)
+    } finally { [IO.Directory]::Delete($toDefault); [IO.Directory]::Delete($toData) } # removes the links only
+    & $add 'result directory: a sibling whose name only starts the same way, elsewhere under AppData, is fine' $false (-not (Test-Refused { Assert-HarnessResultDir "$defaultDir-results" }))
+    & $add 'result directory: anywhere else is fine, it need not exist' $false (-not (Test-Refused { Assert-HarnessResultDir (Join-Path $Tmp 'results\not-yet') }))
+    # No default resource directory yet: there is no identity to compare, only the path can say it
+    $savedAppData = $env:APPDATA
+    $fresh = Join-Path $Tmp 'appdata-without-reaper'
+    $freshLink = Join-Path $Tmp 'appdata-link'
+    $null = New-Item -ItemType Directory -Force -Path $fresh
+    $null = New-Item -ItemType Junction -Path $freshLink -Target $fresh
+    try {
+        $env:APPDATA = $fresh
+        & $add 'result directory: with no default resource directory yet, the place it would be in is refused' $true (Test-Refused { Assert-HarnessResultDir (Join-Path $fresh 'REAPER\results') } $byPath)
+        $env:APPDATA = $freshLink
+        & $add 'result directory: the same when APPDATA itself is a link' $true (Test-Refused { Assert-HarnessResultDir (Join-Path $fresh 'REAPER\results') } $byPath)
+    } finally { $env:APPDATA = $savedAppData; [IO.Directory]::Delete($freshLink) }
+    $cases
+}
+
 function Get-DriveCases([string]$Tmp) {
     $cases = New-CaseList
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
@@ -652,6 +689,9 @@ function Get-HostCases {
     & $add 'result text: a single-quoted path, the way .NET writes them, is masked to its closing quote, the sentence stays' $true (& $hide "Access to the path '$spaced' is denied." "Access to the path '<path>' is denied.")
     & $add 'result text: an apostrophe does not end a quoted path' $true (& $hide "the path 'D:\o'brien\my files\a.wav' is denied" "the path '<path>' is denied")
     & $add 'result text: an apostrophe does not end an unquoted path' $true (& $hide "in D:\o'brien\my files\a.wav" 'in <path>')
+    & $add 'result text: an opening quote with no closing one: an apostrophe in a name leaves nothing of the path' $true (& $hide "'D:\Jane O'Neil\x y.wav: boom" "'<path>: boom")
+    & $add 'result text: an apostrophe further on in the sentence is no closing quote' $true (& $hide "'D:\my files\a.wav' isn't there" "'<path>' isn't there")
+    & $add 'result text: a closing quote before punctuation or at the end of the text keeps the sentence' $true ((& $hide "at 'D:\a b'" "at '<path>'") -and (& $hide "'D:\a b': boom" "'<path>': boom") -and (& $hide "'D:\a b', then" "'<path>', then") -and (& $hide "'D:\a b'. Then" "'<path>'. Then") -and (& $hide "('D:\a b')" "('<path>')") -and (& $hide "['D:\a b']" "['<path>']") -and (& $hide "'D:\a b'; then" "'<path>'; then"))
     & $add 'result text: a semicolon and a comma do not end a path' $true (& $hide 'in D:\a;b c,d\e.wav' 'in <path>')
     & $add 'result text: a colon ends a path (a Lua error names the file and the line) and the message stays' $true (& $hide 'D:\my ext\a b.lua:12: attempt to index' '<path>:12: attempt to index')
     & $add 'result text: < > | ? * end a path too: no file name can have them' $true ((& $hide 'D:\a b>c' '<path>>c') -and (& $hide 'D:\a b|c' '<path>|c') -and (& $hide 'D:\a b?c' '<path>?c') -and (& $hide 'D:\a b*c' '<path>*c') -and (& $hide 'D:\a b<c' '<path><c'))

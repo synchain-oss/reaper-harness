@@ -38,6 +38,10 @@ The checked ini path is pinned into a read-only constant for the rest of the pro
 only come from it, and is checked again right before every start. A lint rule keeps the `-cfgfile` literal in
 exactly one place in the code (`src/Host.psm1`).
 
+`-ResultDir` is written during a run too, so it is refused (exit 64) when it is the default resource directory or below
+it: after expanding links, and by file identity for any other spelling. Nothing else is asked of it: unlike `-CfgDir` it
+may be elsewhere under `%APPDATA%` or on a network drive, because REAPER never runs from it.
+
 Arguments reach REAPER one by one, not as one command line, so a space in a path cannot split it and the private ini
 is always the element right after `-cfgfile`. Before the start, `-ReaperArgs` holding a double quote (a caller still
 quoting for itself, which would hand REAPER literal quotes) or naming the `-cfgfile` switch again is refused.
@@ -117,7 +121,8 @@ only (about one in six in our runs); buy a licence or run again.
 - A handler that throws gives INCOMPLETE, never PASS. So does any other unexpected error past the guards: it is
   something that could not be done, not a criterion that was checked, so the exit code is 2 and never 1. A round that
   breaks still gets the checks of the end of a round (a change in the default resource directory, or a process it left,
-  is still FAIL), and no further round runs.
+  is still FAIL), and no further round runs. A guard that refuses inside a round is treated the same way: REAPER may
+  have run already, so exit 64 (nothing was started) would be wrong, and leaving early would skip those checks.
 - Negative cases pass only when the outcome and the reason both match (see [CONFIG.md](CONFIG.md#negative-cases)).
   The built-in ones prove the comparer, the watchdog and the entry guards in every round.
 

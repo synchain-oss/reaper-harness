@@ -3,8 +3,9 @@
 Every run that got past the guards writes one JSON file (UTF-8, no BOM):
 `<ResultDir>/<yyyyMMdd-HHmmss>-<config name>-<build label>.json`. A SKIPPED run writes one too, with the reasons.
 Runs refused by a guard or stopped by a usage error (exit 64) write nothing. A run that stops on an unexpected error
-past the preflight writes its file, with `error` set and a verdict of at least INCOMPLETE; an error before that, or one
-that keeps the file from being written, only reaches the console (exit 2).
+past the preflight writes its file, with `error` set and a verdict of at least INCOMPLETE; an error before that only
+reaches the console (exit 2). When the file itself cannot be written, the console says so and the verdict stands: a FAIL
+stays a FAIL (exit 1), anything else has no record and so no conclusion (exit 2).
 
 Local paths never appear in a result file: drive paths and UNC paths in any text, the `facts` of a row included, are
 replaced by `<path>`. A path can hold spaces, apostrophes, semicolons and commas, so what ends it is a closing quote,

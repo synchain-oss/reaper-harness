@@ -492,7 +492,7 @@ Remove-Item -LiteralPath (Join-Path $noSentinel 'reaper.ini'); Remove-Item -Lite
 Write-Case 'entry: -Only picking nothing is a usage error' $true (Test-Throws { $null = Invoke-HarnessSuite @suite -Only '^no-such-scenario$' } 'USAGE:*picked no scenario*')
 Write-Case 'entry: -Repeat 0 is a usage error' $true (Test-Throws { $null = Invoke-HarnessSuite @suite -Repeat 0 } 'USAGE:*-Repeat*')
 Write-Case 'entry: a -BuildLabel outside [0-9A-Za-z._-]{1,40} is a usage error' $true ((Test-Throws { $null = Invoke-HarnessSuite @suite -BuildLabel 'a/b' } 'USAGE:*-BuildLabel*') -and (Test-Throws { $null = Invoke-HarnessSuite @suite -BuildLabel ('x' * 41) } 'USAGE:*-BuildLabel*'))
-Write-Case 'entry: an -ExtraGuiLock that is not a full Local\ name is a usage error' $true (Test-Throws { $null = Invoke-HarnessSuite @suite -ExtraGuiLock 'Rinne-gui' } 'USAGE:*-ExtraGuiLock*')
+Write-Case 'entry: an -ExtraGuiLock that is not a full Local\ name is a usage error' $true (Test-Throws { $null = Invoke-HarnessSuite @suite -ExtraGuiLock 'Other-gui' } 'USAGE:*-ExtraGuiLock*')
 # Variants of the fixture configuration, written next to the scratch files (so its extension paths do not resolve)
 $writeVariant = {
     param([scriptblock]$Change)
@@ -528,7 +528,29 @@ $notADir = Join-Path $Work 'result is a file'
 Set-Content -LiteralPath $notADir -Value x
 $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $configFile, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir,
     '-ResultDir', $notADir, '-ReaperExe', (Join-Path $Work 'no-reaper.exe'))
-Write-Case 'entry script: an unexpected error exits 2, never 1, says so, and the console shows no path' $true ($u.Exit -eq 2 -and $u.Out -clike 'INCOMPLETE: the run stopped on an unexpected error*' -and $u.Out -cnotlike "*$Work*" -and $u.Out -cnotlike '*is a file*')
+Write-Case 'entry script: no result file: a SKIPPED run is no conclusion: exit 2, it says so, and the console shows no path' $true ($u.Exit -eq 2 -and $u.Out -clike '*INCOMPLETE: the run ended SKIPPED but its result file could not be written: *' -and $u.Out -cnotlike "*$Work*" -and $u.Out -cnotlike '*is a file*')
+# The verdict stands without its file: a FAIL stays a FAIL, anything else has no record and so no conclusion
+$finish = {
+    param($verdict, $dir)
+    $lines = @(Complete-HarnessRun -Outcome ([pscustomobject]@{ verdict = $verdict; config = 'c'; buildLabel = 'b'; runs = @(); launches = 0; skipReasons = @() }) -ResultDir $dir 6>&1)
+    [pscustomobject]@{ Exit = $lines[-1]; Text = (@($lines | Select-Object -SkipLast 1) -join "`n") }
+}
+$done = & $finish 'FAIL' $notADir
+Write-Case 'no result file: a FAIL stays a FAIL: exit 1, it says so, and the console shows no path' $true ($done.Exit -eq 1 -and $done.Text -clike 'FAIL: the run ended FAIL but its result file could not be written: *' -and $done.Text -cnotlike "*$Work*" -and $done.Text -cnotlike '*is a file*')
+$done = & $finish 'PASS' $notADir
+Write-Case 'no result file: a PASS nobody can look up is no conclusion: exit 2' $true ($done.Exit -eq 2 -and $done.Text -clike 'INCOMPLETE: the run ended PASS but its result file could not be written: *')
+$done = & $finish 'INCOMPLETE' $notADir
+Write-Case 'no result file: an INCOMPLETE stays one: exit 2' $true ($done.Exit -eq 2 -and $done.Text -clike 'INCOMPLETE: the run ended INCOMPLETE but *')
+$finishDir = Join-Path $Work 'finish'
+$done = & $finish 'FAIL' $finishDir
+$written = @(Get-ChildItem -LiteralPath $finishDir -Filter '*.json' -ErrorAction SilentlyContinue)
+Write-Case 'result file written: the verdict decides the exit code, the file is named on the console' $true ($done.Exit -eq 1 -and $written.Count -eq 1 -and $done.Text -clike "reaper-harness FAIL  config c  build b  0 rounds  REAPER started 0 times  result $($written[0].Name)")
+Write-Case 'result file written: a PASS exits 0' $true ((& $finish 'PASS' $finishDir).Exit -eq 0)
+# The result directory is written during a run: never the default resource directory
+$inDefault = Join-Path (Get-HarnessDefaultCfgDir) 'results-here'
+$u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $configFile, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir,
+    '-ResultDir', $inDefault, '-ReaperExe', (Join-Path $Work 'no-reaper.exe'))
+Write-Case 'entry script: a -ResultDir in the default resource directory exits 64 and creates nothing' $true ($u.Exit -eq 64 -and $u.Out -clike 'REFUSED:*-ResultDir*' -and -not (Test-Path -LiteralPath $inDefault))
 # A usage error that repeats a path out of the configuration
 $pathInConfig = & $writeVariant { param($c) $c.extensions = @{ modules = @('D:\my files\x.psm1'); lua = @() } }
 $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $pathInConfig.Config, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir, '-ResultDir', $usageResults)
@@ -642,6 +664,11 @@ $r = Invoke-HarnessSuite @e2e @oneScenario -Repeat 2 -SelfTestHooks $faultHooks
 $lastRow = @($r.runs[0].scenarios)[-1]
 Write-Case 'round breaks: the round and the run are INCOMPLETE, a row says why without a path' $true ($r.verdict -ceq 'INCOMPLETE' -and $r.runs[0].verdict -ceq 'INCOMPLETE' -and $lastRow.id -ceq 'round-error' -and $lastRow.status -ceq 'INCOMPLETE' -and $lastRow.detail -ceq 'the round stopped on an unexpected error: boom at <path>')
 Write-Case 'round breaks: no further round runs, and the module check says it did not run' $true (@($r.runs).Count -eq 1 -and $r.runs[0].stoppedBecause -clike '*unexpected error*' -and $r.runs[0].moduleCheck.status -ceq 'INCOMPLETE')
+$refusedHooks = $hooks.Clone()
+$refusedHooks.RoundFault = { throw 'REFUSED: stub' }
+$r = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $refusedHooks
+$lastRow = @($r.runs[0].scenarios)[-1]
+Write-Case 'round breaks: a guard that refuses inside a round is a row like any other: INCOMPLETE, the end of the round is still checked' $true ($r.verdict -ceq 'INCOMPLETE' -and $lastRow.id -ceq 'round-error' -and $lastRow.detail -clike '*REFUSED: stub*' -and $r.runs[0].defaultCfgDir.unchanged)
 $turned = @{ N = 0 }
 $turning = { $turned.N++; [ordered]@{ 'reaper.ini' = "1|$($turned.N)" } }.GetNewClosure()
 $r = Invoke-WithSuiteCommand 'Get-HarnessDefaultCfgSnapshot' $turning { Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $faultHooks }

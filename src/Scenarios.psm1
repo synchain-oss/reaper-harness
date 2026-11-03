@@ -34,12 +34,14 @@ function New-HarnessOutcome([string]$Status, [string]$Detail = '', $Facts = $nul
 # character no Windows file name can have (a double quote, < > | ? *, a colon that is not followed by a slash) or the end
 # of the line. So whatever follows an unquoted path on its line goes with it: a sentence cut short is the price, a user
 # name in a result file is not. A path in single quotes, the way .NET and PowerShell write them, ends at the last single
-# quote of that stretch, and the sentence around it stays.
+# quote of that stretch that a blank, a punctuation mark or the end of the text follows, and the sentence around it stays.
+# Any other single quote is an apostrophe in a name: with no closing quote the path is masked like an unquoted one.
 $script:PathStart = '(?:[A-Za-z]:[\\/]|\\\\|//)'
 $script:PathBody = '(?:[^"<>|?*:\r\n]|:[\\/])*'
+$script:QuoteEnd = '(?=[\s.,;:)\]]|$)'
 function Hide-HarnessPaths([AllowNull()][string]$Text) {
     if (-not $Text) { return '' }
-    $Text -replace "'$($script:PathStart)$($script:PathBody)'", "'<path>'" -replace "$($script:PathStart)$($script:PathBody)", '<path>'
+    $Text -replace "'$($script:PathStart)$($script:PathBody)'$($script:QuoteEnd)", "'<path>'" -replace "$($script:PathStart)$($script:PathBody)", '<path>'
 }
 
 # The same for the facts of an outcome, which an extension fills with whatever it likes: every string at any depth, keys

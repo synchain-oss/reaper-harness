@@ -11,8 +11,11 @@
 #   Invoke-HarnessGuardNegative the guard negative cases: the real entry point run again in-process
 #   Invoke-HarnessSuite         everything above for one configuration. Past the preflight an unexpected error is no
 #                               conclusion: the verdict is at least INCOMPLETE, the result says why, and a round that broke
-#                               still gets the checks of the end of a round. Refused and usage errors stay exceptions (64).
+#                               still gets the checks of the end of a round. Outside the rows of a round refused and usage
+#                               errors stay exceptions (64). Inside them REAPER may have been started already, so they are a
+#                               round-error row like any other (INCOMPLETE): do not rethrow there, the checks would be skipped.
 #   Write-HarnessResult         the result json
+#   Complete-HarnessRun         writes the result json, prints the summary line and returns the exit code of run.ps1
 # Exit codes of run.ps1: 0 all PASS, 1 a FAIL, 2 an INCOMPLETE, 3 the whole suite SKIPPED, 64 refused or usage error.
 
 Set-StrictMode -Version Latest
@@ -237,6 +240,7 @@ function Invoke-HarnessSuite {
         [hashtable]$SelfTestHooks = @{} # self-test only: Launcher (a stand-in for REAPER), ModuleSampler, Stopper, RoundFault (runs after the rows of a round)
     )
     $null = Initialize-HarnessCfg $CfgDir # refuses (REFUSED) before anything is touched
+    Assert-HarnessResultDir $ResultDir # the same, for the directory the run writes to
     if ($Repeat -lt 1) { Stop-Usage '-Repeat must be at least 1' }
     if ($BuildLabel -and $BuildLabel -cnotmatch $script:LabelPattern) { Stop-Usage "-BuildLabel must match $($script:LabelPattern)" }
     $locks = Get-HarnessGuiLockSet -Extra $ExtraGuiLock
@@ -374,5 +378,22 @@ function Write-HarnessResult {
     $path
 }
 
+# The end of run.ps1. A verdict stands without its file: a FAIL stays a FAIL, the signal that matters most. Anything else
+# has no record, and so no conclusion: a PASS nobody can look up is not a PASS.
+function Complete-HarnessRun {
+    param([Parameter(Mandatory)]$Outcome, [Parameter(Mandatory)][string]$ResultDir)
+    $exitCodes = @{ PASS = 0; FAIL = 1; INCOMPLETE = 2; SKIPPED = 3 }
+    if ($Outcome.verdict -ceq 'SKIPPED') { Write-Host "SKIPPED: $($Outcome.skipReasons -join '; ')" }
+    try {
+        $resultFile = Write-HarnessResult -Data $Outcome -ResultDir $ResultDir
+    } catch {
+        $said = ($Outcome.verdict -ceq 'FAIL') ? 'FAIL' : 'INCOMPLETE'
+        Write-Host "${said}: the run ended $($Outcome.verdict) but its result file could not be written: $(Hide-HarnessPaths ($_.Exception.Message -replace '\s+', ' '))"
+        return $exitCodes[$said]
+    }
+    Write-Host ('reaper-harness {0}  config {1}  build {2}  {3} rounds  REAPER started {4} times  result {5}' -f $Outcome.verdict, $Outcome.config, $Outcome.buildLabel, $Outcome.runs.Count, $Outcome.launches, (Split-Path -Leaf $resultFile))
+    $exitCodes[$Outcome.verdict]
+}
+
 Export-ModuleMember -Function Get-HarnessPreflight, Get-HarnessDefaultLabel, Get-HarnessWorstStatus, Get-HarnessCfgChangesSeen, Get-HarnessRunVerdict, Get-HarnessRoundStop, Get-HarnessNegativeVerdict,
-    Invoke-HarnessGuardNegative, Invoke-HarnessNegativeRow, Select-HarnessScenarios, Test-HarnessNeedsLearn, Invoke-HarnessSuite, Write-HarnessResult
+    Invoke-HarnessGuardNegative, Invoke-HarnessNegativeRow, Select-HarnessScenarios, Test-HarnessNeedsLearn, Invoke-HarnessSuite, Write-HarnessResult, Complete-HarnessRun
