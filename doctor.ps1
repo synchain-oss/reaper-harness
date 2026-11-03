@@ -11,7 +11,8 @@
 # -Init only takes over a directory that does not exist, an empty one, or one initialised before (with the
 # sentinel); a directory with content but no sentinel is refused and nothing is written. A -CfgDir under AppData (or
 # pointing there) is always refused, -Init included.
-# Exit codes: 0 ready to run, 3 run.ps1 would be SKIPPED, 64 refused by a guard or usage error.
+# Exit codes: 0 ready to run, 2 the check itself failed on an unexpected error, 3 run.ps1 would be SKIPPED, 64 refused
+# by a guard or usage error.
 [CmdletBinding()]
 param(
     [string]$CfgDir = '',
@@ -61,6 +62,8 @@ try {
     Write-Host 'ready: run.ps1 can run'
     exit 0
 } catch {
-    if ($_.Exception.Message -like 'REFUSED:*' -or $_.Exception.Message -like 'USAGE:*') { Write-Host $_.Exception.Message; exit 64 }
-    throw
+    $message = Hide-HarnessPaths $_.Exception.Message
+    if ($message -like 'REFUSED:*' -or $message -like 'USAGE:*') { Write-Host $message; exit 64 }
+    Write-Host "the check stopped on an unexpected error: $($message -replace '\s+', ' ')"
+    exit 2
 }

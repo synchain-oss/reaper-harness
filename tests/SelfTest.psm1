@@ -644,6 +644,30 @@ function Get-HostCases {
     & $add 'drive paths and UNC paths in result text are masked' $false ((Hide-HarnessPaths 'a D:\scratch\y.wav b \\host\share\z c E:/fwd/x') -notmatch 'scratch|host|fwd')
     # Assembled from two parts: the repository's privacy scan flags a complete user directory path, as it should
     $spaced = 'C:\Us' + 'ers\John Smith\a.rpp'
+    $hide = { param($text, $want) (Hide-HarnessPaths $text) -ceq $want }
+    & $add 'result text: a drive path with spaces is masked to its end, nothing of a user name is left' $true (& $hide "cannot open $spaced" 'cannot open <path>')
+    & $add 'result text: a UNC path with spaces is masked to its end' $true (& $hide 'cannot open \\server\my share\a b.rpp' 'cannot open <path>')
+    & $add 'result text: forward slashes are masked as well, with a drive letter or without' $true ((& $hide 'in D:/my files/a b.rpp' 'in <path>') -and (& $hide 'in //server/my share/a b.rpp' 'in <path>'))
+    & $add 'result text: a double-quoted path is masked up to its closing quote, the rest stays' $true (& $hide "cannot open `"$spaced`" now" 'cannot open "<path>" now')
+    & $add 'result text: a single-quoted path, the way .NET writes them, is masked to its closing quote, the sentence stays' $true (& $hide "Access to the path '$spaced' is denied." "Access to the path '<path>' is denied.")
+    & $add 'result text: an apostrophe does not end a quoted path' $true (& $hide "the path 'D:\o'brien\my files\a.wav' is denied" "the path '<path>' is denied")
+    & $add 'result text: an apostrophe does not end an unquoted path' $true (& $hide "in D:\o'brien\my files\a.wav" 'in <path>')
+    & $add 'result text: a semicolon and a comma do not end a path' $true (& $hide 'in D:\a;b c,d\e.wav' 'in <path>')
+    & $add 'result text: a colon ends a path (a Lua error names the file and the line) and the message stays' $true (& $hide 'D:\my ext\a b.lua:12: attempt to index' '<path>:12: attempt to index')
+    & $add 'result text: < > | ? * end a path too: no file name can have them' $true ((& $hide 'D:\a b>c' '<path>>c') -and (& $hide 'D:\a b|c' '<path>|c') -and (& $hide 'D:\a b?c' '<path>?c') -and (& $hide 'D:\a b*c' '<path>*c') -and (& $hide 'D:\a b<c' '<path><c'))
+    & $add 'result text: the end of the line ends a path, the next line stays' $true ((& $hide "D:\a b`nnext" "<path>`nnext") -and (& $hide "D:\a b`r`nnext" "<path>`r`nnext"))
+    & $add 'result text: device path prefixes and file URLs leave nothing of the path' $true ((Hide-HarnessPaths ('\\.\' + $spaced)) -cnotmatch 'John|Smith' -and (Hide-HarnessPaths ('\\?\' + $spaced)) -cnotmatch 'John|Smith' -and (Hide-HarnessPaths ('file:///' + ($spaced -replace '\\', '/'))) -cnotmatch 'John|Smith')
+    & $add 'result text: a text without a path stays as it is' $false (& $hide 'identical=no lag=1 maxdiff=-6.0 head=0 50/50 a: b VST3: Fixture Gain (Vendor)' 'identical=no lag=1 maxdiff=-6.0 head=0 50/50 a: b VST3: Fixture Gain (Vendor)')
+    & $add 'result text: masking twice changes nothing, and nothing stays empty text' $false ((& $hide (Hide-HarnessPaths "in '$spaced' now") "in '<path>' now") -and (Hide-HarnessPaths $null) -ceq '')
+    # What an extension puts into the facts of an outcome goes into the result file
+    $factsIn = [ordered]@{ n = 3; ok = $true; none = $null; text = "at $spaced"; deep = [ordered]@{ list = @('a', 'D:\my files\b', [ordered]@{ x = '\\host\my share\c' }) }; obj = [pscustomobject]@{ p = 'E:/my files/d' }; 'D:\key with space\k' = 1; one = @('D:\my files\e'); empty = @() }
+    $factsOut = Hide-HarnessFacts $factsIn
+    & $add 'facts: strings are masked at any depth, in lists, dictionaries and objects' $true ($factsOut.text -ceq 'at <path>' -and $factsOut.deep.list[1] -ceq '<path>' -and $factsOut.deep.list[2].x -ceq '<path>' -and $factsOut.obj.p -ceq '<path>')
+    & $add 'facts: keys are masked too' $true ($factsOut.Contains('<path>') -and -not $factsOut.Contains('D:\key with space\k'))
+    & $add 'facts: numbers, booleans and nothing stay what they are, and lists stay lists' $false ($factsOut.n -eq 3 -and $factsOut.n -is [int] -and $factsOut.ok -is [bool] -and $factsOut.ok -and $null -eq $factsOut.none -and (ConvertTo-HarnessJsonText $factsOut.one) -ceq '["<path>"]' -and (ConvertTo-HarnessJsonText $factsOut.empty) -ceq '[]' -and $factsOut.deep.list[0] -ceq 'a')
+    $deepFacts = 'D:\my files\bottom'
+    foreach ($level in 1..40) { $deepFacts = [ordered]@{ down = $deepFacts } }
+    & $add 'facts: nesting deeper than any real result is cut off, without a path' $true (($deepText = ConvertTo-HarnessJsonText (Hide-HarnessFacts $deepFacts)) -and $deepText -clike '*<too deep>*' -and $deepText -cnotlike '*my files*')
     & $add 'dialog title: a drive path with spaces is masked to its end, nothing of a user name is left' $true ((ConvertTo-HarnessSafeTitle "Error in $spaced") -ceq 'Error in <path>')
     & $add 'dialog title: a UNC path with spaces is masked to its end' $true ((ConvertTo-HarnessSafeTitle 'Error in \\server\my share\a b.rpp') -ceq 'Error in <path>')
     & $add 'dialog title: forward slashes are masked as well, with a drive letter or without' $true ((ConvertTo-HarnessSafeTitle 'Error in D:/my files/a b.rpp') -ceq 'Error in <path>' -and (ConvertTo-HarnessSafeTitle 'Error in //server/my share/a b.rpp') -ceq 'Error in <path>')
@@ -799,6 +823,7 @@ function Get-VerdictCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'rounds: a changed default resource directory stops all further rounds' $true ((Get-HarnessRoundStop -CfgChanged $true) -like '*changed*')
     & $add 'rounds: a default resource directory that could not be listed stops all further rounds' $true ((Get-HarnessRoundStop -CfgUnreadable $true) -like '*could not be listed*')
     & $add 'rounds: a process that could not be ended stops all further rounds' $true ((Get-HarnessRoundStop -StillRunning $true) -like '*could not be ended*')
+    & $add 'rounds: a round that broke on an unexpected error stops all further rounds' $true ((Get-HarnessRoundStop -RoundBroke $true) -like '*unexpected error*')
     & $add 'rounds: with none of those the next round runs' $false ((Get-HarnessRoundStop) -ceq '')
     # What was seen to change, next to what could not be read
     $seen = { param([string[]]$Changed, [string[]]$Unreadable) @(Get-HarnessCfgChangesSeen -Changed $Changed -Unreadable $Unreadable) -join '|' }
@@ -901,6 +926,8 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a negative case without expectDetail'; E = { param($c) $c['negative'][0].Remove('expectDetail') }; M = 'expectDetail' }
         @{ L = 'a negative case whose expectDetail is not a valid regex'; E = { param($c) $c['negative'][0]['expectDetail'] = '(' }; M = 'expectDetail' }
         @{ L = 'a negative case with an empty expectDetail (it would match any reason)'; E = { param($c) $c['negative'][0]['expectDetail'] = '' }; M = 'expectDetail' }
+        @{ L = 'a negative case whose expectDetail is .* (it matches the empty text, so any reason)'; E = { param($c) $c['negative'][0]['expectDetail'] = '.*' }; M = 'empty text' }
+        @{ L = 'a negative case whose expectDetail is ^ (it matches the empty text, so any reason)'; E = { param($c) $c['negative'][0]['expectDetail'] = '^' }; M = 'empty text' }
         @{ L = 'an unknown expected outcome'; E = { param($c) $c['negative'][0]['expect'] = 'MAYBE' }; M = 'expect' }
         @{ L = 'a matrix in a negative case'; E = { param($c) $c['negative'][0]['matrix'] = [ordered]@{ sr = @(48000) } }; M = 'matrix' }
         @{ L = 'an axis both in the matrix and given directly'; E = { param($c) (& $scenario $c 'chain')['sr'] = 48000 }; M = 'both directly and in matrix' }
@@ -1194,6 +1221,11 @@ function Get-WiringCases([string]$RepoRoot) {
         (& $at $launch 'Enter-HarnessLocks')[0] -lt (& $at $launch 'Invoke-HarnessHost')[0] -and @(& $at $launch 'Get-HarnessSkipMarkerHit').Count -eq 2 -and (& $at $launch 'Get-HarnessSkipMarkerHit')[1] -lt (& $at $launch 'Invoke-HarnessHost')[0])
     $hostCalls = & $callsIn (Join-Path $RepoRoot 'src/Host.psm1') 'Invoke-HarnessHost'
     & $add 'wiring: Invoke-HarnessHost builds the command line from Get-HarnessCfgArgument (which checks the directory again)' $false ('Get-HarnessCfgArgument' -in $hostCalls.Name)
+    # REAPER cannot run here, so only the text of the driver can be looked at: the sampler waits for this mark, and with
+    # warmup 0 the loop never gets to write it
+    $driverText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'lua/driver.lua'))
+    & $add 'wiring: with warmup 0 the driver writes the warm-up mark before the first cycle' $true ($driverText -cmatch '(?s)if job\.warmup == 0 then[^\n]*\n\s*touch\(job\.warmMark\).*?for i = 1, job\.cycles do')
+    & $add 'wiring: with warm-up cycles the driver writes the mark after the last of them' $true ($driverText -cmatch '(?s)for i = 1, job\.cycles do.*?if i == job\.warmup then\s*touch\(job\.warmMark\)')
     # Below 7.4 the real path resolution meets members that do not exist; both entry points say so up front
     foreach ($script in 'run.ps1', 'doctor.ps1') {
         $wanted = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot $script), [ref]$null, [ref]$null)).ScriptRequirements.RequiredPSVersion

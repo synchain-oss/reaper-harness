@@ -150,8 +150,8 @@ must be equal. Then renders the original and the saved copy; the two renders mus
 ### instances
 
 Adds and removes instances of the listed plugins `cycles` times on an empty project (`play`: with the transport
-running), after `warmup` cycles. The process handle count and private memory are sampled after the warm-up and at
-the end; growth above `maxHandleGrowth` or `maxPrivateGrowthMB` is FAIL.
+running), after `warmup` cycles. The process handle count and private memory are sampled after the warm-up (with
+`warmup` 0, before the first cycle) and at the end; growth above `maxHandleGrowth` or `maxPrivateGrowthMB` is FAIL.
 
 | key | |
 |---|---|
@@ -166,7 +166,7 @@ A negative case is a scenario that must come out a certain way: the same fields 
 | key | |
 |---|---|
 | `expect` | `PASS`, `FAIL`, `SKIPPED`, `INCOMPLETE` or `REFUSED` |
-| `expectDetail` | a .NET regex, case sensitive, that the outcome detail must match |
+| `expectDetail` | a .NET regex, case sensitive, that the outcome detail must match; one that matches the empty text (`.*`, `^`) would accept any reason and is refused |
 
 A negative row is PASS only when both the outcome and the detail match. Outcomes alone can come about without the
 case having run (a lock that was busy, a render that never started); a matching outcome with another detail is

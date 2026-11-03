@@ -29,10 +29,38 @@ function New-HarnessOutcome([string]$Status, [string]$Detail = '', $Facts = $nul
     [pscustomobject]$o
 }
 
-# Paths in any text that leaves the machine (result json, console) are masked.
+# Paths in any text that leaves the machine (result json, console) are masked, from a drive letter, \\ or // on. A path
+# can hold spaces, apostrophes, semicolons and commas (a user name, for one), so none of those ends it; what does is a
+# character no Windows file name can have (a double quote, < > | ? *, a colon that is not followed by a slash) or the end
+# of the line. So whatever follows an unquoted path on its line goes with it: a sentence cut short is the price, a user
+# name in a result file is not. A path in single quotes, the way .NET and PowerShell write them, ends at the last single
+# quote of that stretch, and the sentence around it stays.
+$script:PathStart = '(?:[A-Za-z]:[\\/]|\\\\|//)'
+$script:PathBody = '(?:[^"<>|?*:\r\n]|:[\\/])*'
 function Hide-HarnessPaths([AllowNull()][string]$Text) {
     if (-not $Text) { return '' }
-    $Text -replace '[A-Za-z]:[\\/][^\s"'';,]*', '<path>' -replace '\\\\[^\s"'';,]*', '<path>'
+    $Text -replace "'$($script:PathStart)$($script:PathBody)'", "'<path>'" -replace "$($script:PathStart)$($script:PathBody)", '<path>'
+}
+
+# The same for the facts of an outcome, which an extension fills with whatever it likes: every string at any depth, keys
+# too. Numbers and booleans stay as they are. Anything nested deeper than any real result is cut off, not written out.
+function Hide-HarnessFacts([AllowNull()]$Value, [int]$Depth = 0) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) { return Hide-HarnessPaths $Value }
+    if ($Value -is [bool] -or $Value -is [ValueType]) { return $Value }
+    if ($Depth -ge 32) { return '<too deep>' }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $props = [ordered]@{}
+        foreach ($p in $Value.PSObject.Properties) { $props[$p.Name] = $p.Value }
+        return Hide-HarnessFacts $props $Depth
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $masked = [ordered]@{}
+        foreach ($k in @($Value.get_Keys())) { $masked[(Hide-HarnessPaths ([string]$k))] = Hide-HarnessFacts $Value[$k] ($Depth + 1) }
+        return $masked
+    }
+    if ($Value -is [System.Collections.IEnumerable]) { return , @(foreach ($item in $Value) { , (Hide-HarnessFacts $item ($Depth + 1)) }) }
+    Hide-HarnessPaths ([string]$Value)
 }
 
 # The context of one round. Installed: rows from Install-HarnessPlugins. Locks: full mutex names (fixed order).
@@ -114,6 +142,7 @@ function Get-HarnessHostFailure($Run) {
         'Timeout' { return "timed out after $($Run.Seconds) s and was ended" }
         'Killed' { return "killed at the deadline ($($Run.Seconds) s)" }
         'Modal' { return "stuck on dialog $($Run.Modal) (seen: $($Run.Windows -join ', ')), ended" }
+        'Error' { return "watching the process failed and it was ended: $($Run.Error)" }
     }
     if ($Run.ExitCode -ne 0) { return "exit code $($Run.ExitCode)" }
     $null
@@ -364,7 +393,8 @@ function Invoke-HarnessInstancesScenario($Ctx, $s) {
 
 # A driver step that never finishes: timeout and kill must both end as INCOMPLETE, with the process gone and every
 # lock of the set free again. Returns INCOMPLETE when the watchdog did that; PASS (the hang ended by itself) or FAIL
-# (process still alive though the launch says it is gone) otherwise. A process the watchdog says it could not end is
+# (process still alive though the launch says it is gone: the PID and its start time, since Windows hands out the number
+# again once a process is gone) otherwise. A process the watchdog says it could not end is
 # INCOMPLETE like every launch with StillRunning, and without the "free" text, so the negative case is not verified. A
 # lock that is busy because another process took it right after ours was released cannot be told apart from ours not
 # being released: that is INCOMPLETE without the "free" text as well.
@@ -373,7 +403,7 @@ function Invoke-HarnessHangScenario($Ctx, $s) {
     if (-not $lua.Why) { return New-HarnessOutcome PASS 'the driver that should hang finished normally (the negative case did not take effect)' }
     if ($lua.Run.Status -in 'LockBusy', 'SkipMarker', 'Blocked') { return New-HarnessOutcome INCOMPLETE "$($lua.Why); the watchdog could not be checked" }
     if ($lua.Run.StillRunning) { return New-HarnessOutcome INCOMPLETE $lua.Why }
-    if ($lua.Run.Pid -and (Get-Process -Id $lua.Run.Pid -ErrorAction SilentlyContinue)) { return New-HarnessOutcome FAIL "process $($lua.Run.Pid) is still alive" }
+    if (@(Get-HarnessOwnProcessesLeft -Started $Ctx.Started.ToArray() | Where-Object { $_.Pid -eq $lua.Run.Pid }).Count) { return New-HarnessOutcome FAIL "process $($lua.Run.Pid) is still alive" }
     $busy = @()
     $deadline = (Get-Date).AddSeconds(20)
     do {
@@ -417,6 +447,6 @@ function Invoke-HarnessScenario {
     $o | Add-Member -NotePropertyName Seconds -NotePropertyValue ([math]::Round($sw.Elapsed.TotalSeconds, 1)) -PassThru -Force
 }
 
-Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
+Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, Hide-HarnessFacts, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
     Get-HarnessLayout, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
     Get-HarnessScenarioKinds, Get-HarnessApi, Invoke-HarnessScenario, Get-HarnessSkipMarkerHit

@@ -74,6 +74,10 @@ machine (a deny entry, a subst drive, a mapped drive) is checked as undone, and 
   `Enter-HarnessLocks` and `Exit-HarnessLocks`. The run command does just that: `Invoke-HarnessLaunch` keeps the locks
   and notes the process, every later launch of that context starts nothing and reports `Blocked`, the round is
   INCOMPLETE and no further round runs. The kernel takes the locks back when the run's process ends.
+- Watching a process can fail too (its counters cannot be read, for one), and only the host knows the process at that
+  point. So nothing there throws past it: the process is ended by its PID as at a timeout, the status is `Error` with
+  the reason, the launch is INCOMPLETE, and a process that could not be ended is treated as above. The next launch never
+  starts next to it.
 - Before every launch the GUI lock has to be held: `Invoke-HarnessHost` enforces it, and without the object
   `Enter-HarnessLocks` returned for a set holding the default lock it refuses before anything starts. The other two
   checks before a launch, that no other `reaper.exe` is running and the listing of the default directory, are the job
@@ -110,7 +114,10 @@ only (about one in six in our runs); buy a licence or run again.
 - PASS, FAIL, INCOMPLETE (no conclusion: something did not run or could not be checked), SKIPPED (the suite did not
   run at all), REFUSED (a guard said no). INCOMPLETE is never counted as PASS; an empty set of outcomes is
   INCOMPLETE; SKIPPED mixed with PASS is INCOMPLETE.
-- A handler that throws gives INCOMPLETE, never PASS.
+- A handler that throws gives INCOMPLETE, never PASS. So does any other unexpected error past the guards: it is
+  something that could not be done, not a criterion that was checked, so the exit code is 2 and never 1. A round that
+  breaks still gets the checks of the end of a round (a change in the default resource directory, or a process it left,
+  is still FAIL), and no further round runs.
 - Negative cases pass only when the outcome and the reason both match (see [CONFIG.md](CONFIG.md#negative-cases)).
   The built-in ones prove the comparer, the watchdog and the entry guards in every round.
 
@@ -177,7 +184,9 @@ so the full name `VST3: <Name> (<Vendor>)` is used and checked after adding: the
 class ID of the saved block must all be the expected ones. A plugin that does not load is FAIL.
 
 A path in a recorded title is masked from its drive letter, `\\` or `//` up to the next double quote or the end of the
-title: a path can hold spaces, and a user name is often right after one.
+title: a path can hold spaces, and a user name is often right after one. Everything else that reaches a result file or
+the console (reasons, exception messages, the facts of a row, usage errors) is masked the same way, see
+[RESULTS.md](RESULTS.md). The console names the result file without its directory.
 
 The self-test exercises this with real message boxes. A session without a desktop (a service, for example some CI
 runners) cannot show them: the self-test then states that those cases did not run. The classification in the table

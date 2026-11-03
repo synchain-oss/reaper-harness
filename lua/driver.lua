@@ -175,6 +175,10 @@ end
 function steps.instances()
     openAndWait(job.project)
     local made = 0
+    if job.warmup == 0 then -- no warm-up cycles: the first sample is taken before the first cycle
+        touch(job.warmMark)
+        wait(0.8)
+    end
     for i = 1, job.cycles do
         reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
         local track = reaper.GetTrack(0, reaper.CountTracks(0) - 1)

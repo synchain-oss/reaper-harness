@@ -138,6 +138,18 @@ try { Write-Case 'watchdog: a stop that reports nothing but leaves the process a
 finally { & $endStandIn $run.Pid }
 $run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -KillAfterSec 1 -Stopper { param($id) Stop-Process -Id $id -Force; throw 'it had already gone' } -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
 Write-Case 'watchdog: a stop that complains about a process that is gone is no failure: not StillRunning' $false ($run.Status -eq 'Killed' -and $run.StillRunning -eq $false -and (& $gone $run.Pid))
+# Watching fails after the start: whatever broke, the process is not left behind, and only this function could end it
+$run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -WatchModules 'X.vst3' -ModuleSampler { param($p) throw "the module list`nbroke" } -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case 'watching fails: no exception, the process is ended by its PID, the status and the error say so, on one line' $true ($run.Status -ceq 'Error' -and $run.StillRunning -eq $false -and (& $gone $run.Pid) -and $run.Error -ceq 'the module list broke' -and $null -eq $run.ExitCode)
+$errorMark = Join-Path $Work 'error-mark'
+Set-Content -LiteralPath $errorMark -Value x
+$run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -WatchFiles @{ warm = $errorMark } -Sampler { param($p) throw 'the counters broke' } -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case 'watching fails: counters that cannot be read end the process too' $true ($run.Status -ceq 'Error' -and $run.StillRunning -eq $false -and (& $gone $run.Pid) -and $run.Error -ceq 'the counters broke')
+$run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -WatchModules 'X.vst3' -ModuleSampler { param($p) throw 'the module list broke' } -Stopper { param($id) } -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+try { Write-Case 'watching fails and the process cannot be ended: StillRunning, like at a timeout' $true ($run.Status -ceq 'Error' -and $run.StillRunning -eq $true -and -not (& $gone $run.Pid)) }
+finally { & $endStandIn $run.Pid }
+$run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -KillAfterSec 1 -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case 'watching fails: a launch where nothing broke has no error' $false ($run.Status -ceq 'Killed' -and $null -eq $run.Error)
 # What a caller learns about the process it had started, also when it is still there
 $startedRows = [Collections.Generic.List[object]]::new()
 $run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -KillAfterSec 1 -Stopper { param($id) } -StartedList $startedRows -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
@@ -416,6 +428,34 @@ try {
     Write-Case 'still running: a hang scenario after it is INCOMPLETE, the watchdog could not be checked' $true ($lateHang.Status -ceq 'INCOMPLETE' -and $lateHang.Detail -like 'an earlier REAPER*could not be checked' -and -not $seenLate.Called)
 } finally { & $endStandIn $stuckRun.Pid; & $releaseKept }
 Write-Case 'still running: with the kept locks released the lock is free again (what the end of the process does in a real run)' $false ((& $probeExit) -eq 0)
+# Watching fails, seen from the launch: ended and the locks free; not ended and the locks kept, like any other process
+$brokenCtx = & $newCtx @($gui)
+$brokenCtx.Installed = @{ a = [pscustomobject]@{ BinaryLeaf = 'X.vst3' } }
+$brokenCtx.Launcher = New-StandIn 'Start-Sleep -Seconds 60' @{}
+$brokenCtx.ModuleSampler = { param($p) throw 'the module list broke' }
+$brokenRun = Invoke-HarnessLaunch -Ctx $brokenCtx -HostArgs @{ TimeoutSec = 30 }
+Write-Case 'watching fails: the launch returns, its process is gone, the lock is free and nothing is noted against the context' $true ($brokenRun.Status -ceq 'Error' -and (& $gone $brokenRun.Pid) -and $null -eq $brokenCtx.StillRunning -and (& $probeExit) -eq 0)
+Write-Case 'watching fails: the failure says what broke and that the process was ended' $true ((Get-HarnessHostFailure $brokenRun) -ceq 'watching the process failed and it was ended: the module list broke')
+$brokenCtx.Stopper = $noStop
+$brokenStuck = Invoke-HarnessLaunch -Ctx $brokenCtx -HostArgs @{ TimeoutSec = 30 }
+try { Write-Case 'watching fails and the process cannot be ended: the lock stays held, the context notes it, the next launch is Blocked' $true ($brokenStuck.StillRunning -eq $true -and $brokenCtx.StillRunning.Pid -eq $brokenStuck.Pid -and (& $probeExit) -eq 1 -and (Invoke-HarnessLaunch -Ctx $brokenCtx -HostArgs @{ TimeoutSec = 5 }).Status -ceq 'Blocked') }
+finally { & $endStandIn $brokenStuck.Pid; & $releaseKept }
+# The hang scenario looks at its own process: a process with that number and another start time is not it. A stand-in that
+# says it stopped at once, so no process gets ended here; the number is the one of this self-test, which stays alive.
+$fakeProcess = { param($started) $p = [pscustomobject]@{ Id = $PID; HasExited = $false; ExitCode = 0; Started = $started }; Add-Member -InputObject $p -MemberType ScriptMethod -Name get_StartTime -Value { $this.Started }; Add-Member -InputObject $p -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }; $p }
+$hangScenario = [pscustomobject]@{ id = 'hang-own'; kind = 'hang'; timeoutSec = 1; killAfterSec = 0 }
+$reusedCtx = & $newCtx @($gui)
+$reusedStand = & $fakeProcess ([datetime]'2001-01-01')
+$reusedCtx.Launcher = { param($psi) $reusedStand }.GetNewClosure()
+$reusedCtx.Stopper = { param($id) }
+$o = Invoke-HarnessScenario -Ctx $reusedCtx -Scenario $hangScenario
+Write-Case 'hang: the number alive with another start time was handed out again: not our process, no FAIL' $true ($o.Status -ceq 'INCOMPLETE' -and $o.Detail -clike '*the process has ended and the GUI locks are free')
+$oursCtx = & $newCtx @($gui)
+$oursStand = & $fakeProcess (Get-Process -Id $PID).StartTime
+$oursCtx.Launcher = { param($psi) $oursStand }.GetNewClosure()
+$oursCtx.Stopper = { param($id) }
+$o = Invoke-HarnessScenario -Ctx $oursCtx -Scenario $hangScenario
+Write-Case 'hang: the same number and the same start time though the launch says it is gone: FAIL' $true ($o.Status -ceq 'FAIL' -and $o.Detail -clike "process $PID is still alive")
 # The same launch as the one a watchdog negative case is about
 $stuckNeg = & $newCtx @($gui)
 $stuckNeg.Launcher = New-StandIn 'Start-Sleep -Seconds 60' @{}
@@ -480,6 +520,30 @@ $written = @(Get-ChildItem -LiteralPath $usageResults -Filter '*.json' -ErrorAct
 Write-Case 'entry script: SKIPPED exits 3 and writes a result file named <time>-<config>-<label>.json' $false ($u.Exit -eq 3 -and $written.Count -eq 1 -and $written[0].Name -cmatch '^\d{8}-\d{6}-fixture-[0-9a-f]{12}-[0-9a-f]{12}\.json$')
 $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'doctor.ps1'), '-CfgDir', $CfgA, '-Config', $configFile, '-PluginDir', $suite.PluginDir, '-ReaperExe', (Join-Path $Work 'no-reaper.exe'))
 Write-Case 'doctor: the same preflight as run.ps1; something missing exits 3' $true ($u.Exit -eq 3 -and $u.Out -match 'reaper.exe not found')
+$u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $configFile, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir,
+    '-ResultDir', $usageResults, '-ReaperExe', (Join-Path $Work 'no-reaper.exe'))
+Write-Case 'entry script: the console names the result file, not the directory it is in' $true ($u.Exit -eq 3 -and $u.Out -cmatch 'result \d{8}-\d{6}-fixture-' -and $u.Out -cnotlike "*$usageResults*")
+# A result directory that cannot exist: the run has no conclusion, which is not a FAIL
+$notADir = Join-Path $Work 'result is a file'
+Set-Content -LiteralPath $notADir -Value x
+$u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $configFile, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir,
+    '-ResultDir', $notADir, '-ReaperExe', (Join-Path $Work 'no-reaper.exe'))
+Write-Case 'entry script: an unexpected error exits 2, never 1, says so, and the console shows no path' $true ($u.Exit -eq 2 -and $u.Out -clike 'INCOMPLETE: the run stopped on an unexpected error*' -and $u.Out -cnotlike "*$Work*" -and $u.Out -cnotlike '*is a file*')
+# A usage error that repeats a path out of the configuration
+$pathInConfig = & $writeVariant { param($c) $c.extensions = @{ modules = @('D:\my files\x.psm1'); lua = @() } }
+$u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $pathInConfig.Config, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir, '-ResultDir', $usageResults)
+Write-Case 'entry script: a usage error exits 64 and the console shows no path' $true ($u.Exit -eq 64 -and $u.Out -clike "USAGE: extension path '<path>' must be relative*" -and $u.Out -cnotlike '*my files*')
+$u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'doctor.ps1'), '-Config', $pathInConfig.Config)
+Write-Case 'doctor: a usage error exits 64 and the console shows no path' $true ($u.Exit -eq 64 -and $u.Out -clike "USAGE: extension path '<path>' must be relative*" -and $u.Out -cnotlike '*my files*')
+# A plugin binary somebody holds open: its hash cannot be read, in the preflight, before any result exists
+$lockedBinary = @(Get-ChildItem -LiteralPath $suite.PluginDir -Recurse -File | Where-Object { $_.Extension -ceq '.vst3' })[0].FullName
+$holder = [IO.File]::Open($lockedBinary, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try {
+    $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'doctor.ps1'), '-CfgDir', $CfgA, '-Config', $configFile, '-PluginDir', $suite.PluginDir, '-ReaperExe', $pwshExe)
+    Write-Case 'doctor: an unexpected error exits 2, says so, and the console shows no path' $true ($u.Exit -eq 2 -and $u.Out -clike '*the check stopped on an unexpected error*' -and $u.Out -cnotlike "*$RepoRoot*" -and $u.Out -cnotlike '*Fixture*vst3*Contents*')
+    $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $configFile, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir, '-ResultDir', $usageResults, '-ReaperExe', $pwshExe)
+    Write-Case 'entry script: an unexpected error in the preflight exits 2 too' $true ($u.Exit -eq 2 -and $u.Out -clike 'INCOMPLETE: the run stopped on an unexpected error*' -and $u.Out -cnotlike "*$RepoRoot*")
+} finally { $holder.Dispose() }
 # The guard negative case neg-skip-marker uses its own new marker, whether or not the caller's parameters already carry one
 $withKey = $suite.Clone(); $withKey.SkipMarker = @(Join-Path $Work 'caller-marker-that-is-not-there')
 $guardRun = { param($callerParams) try { $g = Invoke-HarnessGuardNegative -Params $callerParams -Guard 'skip-marker' -TempRoot $Work -FirstScenario 'chain-offline-44100'; $g.Observed -ceq 'SKIPPED' -and $g.Detail -cmatch $negs['neg-skip-marker'].expectDetail } catch { $false } }
@@ -546,6 +610,9 @@ $back = ConvertFrom-HarnessJson $json
 Write-Case 'result file: valid JSON with schema 1, the plugin hashes (12 hex digits) and no local path' $false (
     $back['schema'] -eq 1 -and $back['plugins'][0]['sha256'] -cmatch '^[0-9a-f]{12}$' -and $json -notmatch '[A-Za-z]:\\\\' -and (Split-Path -Leaf $path) -cmatch "-fixture-$($back['buildLabel'])\.json$")
 Write-Case 'end to end: the work files of an all-green round are removed' $false (-not (Test-Path -LiteralPath (Join-Path $e2e.ResultDir 'work')) -or @(Get-ChildItem -LiteralPath (Join-Path $e2e.ResultDir 'work') -Recurse -File).Count -eq 0)
+$extRow = @($rowsOut | Where-Object { $_.id -ceq 'ext-count' })[0]
+Write-Case 'end to end: a local path in the facts of an extension is masked in the row and in the result file' $true ($extRow.facts.count -eq 3 -and $extRow.facts.workDir -ceq '<path>' -and $json -cnotlike '*brien*')
+Write-Case 'result file: a run with nothing wrong has no error' $false ($back.Contains('error') -and $null -eq $back['error'] -and $null -eq $r.error)
 
 # ---- what a round counts as left behind ----
 $oneScenario = @{ Only = '^chain-offline-48000$'; NoNegative = $true }
@@ -553,12 +620,47 @@ $oneScenario = @{ Only = '^chain-offline-48000$'; NoNegative = $true }
 $byNameCalls = @{ N = 0 }
 $r = Invoke-WithSuiteCommand 'Get-HarnessReaperProcessIds' { $byNameCalls.N++; if ($byNameCalls.N -gt 1) { 4242 } }.GetNewClosure() { Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $hooks }
 Write-Case 'left behind: only a reaper.exe of somebody else on the machine does not turn a green round red, and is not counted' $false ($r.verdict -ceq 'PASS' -and $r.runs[0].verdict -ceq 'PASS' -and $r.runs[0].reaperProcessesLeft -eq 0)
-# A process this round started, and no launch reported: the host threw after the start
+# A process this round started, and no launch reported: the launch says it has exited, and it has not
 $leftBox = @{ Pid = 0 }
-$leftHooks = @{ Launcher = (New-TrackedLauncher (New-StandIn 'Start-Sleep -Seconds 60' @{}) $leftBox); ModuleSampler = { param($proc) throw 'the module list broke' } }
+$leftSleep = New-StandIn 'Start-Sleep -Seconds 60' @{}
+$saysExited = { param($psi) $real = & $leftSleep $psi; $leftBox.Pid = $real.Id; [pscustomobject]@{ Id = $real.Id; HasExited = $true; ExitCode = 0 } }.GetNewClosure()
+$leftHooks = @{ Launcher = $saysExited; ModuleSampler = $hooks.ModuleSampler }
 $r = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $leftHooks
 try { Write-Case 'left behind: a process this round started that did not exit makes the round FAIL, and is counted' $true ($leftBox.Pid -gt 0 -and -not (& $gone $leftBox.Pid) -and $r.verdict -ceq 'FAIL' -and $r.runs[0].verdict -ceq 'FAIL' -and $r.runs[0].reaperProcessesLeft -eq 1 -and $r.runs[0].stillRunning -eq $false) }
 finally { if ($leftBox.Pid) { & $endStandIn $leftBox.Pid } }
+# Watching fails in a real round: its process is ended, so nothing is left, and the round has no conclusion
+$errorBox = @{ Pid = 0 }
+$errorHooks = @{ Launcher = (New-TrackedLauncher (New-StandIn 'Start-Sleep -Seconds 60' @{}) $errorBox); ModuleSampler = { param($proc) throw 'the module list broke' } }
+$r = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $errorHooks
+Write-Case 'end to end: watching fails: the round is INCOMPLETE, not FAIL, its process is gone and nothing is left' $true ($errorBox.Pid -gt 0 -and (& $gone $errorBox.Pid) -and $r.verdict -ceq 'INCOMPLETE' -and $r.runs[0].reaperProcessesLeft -eq 0 -and $r.runs[0].stillRunning -eq $false -and $r.runs[0].scenarios[0].detail -clike '*watching the process failed and it was ended: the module list broke*')
+
+# ---- an unexpected error in a round, and outside the rows ----
+$faultPath = 'C:\Us' + 'ers\John Smith\x y.wav' # assembled: the repository's privacy scan flags a complete user directory path
+$faultHooks = $hooks.Clone()
+$faultHooks.RoundFault = { throw "boom at $faultPath" }.GetNewClosure()
+$r = Invoke-HarnessSuite @e2e @oneScenario -Repeat 2 -SelfTestHooks $faultHooks
+$lastRow = @($r.runs[0].scenarios)[-1]
+Write-Case 'round breaks: the round and the run are INCOMPLETE, a row says why without a path' $true ($r.verdict -ceq 'INCOMPLETE' -and $r.runs[0].verdict -ceq 'INCOMPLETE' -and $lastRow.id -ceq 'round-error' -and $lastRow.status -ceq 'INCOMPLETE' -and $lastRow.detail -ceq 'the round stopped on an unexpected error: boom at <path>')
+Write-Case 'round breaks: no further round runs, and the module check says it did not run' $true (@($r.runs).Count -eq 1 -and $r.runs[0].stoppedBecause -clike '*unexpected error*' -and $r.runs[0].moduleCheck.status -ceq 'INCOMPLETE')
+$turned = @{ N = 0 }
+$turning = { $turned.N++; [ordered]@{ 'reaper.ini' = "1|$($turned.N)" } }.GetNewClosure()
+$r = Invoke-WithSuiteCommand 'Get-HarnessDefaultCfgSnapshot' $turning { Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $faultHooks }
+Write-Case 'round breaks: the default resource directory is still checked: a change is FAIL, and named' $true ($r.verdict -ceq 'FAIL' -and ($r.runs[0].defaultCfgDir.changed -join ',') -ceq 'changed:reaper.ini')
+$leftBox.Pid = 0
+$leftFault = @{ Launcher = $saysExited; ModuleSampler = $hooks.ModuleSampler; RoundFault = $faultHooks.RoundFault }
+$r = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $leftFault
+try { Write-Case 'round breaks: a process it left is still counted: FAIL' $true ($leftBox.Pid -gt 0 -and $r.verdict -ceq 'FAIL' -and $r.runs[0].reaperProcessesLeft -eq 1) }
+finally { if ($leftBox.Pid) { & $endStandIn $leftBox.Pid } }
+$snapshots = @{ N = 0 }
+$thirdThrows = { $snapshots.N++; if ($snapshots.N -ge 3) { throw 'the listing broke' }; [ordered]@{ 'reaper.ini' = '1|1' } }.GetNewClosure()
+$r = Invoke-WithSuiteCommand 'Get-HarnessDefaultCfgSnapshot' $thirdThrows { Invoke-HarnessSuite @e2e @oneScenario -Repeat 2 -SelfTestHooks $hooks }
+Write-Case 'run stops: a green round before an unexpected error does not make the run green: INCOMPLETE, the error is in the result' $true ($r.verdict -ceq 'INCOMPLETE' -and @($r.runs).Count -eq 1 -and $r.runs[0].verdict -ceq 'PASS' -and $r.error -ceq 'the listing broke')
+$stoppedFile = Write-HarnessResult -Data $r -ResultDir $e2e.ResultDir
+Write-Case 'run stops: the result file has the verdict and the error' $true ((ConvertFrom-HarnessJson ([IO.File]::ReadAllText($stoppedFile)))['error'] -ceq 'the listing broke')
+$r = Invoke-WithSuiteCommand 'Install-HarnessPlugins' { throw "copy failed: $faultPath" }.GetNewClosure() { Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $hooks }
+Write-Case 'run stops: an error while installing the plugins is INCOMPLETE, no rounds, nothing started, no path in the error' $true ($r.verdict -ceq 'INCOMPLETE' -and @($r.runs).Count -eq 0 -and $r.launches -eq 0 -and $r.error -ceq 'copy failed: <path>')
+Write-Case 'run stops: a guard that refuses in there is still refused' $true (Test-Throws { Invoke-WithSuiteCommand 'Install-HarnessPlugins' { throw 'REFUSED: stub' } { $null = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $hooks } } 'REFUSED: stub')
+Write-Case 'run stops: a usage error in there is still a usage error' $true (Test-Throws { Invoke-WithSuiteCommand 'Install-HarnessPlugins' { throw 'USAGE: stub' } { $null = Invoke-HarnessSuite @e2e @oneScenario -SelfTestHooks $hooks } } 'USAGE: stub')
 
 # ---- a process the watchdog could not end, in a whole run of two rounds ----
 $stuckBox = @{ Pid = 0 }

@@ -200,7 +200,9 @@ function Get-HarnessModuleVerdict {
 function Stop-HostRefuse([string]$Why) { throw [System.InvalidOperationException]::new("REFUSED: $Why") }
 
 # Starts REAPER and waits for it to exit. Status: Exited / Timeout (TimeoutSec reached) / Killed (KillAfterSec
-# reached, for the negative cases) / Modal (a stuck dialog).
+# reached, for the negative cases) / Modal (a stuck dialog) / Error (watching it failed, Error says how: its counters
+# could not be read, for one). Once the process is started nothing in here throws: only this function knows the process,
+# so whatever goes wrong it is ended by its PID like at a timeout, and the caller gets the same StillRunning as there.
 # Refused before anything starts, with no way around it for a Launcher either: Lock is not an object from
 # Enter-HarnessLocks holding the default GUI lock; an element of ReaperArgs contains a double quote (the arguments go
 # to the process one by one, a quote of its own would arrive escaped); ReaperArgs names the configuration file switch
@@ -266,48 +268,55 @@ function Invoke-HarnessHost {
     foreach ($leaf in $WatchModules) { $modSeen[$leaf] = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
     $plugSeen = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $modScans = 0
-    while (-not $proc.HasExited) {
-        Start-Sleep -Milliseconds 250
-        $now = $sw.Elapsed.TotalSeconds
-        if ($KillAfterSec -gt 0 -and $now -ge $KillAfterSec) { $status = 'Killed'; break }
-        if ($now -ge $TimeoutSec) { $status = 'Timeout'; break }
-        if ($WatchModules.Count) {
-            $paths = $ModuleSampler ? (& $ModuleSampler $proc) : (Get-HarnessProcessModulePaths $proc)
-            if ($null -ne $paths) {
-                $modScans++
-                foreach ($modPath in $paths) {
-                    $leaf = [IO.Path]::GetFileName($modPath)
-                    foreach ($w in $WatchModules) { if ([string]::Equals($leaf, $w, [StringComparison]::OrdinalIgnoreCase)) { $null = $modSeen[$w].Add($modPath) } }
-                    if ($leaf -match '\.(vst3|clap)$') { $null = $plugSeen.Add($modPath) }
+    $hostError = $null
+    try {
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 250
+            $now = $sw.Elapsed.TotalSeconds
+            if ($KillAfterSec -gt 0 -and $now -ge $KillAfterSec) { $status = 'Killed'; break }
+            if ($now -ge $TimeoutSec) { $status = 'Timeout'; break }
+            if ($WatchModules.Count) {
+                $paths = $ModuleSampler ? (& $ModuleSampler $proc) : (Get-HarnessProcessModulePaths $proc)
+                if ($null -ne $paths) {
+                    $modScans++
+                    foreach ($modPath in $paths) {
+                        $leaf = [IO.Path]::GetFileName($modPath)
+                        foreach ($w in $WatchModules) { if ([string]::Equals($leaf, $w, [StringComparison]::OrdinalIgnoreCase)) { $null = $modSeen[$w].Add($modPath) } }
+                        if ($leaf -match '\.(vst3|clap)$') { $null = $plugSeen.Add($modPath) }
+                    }
                 }
             }
-        }
-        foreach ($row in [HarnessWin]::Windows([uint32]$ownPid)) {
-            $f = $row -split "`t", 4
-            $verdict = Get-HarnessModalVerdict -Class $f[2] -Visible ($f[1] -eq '1') -Title $f[3]
-            if ($verdict.Action -eq 'Ignore') { continue }
-            $null = $titles.Add($verdict.Name + ($verdict.Name -eq 'unknown-dialog' ? ':' + (ConvertTo-HarnessSafeTitle $f[3]) : ''))
-            $h = [long]$f[0]
-            if ($verdict.Action -eq 'PressNo') {
-                if ([HarnessWin]::Press($h, $script:IdNo)) { $dismissed.Add($verdict.Name) }
-            } elseif ($verdict.Action -eq 'Fatal') {
-                if (-not $firstSeen.ContainsKey($h)) { $firstSeen[$h] = $now }
-                elseif ($now - $firstSeen[$h] -ge 0.5) { $modal = $verdict.Name; [HarnessWin]::Close($h); $status = 'Modal'; break }
+            foreach ($row in [HarnessWin]::Windows([uint32]$ownPid)) {
+                $f = $row -split "`t", 4
+                $verdict = Get-HarnessModalVerdict -Class $f[2] -Visible ($f[1] -eq '1') -Title $f[3]
+                if ($verdict.Action -eq 'Ignore') { continue }
+                $null = $titles.Add($verdict.Name + ($verdict.Name -eq 'unknown-dialog' ? ':' + (ConvertTo-HarnessSafeTitle $f[3]) : ''))
+                $h = [long]$f[0]
+                if ($verdict.Action -eq 'PressNo') {
+                    if ([HarnessWin]::Press($h, $script:IdNo)) { $dismissed.Add($verdict.Name) }
+                } elseif ($verdict.Action -eq 'Fatal') {
+                    if (-not $firstSeen.ContainsKey($h)) { $firstSeen[$h] = $now }
+                    elseif ($now - $firstSeen[$h] -ge 0.5) { $modal = $verdict.Name; [HarnessWin]::Close($h); $status = 'Modal'; break }
+                }
+            }
+            if ($status) { break }
+            foreach ($label in @($WatchFiles.get_Keys())) {
+                if ($marks.Contains($label) -or $label -in $lost -or -not (Test-Path -LiteralPath $WatchFiles[$label])) { continue }
+                $sample = $Sampler ? (& $Sampler $proc) : (Get-HarnessProcessSample $proc)
+                if ($sample.Exited) { $lost.Add($label) } else { $marks[$label] = $sample }
             }
         }
-        if ($status) { break }
-        foreach ($label in @($WatchFiles.get_Keys())) {
-            if ($marks.Contains($label) -or $label -in $lost -or -not (Test-Path -LiteralPath $WatchFiles[$label])) { continue }
-            $sample = $Sampler ? (& $Sampler $proc) : (Get-HarnessProcessSample $proc)
-            if ($sample.Exited) { $lost.Add($label) } else { $marks[$label] = $sample }
+        if (-not $status) {
+            # The process exited faster than the next poll: the mark file is there but there was no time to sample.
+            # That is "exited before the sample" too, not "missing".
+            foreach ($label in @($WatchFiles.get_Keys())) {
+                if (-not $marks.Contains($label) -and $label -notin $lost -and (Test-Path -LiteralPath $WatchFiles[$label])) { $lost.Add($label) }
+            }
         }
-    }
-    if (-not $status) {
-        # The process exited faster than the next poll: the mark file is there but there was no time to sample.
-        # That is "exited before the sample" too, not "missing".
-        foreach ($label in @($WatchFiles.get_Keys())) {
-            if (-not $marks.Contains($label) -and $label -notin $lost -and (Test-Path -LiteralPath $WatchFiles[$label])) { $lost.Add($label) }
-        }
+    } catch {
+        # The process runs on and nobody else knows it: treated like a timeout below, and the status says what happened
+        $status = 'Error'
+        $hostError = $_.Exception.Message -replace '\s+', ' '
     }
     $stillRunning = $false
     if ($status) {
@@ -329,7 +338,7 @@ function Invoke-HarnessHost {
     [pscustomobject]@{
         Status = $status ?? 'Exited'; ExitCode = $exit; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Pid = $ownPid; StartedUtc = $startedUtc; ExitedUtc = $exitedUtc
         Modal = $modal; Dismissed = $dismissed.ToArray(); Windows = @($titles); Marks = $marks; SampleLost = $lost.ToArray(); Modules = $modules; ModuleScans = $modScans
-        PluginModules = @($plugSeen); StillRunning = $stillRunning
+        PluginModules = @($plugSeen); StillRunning = $stillRunning; Error = $hostError
     }
 }
 

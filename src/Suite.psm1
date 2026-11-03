@@ -9,7 +9,9 @@
 #                               not be listed or a process could not be ended, however green the rows are
 #   Get-HarnessNegativeVerdict  a negative case passes only with the expected outcome AND the expected reason
 #   Invoke-HarnessGuardNegative the guard negative cases: the real entry point run again in-process
-#   Invoke-HarnessSuite         everything above for one configuration
+#   Invoke-HarnessSuite         everything above for one configuration. Past the preflight an unexpected error is no
+#                               conclusion: the verdict is at least INCOMPLETE, the result says why, and a round that broke
+#                               still gets the checks of the end of a round. Refused and usage errors stay exceptions (64).
 #   Write-HarnessResult         the result json
 # Exit codes of run.ps1: 0 all PASS, 1 a FAIL, 2 an INCOMPLETE, 3 the whole suite SKIPPED, 64 refused or usage error.
 
@@ -109,13 +111,15 @@ function Get-HarnessRunVerdict {
 }
 
 # Pure function: why no further round may run ('' when one may). A default resource directory that changed or could not
-# be listed stops everything at once, and so does a process that could not be ended: REAPER is not started again.
+# be listed stops everything at once, and so does a process that could not be ended: REAPER is not started again. A
+# round that broke says nothing about the next, and whatever broke it is most likely still there.
 function Get-HarnessRoundStop {
-    param([bool]$CfgChanged = $false, [bool]$CfgUnreadable = $false, [bool]$StillRunning = $false)
+    param([bool]$CfgChanged = $false, [bool]$CfgUnreadable = $false, [bool]$StillRunning = $false, [bool]$RoundBroke = $false)
     $why = @(
         if ($CfgChanged) { 'the default resource directory changed' }
         if ($CfgUnreadable) { 'the default resource directory could not be listed in full' }
         if ($StillRunning) { 'a REAPER of this round could not be ended' }
+        if ($RoundBroke) { 'the round stopped on an unexpected error' }
     )
     $why -join '; '
 }
@@ -230,7 +234,7 @@ function Invoke-HarnessSuite {
         [string]$CfgDir = '', [Parameter(Mandatory)][string]$Config, [Parameter(Mandatory)][string]$PluginDir, [Parameter(Mandatory)][string]$ResultDir,
         [Parameter(Mandatory)][string]$ReaperExe, [string[]]$SkipMarker = @(), [string[]]$ExtraGuiLock = @(), [string]$Only = '', [int]$Repeat = 1,
         [switch]$NoNegative, [string]$BuildLabel = '', [switch]$KeepWork,
-        [hashtable]$SelfTestHooks = @{} # self-test only: Launcher (a stand-in for REAPER), ModuleSampler, Stopper
+        [hashtable]$SelfTestHooks = @{} # self-test only: Launcher (a stand-in for REAPER), ModuleSampler, Stopper, RoundFault (runs after the rows of a round)
     )
     $null = Initialize-HarnessCfg $CfgDir # refuses (REFUSED) before anything is touched
     if ($Repeat -lt 1) { Stop-Usage '-Repeat must be at least 1' }
@@ -246,97 +250,118 @@ function Invoke-HarnessSuite {
         schema = 1; tool = 'reaper-harness'; config = $conf.Name; buildLabel = ($BuildLabel ? $BuildLabel : (Get-HarnessDefaultLabel $Shas))
         startedUtc = [DateTime]::UtcNow.ToString('o'); reaper = $pre.ReaperVersion; verdict = 'SKIPPED'; launches = 0
         skipReasons = @($pre.Reasons | ForEach-Object { Hide-HarnessPaths $_ }); locks = $locks; extensions = @($ext.Modules)
-        plugins = @(); pluginPath = $null; scanShield = $null; runs = @()
+        plugins = @(); pluginPath = $null; scanShield = $null; runs = @(); error = $null
     }
     if ($pre.Reasons.Count) { return [pscustomobject]$result }
 
-    $installed = Install-HarnessPlugins -Plugins $conf.Plugins -PluginDir $PluginDir
-    $result.plugins = @($installed | ForEach-Object {
-            [ordered]@{ id = $_.Id; bundle = $_.Bundle; name = (Get-HarnessReaperName $_.Info); version = $_.Info.Version; classId = $_.Info.Cid; sha256 = $_.Sha256.Substring(0, 12) }
-        })
-    $null = Set-HarnessPluginPath
-    $result.pluginPath = 'system VST3 directories first, the private plugins directory last'
-    $shield = Update-HarnessScanCache -Keep @($installed | ForEach-Object { $_.Bundle })
-    $result.scanShield = [ordered]@{ directories = $shield.Dirs; files = $shield.Scanned; added = $shield.Added; replaced = $shield.Replaced; removed = $shield.Removed; unshielded = $shield.Unshielded }
-    $stamp = [DateTime]::Now.ToString('yyyyMMdd-HHmmss')
-    $driver = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../lua/driver.lua'))
-    $all = @($picked.Positive) + @($picked.Negative)
-    $needLearn = @($all | Where-Object { Test-HarnessNeedsLearn $_ }).Count -gt 0
-    $variants = Get-HarnessLearnVariants -Config $conf -Scenarios @($all | Where-Object { Test-HarnessNeedsLearn $_ })
-    $firstId = @($conf.Scenarios)[0].id
-    $guardSet = @{ CfgDir = $CfgDir; Config = $Config; PluginDir = $PluginDir; ResultDir = $ResultDir; ReaperExe = $ReaperExe; SkipMarker = $SkipMarker; ExtraGuiLock = $ExtraGuiLock; SelfTestHooks = $SelfTestHooks }
     $launches = 0
-    for ($k = 1; $k -le $Repeat; $k++) {
-        $work = Join-Path $ResultDir "work/$stamp-run$k"
-        $null = New-Item -ItemType Directory -Force -Path $work
-        $before = Get-HarnessDefaultCfgSnapshot
-        $ctx = New-HarnessContext -ReaperExe $ReaperExe -WorkDir $work -Driver $driver -Config $conf -Installed $installed -Locks $locks -SkipMarkers $SkipMarker -LuaExtensions $ext.Lua -Kinds $ext.Kinds
-        if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
-        if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
-        if ($SelfTestHooks['Stopper']) { $ctx.Stopper = $SelfTestHooks['Stopper'] }
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        $rows = [Collections.Generic.List[object]]::new()
-        $NotRun = ''
-        if ($needLearn) {
-            $t0 = [Diagnostics.Stopwatch]::StartNew()
-            $o = try { Invoke-HarnessLearn -Ctx $ctx -Variants $variants } catch { New-HarnessOutcome INCOMPLETE "learning threw: $($_.Exception.Message -replace '\s+', ' ')" }
-            $row = [ordered]@{ id = 'learn'; kind = 'learn'; status = $o.Status; seconds = [math]::Round($t0.Elapsed.TotalSeconds, 1); detail = (Hide-HarnessPaths $o.Detail) }
-            if ($o.PSObject.Properties['Facts']) { $row.facts = $o.Facts }
-            $rows.Add($row)
-            Write-HarnessLine ("  [{0}] learn  {1} s  {2}" -f $o.Status, $row.seconds, $o.Detail)
-            if ($o.Status -ne 'PASS') { $NotRun = 'not run: learning the plugin blocks did not succeed (see the learn row)' }
+    try {
+        $installed = Install-HarnessPlugins -Plugins $conf.Plugins -PluginDir $PluginDir
+        $result.plugins = @($installed | ForEach-Object {
+                [ordered]@{ id = $_.Id; bundle = $_.Bundle; name = (Get-HarnessReaperName $_.Info); version = $_.Info.Version; classId = $_.Info.Cid; sha256 = $_.Sha256.Substring(0, 12) }
+            })
+        $null = Set-HarnessPluginPath
+        $result.pluginPath = 'system VST3 directories first, the private plugins directory last'
+        $shield = Update-HarnessScanCache -Keep @($installed | ForEach-Object { $_.Bundle })
+        $result.scanShield = [ordered]@{ directories = $shield.Dirs; files = $shield.Scanned; added = $shield.Added; replaced = $shield.Replaced; removed = $shield.Removed; unshielded = $shield.Unshielded }
+        $stamp = [DateTime]::Now.ToString('yyyyMMdd-HHmmss')
+        $driver = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../lua/driver.lua'))
+        $all = @($picked.Positive) + @($picked.Negative)
+        $needLearn = @($all | Where-Object { Test-HarnessNeedsLearn $_ }).Count -gt 0
+        $variants = Get-HarnessLearnVariants -Config $conf -Scenarios @($all | Where-Object { Test-HarnessNeedsLearn $_ })
+        $firstId = @($conf.Scenarios)[0].id
+        $guardSet = @{ CfgDir = $CfgDir; Config = $Config; PluginDir = $PluginDir; ResultDir = $ResultDir; ReaperExe = $ReaperExe; SkipMarker = $SkipMarker; ExtraGuiLock = $ExtraGuiLock; SelfTestHooks = $SelfTestHooks }
+        for ($k = 1; $k -le $Repeat; $k++) {
+            $work = Join-Path $ResultDir "work/$stamp-run$k"
+            $null = New-Item -ItemType Directory -Force -Path $work
+            $before = Get-HarnessDefaultCfgSnapshot
+            $ctx = New-HarnessContext -ReaperExe $ReaperExe -WorkDir $work -Driver $driver -Config $conf -Installed $installed -Locks $locks -SkipMarkers $SkipMarker -LuaExtensions $ext.Lua -Kinds $ext.Kinds
+            if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
+            if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
+            if ($SelfTestHooks['Stopper']) { $ctx.Stopper = $SelfTestHooks['Stopper'] }
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $rows = [Collections.Generic.List[object]]::new()
+            $NotRun = ''
+            # What the end of the round works with if the rows below never get that far
+            $mods = New-HarnessOutcome INCOMPLETE 'the module check did not run' ([ordered]@{ launches = 0; foreign = @(); otherPlugins = 0 })
+            $brokenRound = $false
+            try {
+                if ($needLearn) {
+                    $t0 = [Diagnostics.Stopwatch]::StartNew()
+                    $o = try { Invoke-HarnessLearn -Ctx $ctx -Variants $variants } catch { New-HarnessOutcome INCOMPLETE "learning threw: $($_.Exception.Message -replace '\s+', ' ')" }
+                    $row = [ordered]@{ id = 'learn'; kind = 'learn'; status = $o.Status; seconds = [math]::Round($t0.Elapsed.TotalSeconds, 1); detail = (Hide-HarnessPaths $o.Detail) }
+                    if ($o.PSObject.Properties['Facts']) { $row.facts = $o.Facts }
+                    $rows.Add($row)
+                    Write-HarnessLine ("  [{0}] learn  {1} s  {2}" -f $o.Status, $row.seconds, $o.Detail)
+                    if ($o.Status -ne 'PASS') { $NotRun = 'not run: learning the plugin blocks did not succeed (see the learn row)' }
+                }
+                foreach ($s in $picked.Positive) {
+                    if ($NotRun -and (Test-HarnessNeedsLearn $s)) { $o = New-HarnessOutcome INCOMPLETE $NotRun | Add-Member -NotePropertyName Seconds -NotePropertyValue 0 -PassThru }
+                    else { $o = Invoke-HarnessScenario -Ctx $ctx -Scenario $s }
+                    $row = [ordered]@{ id = $s.id; kind = $s.kind; status = $o.Status; seconds = $o.Seconds; detail = (Hide-HarnessPaths $o.Detail) }
+                    if ($o.PSObject.Properties['Facts']) { $row.facts = Hide-HarnessFacts $o.Facts }
+                    $rows.Add($row)
+                    Write-HarnessLine ("  [{0}] {1}  {2} s  {3}" -f $o.Status, $s.id, $o.Seconds, $o.Detail)
+                }
+                foreach ($s in $picked.Negative) {
+                    $skip = ($NotRun -and (Test-HarnessNeedsLearn $s)) ? $NotRun : ''
+                    $row = Invoke-HarnessNegativeRow -Context $ctx -Scenario $s -GuardParams $guardSet -TempRoot $work -FirstScenario $firstId -NotRun $skip
+                    $rows.Add($row)
+                    Write-HarnessLine ("  [{0}] {1}  expected {2}, observed {3}  {4}" -f $row.status, $row.id, $row.expected, $row.observed, $row.detail)
+                }
+                if ($SelfTestHooks['RoundFault']) { & $SelfTestHooks['RoundFault'] }
+                $mods = Get-HarnessModuleCheck -Ctx $ctx
+                if (-not $KeepWork -and @($rows | Where-Object { $_.status -ne 'PASS' }).Count -eq 0 -and $mods.Status -eq 'PASS') {
+                    # All green: delete this round's files one by one (never recursively); otherwise keep them for inspection
+                    foreach ($f in $ctx.Files) { if (Test-Path -LiteralPath $f -PathType Leaf) { Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue } }
+                }
+            } catch {
+                # No conclusion for this round, and what has to be checked at the end of every round still is: the default
+                # resource directory and the processes of this round
+                $brokenRound = $true
+                $row = [ordered]@{ id = 'round-error'; kind = 'internal'; status = 'INCOMPLETE'; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); detail = (Hide-HarnessPaths "the round stopped on an unexpected error: $($_.Exception.Message -replace '\s+', ' ')") }
+                $rows.Add($row)
+                Write-HarnessLine ("  [{0}] {1}  {2}" -f $row.status, $row.id, $row.detail)
+            }
+            $launches += $ctx.Launches
+            if (-not (Get-ChildItem -LiteralPath $work -Force)) { Remove-Item -LiteralPath $work -ErrorAction SilentlyContinue }
+            $after = Get-HarnessDefaultCfgSnapshot
+            $cmp = Compare-HarnessDefaultCfgSnapshot -Before $before -After $after
+            $changesSeen = @(Get-HarnessCfgChangesSeen -Changed $cmp.Changed -Unreadable $cmp.Unreadable)
+            $dirChanged = $changesSeen.Count -gt 0
+            $dirUnreadable = @($cmp.Unreadable).Count -gt 0
+            # Only processes this round started count. The locks are free between launches, so a reaper.exe found by name may be
+            # another session's, which started after the preflight and says nothing about this round.
+            $ownLeft = @(Get-HarnessOwnProcessesLeft -Started $ctx.Started.ToArray())
+            $notEnded = [bool]$ctx.StillRunning
+            $unreported = @($ownLeft | Where-Object { -not $notEnded -or $_.Pid -ne $ctx.StillRunning.Pid })
+            $statuses = @($rows | ForEach-Object { $_.status }) + $mods.Status
+            $verdict = Get-HarnessRunVerdict -RowStatuses $statuses -CfgChanged $dirChanged -CfgUnreadable $dirUnreadable -Residual $unreported.Count -StillRunning $notEnded
+            $counts = [ordered]@{}
+            foreach ($st in 'PASS', 'FAIL', 'INCOMPLETE', 'SKIPPED') { $counts[$st] = @($rows | Where-Object { $_.status -eq $st }).Count }
+            $runRow = [ordered]@{
+                index = $k; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); verdict = $verdict; launches = $ctx.Launches; counts = $counts
+                defaultCfgDir = [ordered]@{ unchanged = $cmp.Same; entries = $cmp.Count; changed = @($changesSeen | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }); unreadable = @($cmp.Unreadable | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }) }
+                reaperProcessesLeft = $ownLeft.Count
+                stillRunning = $notEnded
+                moduleCheck = [ordered]@{ status = $mods.Status; detail = (Hide-HarnessPaths $mods.Detail); launches = $mods.Facts.launches; foreign = @($mods.Facts.foreign); otherPlugins = $mods.Facts.otherPlugins }
+                scenarios = $rows.ToArray()
+            }
+            $result.runs += $runRow
+            Write-HarnessLine ("round {0}/{1}: {2}, {3} s, REAPER started {4} times, module check {5}, default resource directory {6}" -f $k, $Repeat, $verdict, $runRow.seconds, $ctx.Launches, $mods.Status,
+                ($cmp.Same ? 'unchanged' : "$($dirChanged ? "CHANGED: $(@($changesSeen | Select-Object -First 8) -join ', ')" : 'not shown unchanged')$($dirUnreadable ? "; could not be listed: $(@($cmp.Unreadable | Select-Object -First 8) -join ', ')" : '')"))
+            $stop = Get-HarnessRoundStop -CfgChanged $dirChanged -CfgUnreadable $dirUnreadable -StillRunning $notEnded -RoundBroke $brokenRound
+            if ($stop) { $runRow.stoppedBecause = $stop; Write-HarnessLine "  no further rounds: $stop"; break }
         }
-        foreach ($s in $picked.Positive) {
-            if ($NotRun -and (Test-HarnessNeedsLearn $s)) { $o = New-HarnessOutcome INCOMPLETE $NotRun | Add-Member -NotePropertyName Seconds -NotePropertyValue 0 -PassThru }
-            else { $o = Invoke-HarnessScenario -Ctx $ctx -Scenario $s }
-            $row = [ordered]@{ id = $s.id; kind = $s.kind; status = $o.Status; seconds = $o.Seconds; detail = (Hide-HarnessPaths $o.Detail) }
-            if ($o.PSObject.Properties['Facts']) { $row.facts = $o.Facts }
-            $rows.Add($row)
-            Write-HarnessLine ("  [{0}] {1}  {2} s  {3}" -f $o.Status, $s.id, $o.Seconds, $o.Detail)
-        }
-        foreach ($s in $picked.Negative) {
-            $skip = ($NotRun -and (Test-HarnessNeedsLearn $s)) ? $NotRun : ''
-            $row = Invoke-HarnessNegativeRow -Context $ctx -Scenario $s -GuardParams $guardSet -TempRoot $work -FirstScenario $firstId -NotRun $skip
-            $rows.Add($row)
-            Write-HarnessLine ("  [{0}] {1}  expected {2}, observed {3}  {4}" -f $row.status, $row.id, $row.expected, $row.observed, $row.detail)
-        }
-        $launches += $ctx.Launches
-        $mods = Get-HarnessModuleCheck -Ctx $ctx
-        if (-not $KeepWork -and @($rows | Where-Object { $_.status -ne 'PASS' }).Count -eq 0 -and $mods.Status -eq 'PASS') {
-            # All green: delete this round's files one by one (never recursively); otherwise keep them for inspection
-            foreach ($f in $ctx.Files) { if (Test-Path -LiteralPath $f -PathType Leaf) { Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue } }
-        }
-        if (-not (Get-ChildItem -LiteralPath $work -Force)) { Remove-Item -LiteralPath $work -ErrorAction SilentlyContinue }
-        $after = Get-HarnessDefaultCfgSnapshot
-        $cmp = Compare-HarnessDefaultCfgSnapshot -Before $before -After $after
-        $changesSeen = @(Get-HarnessCfgChangesSeen -Changed $cmp.Changed -Unreadable $cmp.Unreadable)
-        $dirChanged = $changesSeen.Count -gt 0
-        $dirUnreadable = @($cmp.Unreadable).Count -gt 0
-        # Only processes this round started count. The locks are free between launches, so a reaper.exe found by name may be
-        # another session's, which started after the preflight and says nothing about this round.
-        $ownLeft = @(Get-HarnessOwnProcessesLeft -Started $ctx.Started.ToArray())
-        $notEnded = [bool]$ctx.StillRunning
-        $unreported = @($ownLeft | Where-Object { -not $notEnded -or $_.Pid -ne $ctx.StillRunning.Pid })
-        $statuses = @($rows | ForEach-Object { $_.status }) + $mods.Status
-        $verdict = Get-HarnessRunVerdict -RowStatuses $statuses -CfgChanged $dirChanged -CfgUnreadable $dirUnreadable -Residual $unreported.Count -StillRunning $notEnded
-        $counts = [ordered]@{}
-        foreach ($st in 'PASS', 'FAIL', 'INCOMPLETE', 'SKIPPED') { $counts[$st] = @($rows | Where-Object { $_.status -eq $st }).Count }
-        $runRow = [ordered]@{
-            index = $k; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); verdict = $verdict; launches = $ctx.Launches; counts = $counts
-            defaultCfgDir = [ordered]@{ unchanged = $cmp.Same; entries = $cmp.Count; changed = @($changesSeen | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }); unreadable = @($cmp.Unreadable | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }) }
-            reaperProcessesLeft = $ownLeft.Count
-            stillRunning = $notEnded
-            moduleCheck = [ordered]@{ status = $mods.Status; detail = (Hide-HarnessPaths $mods.Detail); launches = $mods.Facts.launches; foreign = @($mods.Facts.foreign); otherPlugins = $mods.Facts.otherPlugins }
-            scenarios = $rows.ToArray()
-        }
-        $result.runs += $runRow
-        Write-HarnessLine ("round {0}/{1}: {2}, {3} s, REAPER started {4} times, module check {5}, default resource directory {6}" -f $k, $Repeat, $verdict, $runRow.seconds, $ctx.Launches, $mods.Status,
-            ($cmp.Same ? 'unchanged' : "$($dirChanged ? "CHANGED: $(@($changesSeen | Select-Object -First 8) -join ', ')" : 'not shown unchanged')$($dirUnreadable ? "; could not be listed: $(@($cmp.Unreadable | Select-Object -First 8) -join ', ')" : '')"))
-        $stop = Get-HarnessRoundStop -CfgChanged $dirChanged -CfgUnreadable $dirUnreadable -StillRunning $notEnded
-        if ($stop) { $runRow.stoppedBecause = $stop; Write-HarnessLine "  no further rounds: $stop"; break }
+    } catch {
+        # A guard or a usage error stays what it is. Anything else (a plugin that changed while it was copied, a disk that is
+        # full) is something that could not be done, not a criterion that was checked: no conclusion, and the result says why
+        if ($_.Exception.Message -like 'REFUSED:*' -or $_.Exception.Message -like 'USAGE:*') { throw }
+        $result.error = Hide-HarnessPaths ($_.Exception.Message -replace '\s+', ' ')
+        Write-HarnessLine "the run stopped on an unexpected error: $($result.error)"
     }
     $result.launches = $launches
-    $result.verdict = Get-HarnessWorstStatus @($result.runs | ForEach-Object { $_.verdict })
+    $result.verdict = Get-HarnessWorstStatus (@($result.runs | ForEach-Object { $_.verdict }) + @(if ($result.error) { 'INCOMPLETE' }))
     [pscustomobject]$result
 }
 
