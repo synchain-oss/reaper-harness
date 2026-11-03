@@ -9,9 +9,12 @@
 #   Install-HarnessPlugins -Plugins <config plugins> -PluginDir <dir>
 #       copies each configured bundle into the private configuration directory (plugins\), replacing an older
 #       copy, and returns one row per plugin (paths, sha256 of the binary, moduleinfo)
-#   Get-HarnessJsfxInfo / Install-HarnessJsfx
+#   Get-HarnessJsfxInfo / Install-HarnessJsfx / Install-HarnessToolJsfx
 #       the JSFX shipped in jsfx/ (name REAPER shows, how to add it, its path under Effects), copied into the
-#       private configuration directory (Effects\reaper-harness\) for the plugins configured with "jsfx"
+#       private configuration directory (Effects\reaper-harness\) for the plugins configured with "jsfx", and the
+#       block probe and the feed of the transport kind
+#   Install-HarnessFeedWav -Source <wav>
+#       the file the feed JSFX plays, copied to Data\reaper-harness\feed.wav of the private configuration
 #   Update-HarnessScanCache -Keep <bundle names>
 #       the scan shield, see below
 #   Set-HarnessPluginPath
@@ -105,22 +108,52 @@ function Get-HarnessJsfxInfo([Parameter(Mandatory)][string]$Name) {
     [pscustomobject]@{ Name = 'JS: ' + ($desc[0] -replace '^desc:', '').Trim(); AddName = "JS:$rel"; Ident = $rel; Source = $file; Sha256 = (Get-HarnessSha256 $file) }
 }
 
-# Copies the JSFX of the plugins configured with "jsfx" into Effects\reaper-harness\ of the private configuration
-# directory. Returns one row per such plugin: Id, Jsfx, Name, AddName, Ident, Sha256.
+# A directory of the pinned private configuration (Effects\reaper-harness, Data\reaper-harness), created when missing.
+function Get-HarnessPrivateSubdir([Parameter(Mandatory)][string]$Relative) {
+    $cfgDir = Get-HarnessPinnedCfgDir
+    $target = Join-Path $cfgDir $Relative
+    if (-not (Test-HarnessUnder $target $cfgDir)) { throw "the private $Relative directory is not inside the configuration directory" }
+    $null = New-Item -ItemType Directory -Force -Path $target
+    $target
+}
+
+# Copies one JSFX of the tool into Effects\reaper-harness\ of the private configuration directory; returns its info.
+function Copy-HarnessJsfx([Parameter(Mandatory)][string]$Name) {
+    $info = Get-HarnessJsfxInfo $Name
+    $dst = Join-Path (Get-HarnessPrivateSubdir 'Effects\reaper-harness') "$Name.jsfx"
+    Copy-Item -LiteralPath $info.Source -Destination $dst -Force
+    if ((Get-HarnessSha256 $dst) -cne $info.Sha256) { Stop-Plugin "$Name.jsfx changed while it was being copied" }
+    $info
+}
+
+# Copies the JSFX of the plugins configured with "jsfx" into the private configuration directory. Returns one row per
+# such plugin: Id, Jsfx, Name, AddName, Ident, Sha256.
 function Install-HarnessJsfx {
     param([Parameter(Mandatory)]$Plugins)
-    $cfgDir = Get-HarnessPinnedCfgDir
-    $target = Join-Path $cfgDir 'Effects\reaper-harness'
-    if (-not (Test-HarnessUnder $target $cfgDir)) { throw 'the private Effects directory is not inside the configuration directory' }
     $rows = foreach ($p in @($Plugins.get_Values() | Where-Object { $_.Kind -eq 'jsfx' })) {
-        $info = Get-HarnessJsfxInfo $p.Jsfx
-        $null = New-Item -ItemType Directory -Force -Path $target
-        $dst = Join-Path $target "$($p.Jsfx).jsfx"
-        Copy-Item -LiteralPath $info.Source -Destination $dst -Force
-        if ((Get-HarnessSha256 $dst) -cne $info.Sha256) { Stop-Plugin "$($p.Jsfx).jsfx changed while it was being copied" }
+        $info = Copy-HarnessJsfx $p.Jsfx
         [pscustomobject]@{ Id = $p.Id; Jsfx = $p.Jsfx; Name = $info.Name; AddName = $info.AddName; Ident = $info.Ident; Sha256 = $info.Sha256 }
     }
     , @($rows)
+}
+
+# The JSFX the transport kind observes and feeds with (no plugins under test, and they cannot be configured as such).
+# Returns name -> info (Name, AddName, Ident, Sha256).
+$script:ToolJsfx = 'harness-block-probe', 'harness-feed'
+function Install-HarnessToolJsfx {
+    $out = @{}
+    foreach ($n in $script:ToolJsfx) { $out[$n] = Copy-HarnessJsfx $n }
+    $out
+}
+
+# What the feed JSFX plays: Data\reaper-harness\feed.wav of the private configuration. The JSFX opens it by that name
+# (relative to the Data directory; measured on REAPER 7.82), so the JSFX file and its hash never change. Replaced
+# before every transport launch.
+function Install-HarnessFeedWav([Parameter(Mandatory)][string]$Source) {
+    $dst = Join-Path (Get-HarnessPrivateSubdir 'Data\reaper-harness') 'feed.wav'
+    $sha = Get-HarnessSha256 $Source
+    Copy-Item -LiteralPath $Source -Destination $dst -Force
+    if ((Get-HarnessSha256 $dst) -cne $sha) { throw 'the feed source changed while it was being copied' }
 }
 
 # REAPER's cache key for a plugin file: the file name with every character other than ASCII letters, digits and '.'
@@ -287,5 +320,5 @@ function Update-HarnessScanCache {
     [pscustomobject]@{ Dirs = $scanDirs.Count; Scanned = $scan.Items.Count; Added = $r.Added; Replaced = $r.Replaced; Removed = $r.Removed; Unshielded = $scan.Unshielded }
 }
 
-Export-ModuleMember -Function Read-HarnessModuleInfo, Get-HarnessBundleBinary, Install-HarnessPlugins, Get-HarnessJsfxInfo, Install-HarnessJsfx, Get-HarnessCacheKey, ConvertTo-HarnessCacheStamp, Update-HarnessScanCacheText,
+Export-ModuleMember -Function Read-HarnessModuleInfo, Get-HarnessBundleBinary, Install-HarnessPlugins, Get-HarnessJsfxInfo, Install-HarnessJsfx, Install-HarnessToolJsfx, Install-HarnessFeedWav, Get-HarnessCacheKey, ConvertTo-HarnessCacheStamp, Update-HarnessScanCacheText,
     Get-HarnessForeignScanDirs, Get-HarnessScanItems, Update-HarnessScanCache, Get-HarnessSha256, Get-HarnessPluginPathValue, Set-HarnessPluginPath

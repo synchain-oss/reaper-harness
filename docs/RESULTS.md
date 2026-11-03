@@ -48,6 +48,7 @@ Plugin hashes are cut to their first 12 hex digits.
 | `defaultCfgDir` | object | `unchanged` (bool), `entries` (listed before), `changed` (up to 8 entries seen to change, `added:` / `removed:` / `changed:` + relative path), `unreadable` (up to 8 entries that could not be listed, `.` for the directory itself; `unchanged` is false when there are any) |
 | `reaperProcessesLeft` | integer | processes this round started that are still there after it, recognised by process ID and start time (must be 0); a `reaper.exe` of somebody else is not counted |
 | `stillRunning` | boolean | a process of this round could not be ended by the watchdog: its GUI locks stay held and nothing was started after it (must be false) |
+| `retries` | object[] | launches done once more because the evaluation licence reminder ended them ([SAFETY.md](SAFETY.md#dialogs)): `label` (the scenario and step), `reason` (`license-nag`); empty when there were none |
 | `moduleCheck` | object | `status`, `detail`, `launches`, `foreign` (tested binaries seen from elsewhere, with the launch), `otherPlugins` (count of other `.vst3` / `.clap` modules seen) |
 | `scenarios` | object[] | the rows, in run order |
 | `stoppedBecause` | string | only when no further round ran: the default resource directory changed, could not be listed in full, a process could not be ended, or the round stopped on an unexpected error |
@@ -60,8 +61,8 @@ Plugin hashes are cut to their first 12 hex digits.
 | `kind` | string | |
 | `status` | string | `PASS`, `FAIL` or `INCOMPLETE` |
 | `seconds` | number | |
-| `detail` | string | one line; for renders the comparer line (`identical= lag= maxdiff= head= frames= channels= rate= format= nonfinite= peak=`, then `rms=` and `nan= inf=` when they apply), then ` \| stem <track>: <its line>` per stem; `device` and `savereopen` end with `states saved back unchanged: <plugin> <state> <sha256>, ...` when the layout has states |
-| `facts` | object | some kinds only; `learn`: `variants`, `modules` (`Proven`, `Foreign` or `Unseen`; `NoBinary` when every plugin is a JSFX, so there is no binary to prove), `binaries` (file name → `Private` / `Foreign` / `Unseen`), `states` (the states learned: `plugin`, `state`, `sha256`) |
+| `detail` | string | one line; for renders the comparer line (`identical= lag= maxdiff= head= frames= channels= rate= format= nonfinite= peak=`, then `rms=` and `nan= inf=` when they apply), then ` \| stem <track>: <its line>` per stem; `device` and `savereopen` end with `states saved back unchanged: <plugin> <state> <sha256>, ...` when the layout has states; `transport`: one part per state, joined by ` \| ` ([CONFIG.md](CONFIG.md#transport)) |
+| `facts` | object | some kinds only; `learn`: `variants`, `modules` (`Proven`, `Foreign` or `Unseen`; `NoBinary` when every plugin is a JSFX, so there is no binary to prove), `binaries` (file name → `Private` / `Foreign` / `Unseen`), `states` (the states learned: `plugin`, `state`, `sha256`); `transport`: `track`, `runFxWhenStopped`, `runFxAfterStopMs` (REAPER's `runafterstop` as read), `settleSamples` (as used), `feed` (`source`: the file or `test signal`, `sha256`, `channels`; null without a feed), `states` (per state `name`, `transport`, `arm`, `monitor`, `windowSamples`, `status` (`PASS`, `FAIL`, `INCOMPLETE` or `recorded`), `problems`, and the numbers: `clock`, `clock_samples`, `blocks`, `samples`, `silent`, `signal`, `left`, `right`, `equal`, `playstate`, `arm`, `monitor`, `monitoring`) |
 
 Negative rows also have `negative` (true), `builtin`, `expected` (the expected outcome) and `observed`; their
 `status` is PASS only when the observed outcome and the reason both match the case.

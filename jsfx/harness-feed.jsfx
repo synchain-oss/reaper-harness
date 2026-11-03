@@ -1,0 +1,78 @@
+desc: reaper-harness input feed
+// SPDX-License-Identifier: MIT
+//
+// Part of reaper-harness. Plays a WAV file into the track, for the transport kind: the harness puts it in the input FX
+// chain of the tested track (the chain REAPER runs on the record input of an armed track), so what reaches the track's
+// own FX chain has come through arming and input monitoring the way a hardware input does. The file is
+// Data/reaper-harness/feed.wav of the private configuration, which the harness writes before the launch. It is played
+// frame by frame at the device's pace, from its start and over again without a gap, with no resampling and a gain of 1;
+// what came in on the input (silence on the dummy device) is replaced.
+// Channels: left only (the right channel is 0), both the same (the file's first channel on both), both different (the
+// file's two channels; a file with one channel then plays it on both).
+// Shared memory (gmem "ReaperHarness"), 16 values per slot, the slot being the first parameter: 0 blocks fed
+// 1 frames fed   2 times the file started over   11 the handle file_open returned (negative: it could not open the file)
+// 12 the file's channel count   13 its sample rate.
+// The harness installs this file into the private configuration (Effects/reaper-harness/).
+
+options:gmem=ReaperHarness
+slider1:2<0,15,1>Slot
+slider2:2<0,2,1{Left only,Both the same,Both different}>Channels
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+ext_noinit = 1;
+ext_nodenorm = 1;
+h = -1;
+tried = 0;
+nch = 0;
+fsr = 0;
+buf = 0;
+frames = 0;
+pos = 0;
+
+@slider
+base = floor(slider1 + 0.5) * 16;
+mode = floor(slider2 + 0.5);
+
+@block
+tried === 0 ? (
+  tried = 1;
+  h = file_open("reaper-harness/feed.wav");
+  gmem[base + 11] = h;
+  h >= 0 ? (
+    file_riff(h, nch, fsr);
+    gmem[base + 12] = nch;
+    gmem[base + 13] = fsr;
+  );
+);
+frames = 0;
+pos = 0;
+h >= 0 && nch >= 1 && nch <= 2 ? (
+  got = file_mem(h, buf, samplesblock * nch);
+  frames = floor(got / nch);
+  frames < samplesblock ? (
+    file_rewind(h);
+    file_riff(h, nch, fsr);
+    more = file_mem(h, buf + frames * nch, (samplesblock - frames) * nch);
+    frames += floor(more / nch);
+    gmem[base + 2] += 1;
+  );
+  gmem[base + 0] += 1;
+  gmem[base + 1] += frames;
+);
+
+@sample
+pos < frames ? (
+  l = buf[pos * nch];
+  r = nch > 1 ? buf[pos * nch + 1] : l;
+  spl0 = l;
+  spl1 = mode === 0 ? 0 : (mode === 1 ? l : r);
+) : (
+  spl0 = 0;
+  spl1 = 0;
+);
+pos += 1;

@@ -107,18 +107,40 @@ only those, are classified:
 | `REAPER Query` (save changes?) | answered No |
 | `Render…`, `Scanning…`, `Building peaks…` | progress windows, left alone, unless the title has `fail` or `error` in it in any case: those report trouble and do not go away on their own, so they are stuck, `unknown-dialog` |
 | `VST3: …`, `VST3i: …`, `VST: …`, `VSTi: …`, `CLAP: …`, `CLAPi: …`, `JS: …` (the floating window of a plugin), `FX: …` (an FX chain window) | not a dialog, left alone (`plugin-window`): the prefix must start the title, in that case, followed by a blank. Measured on REAPER 7.82: a VST3 and a JSFX floated from one track are titled `VST3: Name (Vendor) - Track 1 [1/2]` and `JS: Name - Track 1 [2/2]`, the chain windows `FX: Track 1` and `FX: Master Track`. A dialog a plugin opens itself has a title of its own and is still `unknown-dialog`, as is `Fake VST3: x` |
+| `Finished in …` (what the render window of a render started from a script turns into when it is done: `Finished in 0:06 (1.0x realtime)` on REAPER 7.82) | left alone (`render-finished`): it stays until REAPER quits and does not keep it from quitting. Only at the start of the title, in that case, with the blank, and without `fail` or `error` in it; `finished in …` or `Fake Finished in …` is `unknown-dialog` |
 | `About REAPER…` (the evaluation licence reminder) | never clicked away: stuck, `license-nag` |
 | `Project Load Warning`, `REAPER Error`, `Select files to save or delete`, `REAPER` (no audio device) | stuck, named |
 | anything else | stuck, `unknown-dialog` with the title (paths masked) |
 
 A stuck dialog ends the launch and the scenario is INCOMPLETE. The evaluation reminder shows up on some launches
-only (about one in six in our runs); buy a licence or run again.
+only (about one in six in our runs). A launch it ended (by its process ID, as always) is done once more, after
+deleting the files that launch was to write, so that nothing the first attempt left counts for the second: through
+every guard again (the skip marker, the locks, the configuration directory), only once, never after a process that
+could not be ended, and not at all when one of those files cannot be deleted. Each retry is listed under the round's
+`retries` ([RESULTS.md](RESULTS.md)). A second reminder ends the launch like any stuck dialog; buy a licence or run
+again.
 
 REAPER also looks for a new version about once a day and shows `REAPER New Version Notification` when there is one,
 which would end that launch the same way. So every launch first writes `verchk=0` under `[REAPER]` in the private
 `reaper.ini` (and `doctor.ps1 -Init` writes it into a new one), which turns that check off; nothing is clicked away,
 and the default resource directory is not touched. Measured on REAPER 7.82: with the key a `[verchk] lastt` a week
 old stays as it was and no notification comes; without it the notification shows within about 2 s.
+
+## Nothing is recorded
+
+The `transport` kind arms a track and turns its input monitoring on. It never records:
+
+- the driver calls no record action: the only actions in `lua/driver.lua` are File: New project and File: Quit, and
+  it has no call that records or looks an action up by name (the self-test reads the driver's text for both);
+- recording is disabled (record mode "disabled") on both tracks it arms, the tested one and its own clock track, and
+  their input is none: what the tested track gets comes from the feed JSFX in its input FX chain;
+- the project's record path is set to a directory in the work directory before anything is armed, and read back; a
+  path that does not read back is INCOMPLETE;
+- every wait checks the transport for the record bit; seen, the transport is stopped and the row is INCOMPLETE;
+- any file in that record directory after the launch makes the row FAIL, whatever its states say;
+- at the end the transport is stopped and both tracks are disarmed.
+
+On REAPER 7.82 with the Dummy device (which has no inputs) the record bit was never seen in these runs.
 
 ## Outcomes never lie in your favour
 
@@ -223,6 +245,11 @@ above is a pure function and is tested everywhere.
 - A render whose data length is still the placeholder `0xFFFFFFFF` is unreadable, so `INCOMPLETE` in a comparison and on
   its own alike: the writer never came back to fill in the length, so the file is not finished, and what is in it says
   nothing about what is missing. REAPER's finished renders hold the real length.
+- A `transport` state is judged on device samples, counted on an armed track of the tool's own, never on wall-clock
+  time. A state whose numbers describe another state than the one asked for (the transport, the arm or the monitoring
+  mode did not read back as asked, or the device ran less than the window) is `INCOMPLETE`, and so is a row whose block
+  probes or feed are not the tool's own copies (by `fx_ident`), whose probe is not first in the chain, or whose feed
+  could not open its file.
 - With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven. A configuration
   needs at least one plugin (the schema refuses an empty `plugins`), but every one of them can be a JSFX shipped with
   the tool, and then there is no binary to prove: learning does not ask the module list at all, its facts say

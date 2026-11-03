@@ -34,9 +34,11 @@ your own REAPER setup.
 | `device` | the dummy device runs at the configured block size, sample rate and anticipative FX setting; every FX is loaded, not offline, reports the expected latency, reads back its parameters and holds the state it was given |
 | `savereopen` | saving and reopening, once or many times, keeps every FX, parameter and state, and the reopened project renders bit-identically |
 | `instances` | adding and removing instances many times does not grow handles or memory beyond limits |
+| `transport` | takes a track through transport (stop, play, pause), record arm and input monitoring states and checks in each whether its FX chain is run and what reaches it from an input fed by the tool; nothing is ever recorded |
 
 A small JSFX that ships with the tool delays the signal and reports the delay as latency (or not), so plugin delay
-compensation can be tested without depending on the effects that come with REAPER. Extensions add
+compensation can be tested without depending on the effects that come with REAPER; two more count the blocks a chain
+is run with and feed a track's input for `transport`. Extensions add
 product-specific kinds and driver steps ([docs/EXTENDING.md](docs/EXTENDING.md)).
 
 ## Quick start

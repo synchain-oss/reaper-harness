@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) # the parent decodes UTF-8
 
 $src = Join-Path $RepoRoot 'src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $RepoRoot 'tests/FakeReaper.psm1') -ErrorAction Stop
 
 function Write-Case([string]$Label, [bool]$Bad, [bool]$Passed) { Write-Output ("RESULT`t{0}`t{1}`t{2}" -f [int]$Bad, [int]$Passed, $Label) }
@@ -348,6 +348,21 @@ Write-Case 'locks: while REAPER runs another process cannot take the GUI lock' $
 Write-Case 'locks: after the timeout the lock is released and the process is gone' $true ($run.Status -eq 'Timeout' -and (& $probeExit) -eq 0 -and (& $gone $run.Pid))
 $ctx.Launcher = { param($psi) throw 'boom' }
 Write-Case 'locks: released when the start throws' $true ((Test-Throws { $null = Invoke-HarnessLaunch -Ctx $ctx -HostArgs @{ TimeoutSec = 2 } } 'boom') -and (& $probeExit) -eq 0)
+# The licence reminder as a real box: the launch is ended by its PID, its output deleted, and it is started once more
+# through the locks (the decisions themselves are pure and run everywhere: Get-TransportCases)
+if ([Environment]::UserInteractive) {
+    $nagCount = @{ N = 0 }
+    $nagLaunch = New-StandIn (New-BoxCommand 'About REAPER v7.82 - evaluation' 'OK' (Join-Path $Work 'box-nag-retry.txt')) @{}
+    $quickLaunch = New-StandIn 'exit 0' @{}
+    $ctx.Launcher = { param($psi) $nagCount.N++; ($nagCount.N -eq 1) ? (& $nagLaunch $psi) : (& $quickLaunch $psi) }.GetNewClosure()
+    $leftOutput = Join-Path $Work 'retry-left.wav'
+    Set-Content -LiteralPath $leftOutput -Value 'from the first launch'
+    $launchesThen = $ctx.Launches
+    $run = Invoke-HarnessLaunch -Ctx $ctx -HostArgs @{ TimeoutSec = 30 } -Label 'nag' -Outputs @($leftOutput)
+    Write-Case 'retry: a real licence reminder box ends the launch; its output is deleted and it is started once more through the locks, and exits' $false (
+        $run.Status -ceq 'Exited' -and $nagCount.N -eq 2 -and $ctx.Launches -eq $launchesThen + 2 -and @($ctx.Retries).Count -eq 1 -and @($ctx.Retries)[0].Reason -ceq 'license-nag' -and
+        -not (Test-Path -LiteralPath $leftOutput) -and -not (Test-Path -LiteralPath (Join-Path $Work 'box-nag-retry.txt')) -and (& $probeExit) -eq 0)
+} else { Write-Case '(no interactive desktop: the licence reminder retry with a real box did not run for real)' $false $true }
 $negs = @{}
 foreach ($n in (Get-HarnessBuiltinNegatives)) { $negs[$n.id] = $n }
 $holder = & $lockChild "if (-not (Enter-HarnessLocks -Names '$gui' -TimeoutSeconds 5 -Quiet)) { exit 2 }; Start-Sleep -Seconds 60"
@@ -625,7 +640,7 @@ $verchkBefore = Get-HarnessIniValue -Section REAPER -Key verchk
 $r = Invoke-HarnessSuite @e2e -SelfTestHooks $hooks
 $rowsOut = @($r.runs[0].scenarios)
 $notPass = @($rowsOut | Where-Object { $_.status -ne 'PASS' } | ForEach-Object { "$($_.id)=$($_.status): $($_.detail)" })
-Write-Case "end to end: every row of the fixture configuration passes against the stand-in ($($notPass -join ' | '))" $false ($r.verdict -eq 'PASS' -and $notPass.Count -eq 0 -and $rowsOut.Count -eq 32)
+Write-Case "end to end: every row of the fixture configuration passes against the stand-in ($($notPass -join ' | '))" $false ($r.verdict -eq 'PASS' -and $notPass.Count -eq 0 -and $rowsOut.Count -eq 37)
 Write-Case 'end to end: learn ran once, first, and proved the private copy; the module check over all launches passed' $false (
     $rowsOut[0].id -eq 'learn' -and $rowsOut[0].status -eq 'PASS' -and $rowsOut[0].facts.modules -eq 'Proven' -and $r.runs[0].moduleCheck.status -eq 'PASS' -and @($seenArgs | Where-Object { $_ -notmatch 'renderproject' }).Count -ge 5)
 Write-Case 'end to end: every launch is counted and the default resource directory is unchanged' $false ($r.launches -eq $seenArgs.Count -and $r.runs[0].launches -eq $seenArgs.Count -and $r.runs[0].defaultCfgDir.unchanged -and $r.runs[0].reaperProcessesLeft -eq 0 -and $r.runs[0].stillRunning -eq $false)
@@ -652,6 +667,23 @@ Write-Case 'end to end: anticipative FX is written as bit 0 of workrender in the
     (Get-HarnessIniValue -Section REAPER -Key workrender) -in '16', '17' -and $byId['bus-device'].detail -like '*anticipative FX on;*')
 Write-Case "end to end: the launches turn REAPER's version check off in the private ini, also in a directory initialised without it" $false (
     $null -eq $verchkBefore -and (Get-HarnessIniValue -Section REAPER -Key verchk) -ceq '0')
+$msRow = $byId['monitor-states']
+Write-Case 'end to end: the transport row reports every state as the stand-in measured it; the state without expectations is only recorded' $false (
+    $msRow.detail -ceq ('stopped-unarmed: blocks=10/10 silent=10 signal=0 left=0 right=0 same=0 transport=stop monitoring=0 | ' +
+        'stopped-armed-on: blocks=10/10 silent=0 signal=10 left=10 right=10 same=0 transport=stop monitoring=1 | ' +
+        'playing-auto: blocks=10/10 silent=10 signal=0 left=0 right=0 same=0 transport=play monitoring=0 | ' +
+        'paused-unarmed: blocks=0/10 silent=0 signal=0 left=0 right=0 same=0 transport=pause monitoring=0') -and
+    @($msRow.facts.states).Count -eq 4 -and $msRow.facts.states[3].status -ceq 'recorded' -and $msRow.facts.states[1].status -ceq 'PASS' -and $msRow.facts.runFxWhenStopped -eq $true -and
+    $msRow.facts.feed.source -ceq 'test signal' -and $msRow.facts.feed.channels -ceq 'different' -and $msRow.facts.settleSamples -eq 4800)
+$offRows = @($rowsOut | Where-Object { $_.id -like 'monitor-stopped-off-*' })
+Write-Case "end to end: with Run FX when stopped off the unarmed chain is not called, at each block size of the matrix ($(@($offRows | ForEach-Object { $_.id }) -join ', '))" $false (
+    $offRows.Count -eq 2 -and @($offRows | Where-Object { $_.detail -cnotmatch '^unarmed: blocks=0/(75|5) [^|]* \| armed-on: blocks=(75|5)/(75|5) silent=0 signal=(75|5) left=(75|5) right=0 same=0 ' }).Count -eq 0 -and
+    @($offRows | Where-Object { $_.facts.runFxWhenStopped -ne $false }).Count -eq 0)
+Write-Case 'end to end: the built-in transport negative turned red for its reason, and so did the configured one' $false (
+    $byId['neg-transport-probe'].observed -ceq 'FAIL' -and $byId['neg-transport-probe'].status -ceq 'PASS' -and $byId['neg-feed-is-not-same'].observed -ceq 'FAIL' -and $byId['neg-feed-is-not-same'].status -ceq 'PASS')
+Write-Case 'end to end: the probe and the feed JSFX are installed in the private Effects directory and the feed file in its Data directory; they are tools, not listed with the plugins' $false (
+    (Test-Path -LiteralPath (Join-Path $pinned.Dir 'Effects\reaper-harness\harness-block-probe.jsfx')) -and (Test-Path -LiteralPath (Join-Path $pinned.Dir 'Effects\reaper-harness\harness-feed.jsfx')) -and
+    (Test-Path -LiteralPath (Join-Path $pinned.Dir 'Data\reaper-harness\feed.wav')) -and @($r.plugins | Where-Object { $_['jsfx'] -in 'harness-block-probe', 'harness-feed' }).Count -eq 0)
 $path = Write-HarnessResult -Data $r -ResultDir $e2e.ResultDir
 $json = [IO.File]::ReadAllText($path)
 $back = ConvertFrom-HarnessJson $json
@@ -661,6 +693,7 @@ Write-Case 'end to end: the work files of an all-green round are removed' $false
 $extRow = @($rowsOut | Where-Object { $_.id -ceq 'ext-count' })[0]
 Write-Case 'end to end: a local path in the facts of an extension is masked in the row and in the result file' $true ($extRow.facts.count -eq 3 -and $extRow.facts.workDir -ceq '<path>' -and $json -cnotlike '*brien*')
 Write-Case 'result file: a run with nothing wrong has no error' $false ($back.Contains('error') -and $null -eq $back['error'] -and $null -eq $r.error)
+Write-Case 'result file: each run lists the launches retried after the licence reminder (none here)' $false ($back['runs'][0].Contains('retries') -and @($back['runs'][0]['retries']).Count -eq 0)
 # Only a JSFX, no plugin binary: learning does not ask the module list, which would have nothing to prove, and says so
 $jsOnly = & $writeVariant { param($c) & $noExt $c; $c.plugins = @{ delay = $c.plugins['delay'] }; $c.layouts = @{ js = @{ tracks = @(@{ name = 'Voice'; source = $true; fx = @(@{ plugin = 'delay' }) }) } }; $c.scenarios = @(@{ id = 'js-only'; kind = 'render'; layout = 'js' }); $c.negative = @() }
 $jsOnly.ReaperExe = $pwshExe; $jsOnly.ResultDir = $e2e.ResultDir
@@ -669,6 +702,43 @@ $jsLearn = @($r.runs[0].scenarios)[0]
 Write-Case 'end to end: a configuration of only a JSFX learns without a module proof: learn PASS, its facts say there was no plugin binary, the round PASS' $false (
     $r.verdict -ceq 'PASS' -and $jsLearn.id -ceq 'learn' -and $jsLearn.status -ceq 'PASS' -and $jsLearn.facts.modules -ceq 'NoBinary' -and $jsLearn.facts.binaries.get_Count() -eq 0 -and
     $jsLearn.detail -clike '*no plugin binary to check (only JSFX)*' -and $r.runs[0].moduleCheck.status -ceq 'PASS' -and $r.runs[0].moduleCheck.detail -clike 'no plugin binary to check*' -and @($r.plugins).Count -eq 1)
+
+# A feed file of the configuration: installed as it is, named with its hash; at another rate a usage error
+$feedWav = Join-Path $Work 'feeds\voice.wav'
+$null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $feedWav)
+New-HarnessSignalFile -Path $feedWav -Rate 48000 -Channels 1 -Seconds 0.5
+New-HarnessSignalFile -Path (Join-Path $Work 'feeds\slow.wav') -Rate 44100 -Channels 2 -Seconds 0.1
+$withFeed = {
+    param([string]$Wav, [string]$Channels)
+    $v = & $writeVariant {
+        param($c)
+        & $noExt $c
+        $one = @($c.scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+        $one.feed = @{ wav = $Wav; channels = $Channels }
+        $one.states[1].expect.channels = $Channels
+        $c.scenarios = @($one); $c.negative = @()
+    }
+    $v.ReaperExe = $pwshExe; $v.ResultDir = $e2e.ResultDir; $v
+}
+$fed = & $withFeed 'feeds/voice.wav' 'same'
+$r = Invoke-HarnessSuite @fed -NoNegative -SelfTestHooks $hooks
+$fedRow = @($r.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+$feedSha = (Get-FileHash -LiteralPath $feedWav -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Case 'end to end: a feed file of the configuration is installed as it is and named in the facts with its hash; a mono file plays the same on both sides' $false (
+    $r.verdict -ceq 'PASS' -and $null -ne $fedRow -and $fedRow.status -ceq 'PASS' -and $fedRow.facts.feed.source -ceq 'feeds/voice.wav' -and $fedRow.facts.feed.sha256 -ceq $feedSha.Substring(0, 12) -and
+    (Get-FileHash -LiteralPath (Join-Path $pinned.Dir 'Data\reaper-harness\feed.wav') -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $feedSha -and
+    $fedRow.detail -clike '*| stopped-armed-on: blocks=10/10 silent=0 signal=10 left=10 right=10 same=10 *')
+$slow = & $withFeed 'feeds/slow.wav' 'different'
+$seenBefore = $seenArgs.Count
+Write-Case 'end to end: a feed file at another rate is a usage error before REAPER starts' $true (
+    (Test-Throws { $null = Invoke-HarnessSuite @slow -NoNegative -SelfTestHooks $hooks } 'USAGE: feeds: 1 problem(s): monitor-states: *nothing is resampled*') -and $seenArgs.Count -eq $seenBefore)
+# Something recorded: a file in the record directory of the project is FAIL, whatever the states say
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; RecordFor = 'monitor-states' }
+try { $r = Invoke-HarnessSuite @e2e -Only '^monitor-states$' -NoNegative -SelfTestHooks $hooks }
+finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$recRow = @($r.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
+    $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
 
 # ---- what a round counts as left behind ----
 $oneScenario = @{ Only = '^chain-offline-48000$'; NoNegative = $true }

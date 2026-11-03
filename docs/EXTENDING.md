@@ -15,7 +15,8 @@ Everything about extensions is checked before REAPER starts, and every problem i
   links are resolved) or does not exist;
 - a module that does not export `Register-HarnessExtension`, whose registration throws or returns something else
   than the contract below, or whose file name is the name of one of the harness's own modules;
-- a kind name that is built in (`render`, `device`, `savereopen`, `instances`, and the internal `hang`, `guard`) or
+- a kind name that is built in (`render`, `device`, `savereopen`, `instances`, `transport`, and the internal `hang`,
+  `guard`) or
   registered by another extension; an extension name used twice;
 - a Lua step name that the driver already has or another file declares.
 

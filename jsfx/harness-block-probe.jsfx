@@ -1,0 +1,63 @@
+desc: reaper-harness block probe
+// SPDX-License-Identifier: MIT
+//
+// Part of reaper-harness. Counts the audio blocks of the FX chain it sits in and what they carry, for the transport
+// kind: the harness puts one first in the chain of the tested track (it sees what the plugin under test receives) and
+// one on an armed track of its own that runs in every state, the clock that observation windows are measured with.
+// It passes the audio through unchanged. The counts go to shared memory (gmem "ReaperHarness"), 16 values per slot,
+// the slot being the parameter below; the Lua driver reads them:
+//   0 blocks   1 samples   2 silent blocks (every sample of both channels exactly 0)   3 blocks with signal
+//   4 blocks with signal on the left   5 ... on the right   6 blocks with signal whose left and right are equal sample
+//   for sample   7 the play state seen last   8 the block size seen last   9 the sample rate
+// A block is counted once all of its samples went through, so it is either silent or has signal, never half of each.
+// ext_nodenorm keeps REAPER from adding its anti-denormal noise to the input, and the comparisons are exact (=== and
+// !==, not the tolerant == of EEL2): a sample of 1e-9 is signal, not silence.
+// The harness installs this file into the private configuration (Effects/reaper-harness/).
+
+options:gmem=ReaperHarness
+slider1:0<0,15,1>Slot
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+ext_noinit = 1;
+ext_nodenorm = 1;
+n = 0;
+i = 0;
+lsig = 0;
+rsig = 0;
+diff = 0;
+
+@slider
+base = floor(slider1 + 0.5) * 16;
+
+@block
+n = samplesblock;
+i = 0;
+lsig = 0;
+rsig = 0;
+diff = 0;
+gmem[base + 0] += 1;
+gmem[base + 1] += samplesblock;
+gmem[base + 7] = play_state;
+gmem[base + 8] = samplesblock;
+gmem[base + 9] = srate;
+
+@sample
+spl0 !== 0 ? lsig = 1;
+spl1 !== 0 ? rsig = 1;
+spl0 !== spl1 ? diff = 1;
+i += 1;
+i === n ? (
+  lsig || rsig ? (
+    gmem[base + 3] += 1;
+    lsig ? gmem[base + 4] += 1;
+    rsig ? gmem[base + 5] += 1;
+    diff ? 0 : gmem[base + 6] += 1;
+  ) : (
+    gmem[base + 2] += 1;
+  );
+);

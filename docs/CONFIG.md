@@ -194,7 +194,8 @@ tracks (balance: the far channel is scaled, -0.5 halves the right channel, 6.02 
 
 ## JSFX
 
-The tool ships one JSFX in `jsfx/`, written for it (MIT):
+The tool ships one JSFX for configurations in `jsfx/`, written for it (MIT); the two others there are tools of the
+`transport` kind and cannot be configured as plugins:
 
 | name | parameters | what it does |
 |---|---|---|
@@ -213,11 +214,12 @@ compensated sum): give such a scenario a `maxDiffDb`.
 
 ## scenarios
 
-Every scenario has `id` and `kind`. The built-in kinds are `render`, `device`, `savereopen` and `instances`;
-extensions can add more. `sr` (default 48000; 8000 … 384000), `block` (default 512; 16 … 8192, so 32 and 2048 are
-fine) and `mode` (default `offline`) set the dummy audio device and the render speed: `offline` renders at full
-speed, `1x` at real-time speed with plugins told they run offline, `online` in real time with plugins told they run
-live.
+Every scenario has `id` and `kind`. The built-in kinds are `render`, `device`, `savereopen`, `instances` and
+`transport`; extensions can add more. `sr` (default 48000; 8000 … 384000), `block` (default 512; 16 … 8192, so 32 and
+2048 are fine) and `mode` (default `offline`) set the dummy audio device and the render speed: `offline` renders at
+full speed; `1x` is REAPER's 1x offline render, at real-time speed but still an offline render; `online` is an online
+render, in real time. Whether a plugin is told that it runs offline depends on REAPER's preference to inform plugins
+of the offline rendering state; the tool does not set it, and its default on REAPER 7.82 has not been measured.
 
 ### host
 
@@ -230,12 +232,17 @@ Measured on REAPER 7.82 (x64, Dummy Audio 48 kHz / 512 samples, the private conf
 213.3 ms); with `workrender=16` it ran 10.7 … 42.7 ms ahead (median 21.3 ms). The ini has no key while the value
 is the default. `device` reads `workrender` back from the running REAPER and checks bit 0.
 
+`"host": { "runFxWhenStopped": true | false }` turns REAPER's "Run FX when stopped" on or off (default on, as REAPER
+ships): bit 0 of `runallonstop` in `[REAPER]` of the private `reaper.ini`, the other bits kept; without the key
+REAPER uses 1. Off, the FX of a track that is not armed and has no media are not run while the transport is stopped,
+nor, measured on REAPER 7.82, while it plays (see `transport`). `device` and `transport` read it back and check bit 0.
+
 ### matrix
 
 `"matrix": { "mode": [...], "sr": [...], "block": [...] }` expands one scenario into the cross product. The
 expanded ids are `<id>-<mode>-<sr>-<block>` for the axes present, in that order (for example `chain-offline-48000`).
-An axis cannot also be given directly. Negative cases cannot have a matrix. A `device` scenario renders nothing, so
-its matrix has no `mode` axis (a usage error), only `sr` and `block`.
+An axis cannot also be given directly. Negative cases cannot have a matrix. `device` and `transport` scenarios render
+nothing, so their matrix has no `mode` axis (a usage error), only `sr` and `block`.
 
 ### render
 
@@ -305,7 +312,8 @@ without `bypass`) and compare them instead.
 ### device
 
 Opens the layout's project through the Lua driver and checks that the dummy device runs at `block` and `sr`, that
-anticipative FX processing reads back as `host.anticipativeFx`, and that every FX is loaded, not offline, reports
+anticipative FX processing reads back as `host.anticipativeFx` and Run FX when stopped as `host.runFxWhenStopped`,
+and that every FX is loaded, not offline, reports
 `expectPdc`, has the configured bypass state and reads back every configured parameter. A layout with states also
 saves a copy while the project is open and checks every state FX's block in it against the block it was given.
 
@@ -327,6 +335,124 @@ running), after `warmup` cycles. The process handle count and private memory are
 | `plugins` | required, plugin ids |
 | `cycles`, `warmup`, `play`, `maxHandleGrowth`, `maxPrivateGrowthMB` | default from `limits.instances` |
 | `sr`, `block`, `host` | |
+
+### transport
+
+Takes one track of the layout through a list of transport, arm and monitoring states and checks, in each, whether
+REAPER runs the track's FX chain and what that chain gets. Meant for plugins whose behaviour depends on the state of
+the host, a vocal recording plugin that monitors its input while the track is armed for example. Nothing is ever
+recorded ([SAFETY.md](SAFETY.md#nothing-is-recorded)).
+
+| key | |
+|---|---|
+| `layout` | required |
+| `track` | the tested track, by name; may be left out when the layout has one track |
+| `states` | required, 1 … 64 states, taken in order |
+| `feed` | `{ "wav": "<file>", "channels": "left" \| "same" \| "different" }`: what the input of the tested track gets (below); without it the input gets nothing |
+| `settleSamples` | device samples to let pass after each change of state before its window opens (0 … 115200000); default REAPER's "run FX after stopping" time (`runafterstop`, 4000 ms unless set) plus half a second |
+| `sr`, `block`, `host`, `matrix` | as `device`; the matrix has `sr` and `block` only |
+
+A state:
+
+| key | |
+|---|---|
+| `name` | required, unique in the scenario, `[a-z0-9][a-z0-9-]*` |
+| `transport` | required: `stop`, `play` or `pause`. Recording is not a state the tool can be asked for |
+| `arm` | required, `true` / `false`: the track's record arm (recording is disabled on the track, see below) |
+| `monitor` | required: input monitoring `off`, `on` or `auto` (REAPER's tape style: only while not playing) |
+| `samples` | the observation window in device samples, 64 … 115200000 and at least 4 blocks; default 2 seconds |
+| `expect` | what must hold in the window; a state without it is only recorded. At least one state of a scenario has one |
+
+`expect`:
+
+| key | |
+|---|---|
+| `called` | `true`: the chain is run in at least one block of the window; `false`: in none |
+| `input` | `silent`: no block the chain gets carries signal; `signal`: every one does |
+| `channels` | `left`: every block with signal has it on the left and none on the right; `same`: left and right are equal in every block with signal; `different`: both sides carry signal and differ in every block with signal |
+| `monitoring` | REAPER reports input monitoring in effect on the track (`B_RECMON_IN_EFFECT`) at the end of the window |
+
+`input` and `channels` need a chain that runs: without `called`, a chain that never ran fails them ("not called, so
+it has no input"). `called: false` together with either is refused, and so is `input: "silent"` with `channels`.
+
+The feed: `wav` is a WAV file (a path relative to the configuration file, under the same rules as extension paths)
+at the scenario's sample rate, nothing is resampled, with 1 or 2 channels (2 for `different`); it plays in a loop.
+Without `wav` it is the configured test signal, in stereo. `channels` (default `different`) says what reaches the
+input: the first channel on the left only, the first channel on both sides, or the two channels as they are. The
+file is checked before REAPER starts (a usage error otherwise), copied to `Data/reaper-harness/feed.wav` of the
+private configuration directory, and named in the result with the first 12 hex digits of its sha256.
+
+How it is observed: the driver opens the project (tracks without items), reads it back like `device` (block size,
+sample rate, anticipative FX, Run FX when stopped, every FX), sets the project's record path to the work directory and
+adds
+
+- `jsfx/harness-block-probe.jsfx` first in the FX chain of the tested track: it counts the blocks it is run with and
+  what they carry (signal or not, on which side, left equal to right), so it sees what the first plugin gets;
+- a track of its own at the end, armed, with recording disabled, no input, monitoring off and no master send, with
+  another block probe: an armed track is run in every state, so it counts the device's blocks (the clock);
+- `jsfx/harness-feed.jsfx` in the input FX chain of the tested track, whose input is set to none: it plays the feed,
+  so what reaches the chain has come through arming and input monitoring like a hardware input would.
+
+For each state it sets arm and monitoring, then the transport, lets `settleSamples` of the clock pass, and counts
+for `samples` of the clock. Both are counted in device samples, not in wall-clock time (REAPER's main thread can
+stall while the audio runs on). The tool JSFX are copied into `Effects/reaper-harness/` of the private configuration
+directory like a configured JSFX, but they are tools: they cannot be configured as plugins and are not listed with
+them.
+
+The detail has one part per state, joined by ` | `:
+
+```
+stopped-armed-on: blocks=94/94 silent=0 signal=94 left=94 right=94 same=0 transport=stop monitoring=1
+```
+
+`blocks=B/C`: the chain ran in B blocks while the device ran C; `silent` and `signal`: blocks without and with
+signal; `left`, `right`: blocks with signal on that side; `same`: blocks with signal whose left and right are equal;
+`transport` and `monitoring` as read back at the end of the window. A state that fails adds `; failed: ...`. A state
+whose numbers describe another state than the one asked for is INCOMPLETE (`; no evidence: ...`): the device ran
+less than the window, or the transport, the arm or the monitoring mode did not read back as asked. The row is
+INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is not first in the chain, the
+record path could not be set, the feed could not open its file or not every state was observed; it is FAIL, whatever
+the states say, when any file appeared in the record directory. Facts: `track`, `runFxWhenStopped`,
+`runFxAfterStopMs`, `settleSamples`, `feed` (`source`, `sha256`, `channels`) and per state its settings, `status`,
+`problems` and the numbers.
+
+```json
+{ "id": "monitor-states", "kind": "transport", "layout": "vocal", "feed": { "channels": "different" },
+  "states": [
+    { "name": "stopped-unarmed", "transport": "stop", "arm": false, "monitor": "off", "expect": { "called": true, "input": "silent" } },
+    { "name": "stopped-armed-on", "transport": "stop", "arm": true, "monitor": "on", "expect": { "input": "signal", "channels": "different", "monitoring": true } },
+    { "name": "playing-armed-auto", "transport": "play", "arm": true, "monitor": "auto", "expect": { "input": "silent", "monitoring": false } }
+  ] }
+```
+
+Measured on REAPER 7.82 (x64, Dummy Audio 48 kHz / 512 samples, the private configuration directory, tracks without
+items, 2 s windows after settling), with the feed in stereo:
+
+| tested track | Run FX when stopped on (REAPER's default) | off |
+|---|---|---|
+| unarmed, stopped | run, silent | not run |
+| unarmed, playing | run, silent | not run |
+| unarmed, paused | not run | not run |
+| armed, monitoring off, stopped or playing | run, silent | run, silent |
+| armed, monitoring on, stopped, playing or paused | run, both channels intact, monitoring in effect | the same |
+| armed, monitoring auto, stopped | run, both channels intact, monitoring in effect | the same |
+| armed, monitoring auto, playing | run, silent, monitoring not in effect | the same |
+
+Also measured there:
+
+- after the project is opened, and after playing stops, an unarmed chain goes on being run for about 3.25 … 3.75 s
+  even with Run FX when stopped off: REAPER's "run FX after stopping" (`runafterstop`, 4000 ms by default, no key in
+  the ini while it is the default). Hence the default settle time;
+- with no armed track in the project and Run FX when stopped off, nothing is run while stopped, and "monitoring in
+  effect" is not updated (it read 1 on a track that had been disarmed). Hence the clock track;
+- the Dummy device has no inputs (`num_audio_in` 0): the feed in the input FX chain is the only input there is;
+- record mode "disabled" on the tested track made no difference to any of the above against record mode "input";
+- `-1000` as the position of `TrackFX_AddByName` puts the probe first in the chain; the record bit of the transport
+  was never seen.
+
+Measured on the same setup before: with the default preferences REAPER's automatic bypass of muted tracks did not
+stop a JSFX on a muted track; only an FX with `force_auto_bypass` set stopped being run. Not measured: how a real
+hardware input behaves.
 
 ## negative cases
 
@@ -354,7 +480,8 @@ differ from another one; a latency that is not reported must show as a lag; two 
 
 ### built-in negative cases
 
-These run in every round unless `-NoNegative` is given. They do not depend on your plugins.
+These run in every round unless `-NoNegative` is given. They do not depend on your plugins. The last one runs only
+when the configuration has a `transport` scenario.
 
 | id | proves | expected |
 |---|---|---|
@@ -365,5 +492,6 @@ These run in every round unless `-NoNegative` is given. They do not depend on yo
 | `neg-skip-marker` | a skip marker makes the whole entry point SKIPPED without starting REAPER | SKIPPED, `^launches=0; skip marker present` |
 | `neg-sentinel-missing` | a configuration directory without the sentinel is refused | REFUSED, `^REFUSED: .*sentinel` |
 | `neg-default-dir` | REAPER's default resource directory is refused | REFUSED, `^REFUSED: .*never touched` |
+| `neg-transport-probe` | with Run FX when stopped off and the test signal fed, the chain of an unarmed track (no FX) is not run, and armed with monitoring on it gets the feed: the block probe sees both | FAIL, `^stopped-unarmed: blocks=0/… failed: not called (0 blocks while the device ran …) \| stopped-armed: … failed: signal in … blocks$` |
 
 The three guard cases run the real entry point again inside the same process, with one thing changed.
