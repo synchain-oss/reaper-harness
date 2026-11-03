@@ -10,8 +10,9 @@
 # Checks: each FX was added (TrackFX_AddByName matches loosely, so the name REAPER shows must equal the expected
 # "VST3: <Name> (<Vendor>)" exactly), is not offline, fx_ident names the private binary and the class ID from
 # moduleinfo.json, the saved block has that class ID too, and every parameter exists and reads back as configured.
-# A named state without parameters on top must come back from REAPER as it was given. A JSFX shipped with the tool
-# is checked by its name ("JS: <desc>"), its path under Effects in fx_ident and in the saved block.
+# A named state without parameters on top must come back from REAPER as it was given; a state used with parameters
+# on top is learned alone too, so every state is checked so. A JSFX shipped with the tool is checked by its name
+# ("JS: <desc>"), its path under Effects in fx_ident and in the saved block.
 # Proof of the private copy: the module list of the REAPER process, sampled while it ran, must show each tested
 # binary from the private plugins directory and no file of the same name from anywhere else.
 #   Get-HarnessLearnVariants  the variants a set of scenarios needs (pure)
@@ -31,8 +32,8 @@ Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
 function Get-HarnessReaperName($Info) { "VST3: $($Info.Name) ($($Info.Vendor))" }
 
 # Variants: one per configured plugin with no parameters (always: the module proof and the instances kind need
-# them), then every distinct FX variant of the layouts the scenarios use, in first-use order. State: the name of a
-# state of the plugin ('' for its default state).
+# them), then every distinct FX variant of the layouts the scenarios use, in first-use order, a state with parameters
+# on top preceded by that state alone. State: the name of a state of the plugin ('' for its default state).
 function Get-HarnessLearnVariants {
     param([Parameter(Mandatory)]$Config, [object[]]$Scenarios = @())
     $out = [ordered]@{}
@@ -44,7 +45,13 @@ function Get-HarnessLearnVariants {
     }
     foreach ($lid in $layoutIds) {
         foreach ($t in $Config.Layouts[$lid].Tracks) {
-            foreach ($fx in $t.Fx) { if (-not $out.Contains($fx.Variant)) { $out[$fx.Variant] = [pscustomobject]@{ Key = $fx.Variant; Plugin = $fx.Plugin; State = $fx.State; Params = $fx.Params } } }
+            foreach ($fx in $t.Fx) {
+                # A state with parameters on top is also learned on its own first: only a state with nothing set on top can
+                # be compared with the block it was given, and that is what proves the plugin loads it
+                $alone = "$($fx.Plugin)@$($fx.State)|"
+                if ($fx.State -and $fx.Params.get_Count() -and -not $out.Contains($alone)) { $out[$alone] = [pscustomobject]@{ Key = $alone; Plugin = $fx.Plugin; State = $fx.State; Params = [ordered]@{} } }
+                if (-not $out.Contains($fx.Variant)) { $out[$fx.Variant] = [pscustomobject]@{ Key = $fx.Variant; Plugin = $fx.Plugin; State = $fx.State; Params = $fx.Params } }
+            }
         }
     }
     , @($out.get_Values())

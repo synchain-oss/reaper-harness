@@ -1319,6 +1319,13 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
     & $add "learning: one default variant per plugin first, then each distinct parameter set and named state once ($($keys -join ', '))" $false (
         ($keys[0..2] -join ',') -ceq 'gain|,bus|,delay|' -and $keys.Count -eq 10 -and @($keys | Select-Object -Unique).Count -eq 10 -and 'gain@quiet|' -cin $keys -and 'gain@loud|' -cin $keys -and
         @($variants | Where-Object { $_.Key -ceq 'gain@loud|' })[0].State -ceq 'loud' -and 'delay|Delay (samples)=0.0078125' -cin $keys)
+    # A state with parameters on top (its own or the plugin's) is learned alone too, before the first variant using it
+    $pFx = { param($p) [pscustomobject]@{ Variant = "gain@quiet|Gain=$p"; Plugin = 'gain'; State = 'quiet'; Params = [ordered]@{ Gain = [pscustomobject]@{ Normalized = $p; Display = $null } } } }
+    $pConf = [pscustomobject]@{ Plugins = [ordered]@{ gain = $null }; Layouts = @{ L = [pscustomobject]@{ Tracks = @([pscustomobject]@{ Fx = @((& $pFx 0.5), (& $pFx 0.25)) }) } } }
+    $pVariants = Get-HarnessLearnVariants -Config $pConf -Scenarios @([pscustomobject]@{ layout = 'L' })
+    $pKeys = @($pVariants | ForEach-Object { "$($_.Key)/$($_.Params.get_Count())" })
+    & $add "learning: a state used with parameters on top is learned alone once, before its first such variant ($($pKeys -join ', '))" $false (
+        ($pKeys -join ',') -ceq 'gain|/0,gain@quiet|/0,gain@quiet|Gain=0.5/1,gain@quiet|Gain=0.25/1' -and $pVariants[1].State -ceq 'quiet')
     $fi = Split-HarnessFxIdent 'C:\x\plugins\A.vst3\Contents\x86_64-win\A.vst3<1234567890{5a1b2c3d4e5f60718293a4b5c6d7e8f9'
     & $add 'fx_ident: path and upper-case class ID (REAPER writes no closing brace); a closing brace or negative uid is fine too; anything else gives nothing' $false (
         $fi.Path -ceq 'C:\x\plugins\A.vst3\Contents\x86_64-win\A.vst3' -and $fi.Cid -ceq '5A1B2C3D4E5F60718293A4B5C6D7E8F9' -and (Split-HarnessFxIdent 'p<-5{5A1B2C3D4E5F60718293A4B5C6D7E8F9}').Path -ceq 'p' -and
@@ -1380,6 +1387,21 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'learn report: a named state the plugin saves back changed is a failure (it does not hold the state as given)' $true (@((& $sc $sReport (& $sSaved 'FAKESTATE b3RoZXI=')).Fail -match 'saved its state back changed').Count -eq 1)
     $r2 = $sReport.Clone(); $r2.fx1_idx = '-1'
     & $add 'learn report: a named state whose block did not load is a failure saying so' $true (@((& $sc $r2 (& $sSaved 'FAKESTATE QUlFRA==')).Fail -match 'state quiet did not load from its state block').Count -eq 1)
+    # The same state alone and with a parameter on top (the variants above): a plugin that ignores the state is caught
+    # on the track that has it alone, although the parameter reads back fine
+    $pReport = $sReport.Clone()
+    foreach ($k in 'idx', 'name', 'offline', 'ident') { $pReport["fx2_$k"] = $sReport["fx1_$k"] }
+    $pReport.fx2_p1 = '0.500000000'; $pReport.fx2_p1_display = '0.50'
+    $pSaved = {
+        param([string]$body)
+        $t = { param($n) "  <TRACK`n    NAME `"learn-$n`"`n    <FXCHAIN`n      BYPASS 0 0 0`n      $($stBlock[0])`n        $body`n      >`n    >`n  >`n" }
+        Get-HarnessFxBlocks ("<REAPER_PROJECT`n" + (& $t 1) + (& $t 2) + ">`n")
+    }
+    $pc = { param($saved) Test-HarnessLearnReport -Variants $pVariants[1..2] -Installed $installed -States $stTable -Report $pReport -Saved $saved -SameFile $same }
+    $okP = & $pc (& $pSaved 'FAKESTATE QUlFRA==')
+    & $add 'learn report: a state the plugin holds is learned alone and with the parameter on top' $false ($okP.Fail.Count -eq 0 -and $okP.Blocks.ContainsKey('gain@quiet|') -and $okP.Blocks.ContainsKey('gain@quiet|Gain=0.5'))
+    & $add 'learn report: a plugin that ignores a state used with parameters on top fails on the state learned alone' $true (
+        ((& $pc (& $pSaved 'FAKESTATE b3RoZXI=')).Fail -join ';') -ceq 'gain state quiet : the plugin saved its state back changed, so it does not hold the state as given')
     # The JSFX shipped with the tool: checked by the name REAPER shows and its path under Effects
     $jsfx = @{ delay = [pscustomobject]@{ Name = 'JS: reaper-harness PDC delay'; AddName = 'JS:reaper-harness/harness-pdc-delay.jsfx'; Ident = 'reaper-harness/harness-pdc-delay.jsfx' } }
     $jv = @([pscustomobject]@{ Key = 'delay|'; Plugin = 'delay'; State = ''; Params = [ordered]@{} })

@@ -93,8 +93,10 @@ first 12 hex digits of the SHA-256 of the block (`states` at the top level and i
 
 How the state is proven to be loaded: the learn launch opens a project that already holds each state's block, so
 REAPER loads it like any saved project, and the block REAPER saves back must equal the one it was given (the header
-line aside); `device` and `savereopen` save the project they opened again and compare every state FX's block with
-the block it was given. A plugin that ignores or rewrites a state fails there, naming the track and the FX.
+line aside). A state used with `params` on top (its own or the plugin's) is learned once more on a track of its
+own without them, since only a state with nothing set on top can be compared so. `device` and `savereopen` save
+the project they opened again and compare every state FX's block with the block it was given. A plugin that
+ignores or rewrites a state fails there, naming the track and the FX.
 
 ## signal
 

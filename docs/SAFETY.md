@@ -196,12 +196,13 @@ so the full name `VST3: <Name> (<Vendor>)` is used and checked after adding: the
 class ID of the saved block must all be the expected ones. A plugin that does not load is FAIL.
 
 A named state is a block REAPER saved for you (see [CONFIG.md](CONFIG.md#states)). It is not added by name: the
-project the learn launch opens already holds the block, REAPER loads it as it loads any saved project, and the
-block REAPER saves back must be the one it was given. Before anything starts, the block's name and class ID must
-be the plugin's (from `moduleinfo.json`); a block of another plugin is a usage error. Of a template project only
-that one block is read: other tracks, other plugins and file paths in it never reach the console, the logs or the
-result file, and the block itself only goes into projects in the work directory. A JSFX shipped with the tool is
-copied into the private configuration directory and checked by the name REAPER shows and by its path there.
+project the learn launch opens already holds the block, REAPER loads it as it loads any saved project, and the block
+REAPER saves back must be the one it was given; a state used with parameters on top is learned on its own as well,
+so this holds for every state. Before anything starts, the block's name and class ID must be the plugin's (from
+`moduleinfo.json`); a block of another plugin is a usage error. Of a template project only that one block is read:
+other tracks, other plugins and file paths in it never reach the console, the logs or the result file, and the block
+itself only goes into projects in the work directory. A JSFX shipped with the tool is copied into the private
+configuration directory and checked by the name REAPER shows and by its path there.
 
 A path in a recorded title is masked from its drive letter, `\\` or `//` up to the next double quote or the end of the
 title: a path can hold spaces, and a user name is often right after one. Everything else that reaches a result file or
