@@ -1706,7 +1706,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     }
     $row = {
         param([hashtable]$Set = @{})
-        $v = [ordered]@{ clock = 10; clock_samples = 5120; blocks = 10; samples = 5120; silent = 0; signal = 10; left = 10; right = 10; equal = 0; playstate = 0; arm = 1; monitor = 1; monitoring = 1 }
+        $v = [ordered]@{ clock = 10; clock_samples = 5120; blocks = 10; samples = 5120; silent = 0; signal = 10; left = 10; right = 10; equal = 0; fed = 10; fed_samples = 5120; playstate = 0; arm = 1; monitor = 1; monitoring = 1 }
         foreach ($k in $Set.get_Keys()) { $v[$k] = $Set[$k] }
         [pscustomobject]$v
     }
@@ -1765,6 +1765,16 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     }
     $unseen = Test-HarnessTransportState -State (& $state @{ called = $true }) -Row $null
     & $add 'transport: a state the driver did not report is INCOMPLETE (not observed)' $true ($unseen.Status -ceq 'INCOMPLETE' -and $unseen.Line -ceq 's: not observed')
+    # The feed in the window of an armed state: a silent input proves nothing when the feed played nothing
+    $feedIdle = @{ fed = 0; fed_samples = 0; silent = 10; signal = 0; left = 0; right = 0 }
+    $noFeedBlocks = '; no evidence: the feed played no block in the window although the track is armed'
+    $idleSilent = Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row $feedIdle) -HasFeed
+    & $add "transport: armed with a feed that played nothing is INCOMPLETE, even where 'silent' holds ($($idleSilent.Line))" $true ($idleSilent.Status -ceq 'INCOMPLETE' -and $idleSilent.Line.EndsWith($noFeedBlocks, [StringComparison]::Ordinal))
+    $idleRecorded = Test-HarnessTransportState -State (& $state $null) -Row (& $row $feedIdle) -HasFeed
+    & $add 'transport: armed with a feed that played nothing is INCOMPLETE in a state without expectations too' $true ($idleRecorded.Status -ceq 'INCOMPLETE' -and $idleRecorded.Line.EndsWith($noFeedBlocks, [StringComparison]::Ordinal))
+    & $add 'transport: armed with a feed that played is judged as usual' $false ((Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row @{ silent = 10; signal = 0; left = 0; right = 0 }) -HasFeed).Status -ceq 'PASS')
+    & $add 'transport: not armed, the feed is not expected to play' $false ((Test-HarnessTransportState -State (& $state @{ called = $true } 'stop' $false 'off') -Row (& $row @{ fed = 0; fed_samples = 0; arm = 0; monitor = 0 }) -HasFeed).Status -ceq 'PASS')
+    & $add 'transport: armed in a scenario without a feed, nothing is expected to play' $false ((Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row $feedIdle)).Status -ceq 'PASS')
     $rec = & $judge $null $idle
     & $add 'transport: a state without expectations is recorded, never judged' $false ($rec.Status -ceq 'recorded' -and @($rec.Problems).Count -eq 0 -and $rec.Line -cnotmatch 'failed')
     & $add 'transport: paused, playing, auto monitoring and unarmed read back as asked' $false (
@@ -1772,7 +1782,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
         (& $judge @{ called = $true } @{ monitor = 2 } 'stop' $true 'auto').Status -ceq 'PASS' -and (& $judge @{ called = $true } @{ arm = 0; monitor = 0 } 'stop' $false 'off').Status -ceq 'PASS')
     # The numbers as the driver writes them
     $facts = @{}
-    foreach ($k in 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'playstate', 'arm', 'monitor', 'monitoring') { $facts["st2_$k"] = '7.0' }
+    foreach ($k in 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'fed', 'fed_samples', 'playstate', 'arm', 'monitor', 'monitoring') { $facts["st2_$k"] = '7.0' }
     $r2 = Read-HarnessTransportRow $facts 2
     & $add 'transport: the numbers of state n are read from st<n>_ (Lua may write whole numbers as 7.0)' $false ($null -ne $r2 -and $r2.blocks -eq 7 -and $r2.monitoring -eq 7 -and $null -eq (Read-HarnessTransportRow $facts 1))
     foreach ($badValue in $null, 'seven', 'NaN', 'inf', '-nan(ind)') {
@@ -1781,9 +1791,13 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
         $rowRead = try { Read-HarnessTransportRow $f2 2 } catch { "threw: $($_.Exception.Message)" }
         & $add "transport: a state with a number $(($null -eq $badValue) ? 'missing' : "reading '$badValue'") is not observed" $true ($null -eq $rowRead)
     }
+    foreach ($fedField in 'fed', 'fed_samples') {
+        $f3 = $facts.Clone(); $f3.Remove("st2_$fedField")
+        & $add "transport: a state without $fedField is not observed" $true ($null -eq (Read-HarnessTransportRow $f3 2))
+    }
     # The setup the driver reports
     $idents = @{ 'harness-block-probe' = 'reaper-harness/harness-block-probe.jsfx'; 'harness-feed' = 'reaper-harness/harness-feed.jsfx' }
-    $fed = [pscustomobject]@{ sr = 48000; states = @(1, 2); feed = [pscustomobject]@{ FileChannels = 2 } }
+    $fed = [pscustomobject]@{ sr = 48000; states = @([pscustomobject]@{ Arm = $false }, [pscustomobject]@{ Arm = $true }); feed = [pscustomobject]@{ FileChannels = 2 } }
     $setup = {
         param([hashtable]$Set = @{}, [string[]]$Drop = @(), $Scen = $fed)
         $f = @{ probe_ident = $idents['harness-block-probe']; probe_idx = '0'; probe_fx_count = '3'; clock_ident = $idents['harness-block-probe']; record_path = 'ok'; states_done = '2'
@@ -1804,6 +1818,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a feed that reported nothing'; D = @('feed_handle'); W = 'the feed reported nothing' }
         @{ L = 'a feed that could not open its file'; S = @{ feed_handle = '-1' }; W = 'the feed could not open its source' }
         @{ L = 'a feed handle below -2'; S = @{ feed_handle = '-3' }; W = 'the feed could not open its source' }
+        @{ L = 'a feed that never ran although a state arms the track'; S = @{ feed_handle = '-2'; feed_channels = '0'; feed_rate = '0' }; W = 'the feed never ran although a state arms the track' }
         @{ L = 'a feed that opened another channel count'; S = @{ feed_channels = '1' }; W = 'with 1 channels, expected 2' }
         @{ L = 'a feed that opened another rate'; S = @{ feed_rate = '44100' }; W = 'at 44100 Hz, expected 48000' }
     )
@@ -1811,8 +1826,14 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
         $found = & $setup ($c['S'] ?? @{}) ($c['D'] ?? @())
         & $add "transport setup: $($c.L) leaves no evidence ($($found -join ' | '))" $true ($found.Count -eq 1 -and $found[0] -clike "*$($c.W)*")
     }
-    & $add 'transport setup: a feed that never ran (-2: the track was never armed) is no problem' $false ((& $setup @{ feed_handle = '-2'; feed_channels = '0'; feed_rate = '0' }).Count -eq 0)
+    $neverArmed = [pscustomobject]@{ sr = 48000; states = @([pscustomobject]@{ Arm = $false }, [pscustomobject]@{ Arm = $false }); feed = [pscustomobject]@{ FileChannels = 2 } }
+    & $add 'transport setup: a feed that never ran (-2) is no problem when no state arms the track' $false ((& $setup @{ feed_handle = '-2'; feed_channels = '0'; feed_rate = '0' } @() $neverArmed).Count -eq 0)
     & $add 'transport setup: without a feed its facts are not asked for' $false ((& $setup @{} @('feed_ident', 'feed_handle', 'feed_channels', 'feed_rate') ([pscustomobject]@{ sr = 48000; states = @(1, 2); feed = $null })).Count -eq 0)
+    # The time the step gets: the driver's own deadlines (3 n / sr + 10 s a wait, two waits a state) come first
+    $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800 }, [pscustomobject]@{ Samples = 9600 }) }
+    $timedDefault = [pscustomobject]@{ sr = 48000; settleSamples = $null; states = $timed.states }
+    & $add 'transport timeout: luaTimeoutSec, the settle times and windows three times over, and 20 s a state' $false ([Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 101.5) -lt 1e-9)
+    & $add 'transport timeout: without a settle time it counts 5 s a state' $false ([Math]::Abs((Get-HarnessTransportTimeout -Scenario $timedDefault -LuaTimeoutSec 60) - 130.9) -lt 1e-9)
     # The job of the driver, from the fixture configuration
     $cfgFile = Join-Path $RepoRoot 'tests/fixtures/config.json'
     $cfgExt = Import-HarnessExtensions (Read-HarnessConfigExtensions $cfgFile)
@@ -1864,7 +1885,9 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     # Feed files of the configuration
     $feedDir = Join-Path $Tmp 'feed cfg'
     $null = New-Item -ItemType Directory -Path (Join-Path $feedDir 'feeds')
-    $wav = { param([string]$WavName, [int]$WavRate, [int]$Channels, [int]$Frames) [HarnessWav]::Write((Join-Path $feedDir "feeds/$WavName"), $WavRate, $Channels, 'float32', $false, [double[]]::new($Frames * $Channels)) }
+    $wav = { param([string]$WavName, [int]$WavRate, [int]$Channels, [int]$Frames) [HarnessWav]::Write((Join-Path $feedDir "feeds/$WavName"), $WavRate, $Channels, 'float32', $false, [double[]](, 0.25 * ($Frames * $Channels))) }
+    $frameFile = { param([string]$WavName, [double[]]$Frame) [HarnessWav]::Write((Join-Path $feedDir "feeds/$WavName"), 48000, $Frame.Count, 'float32', $false, [double[]](1..480 | ForEach-Object { $Frame })) }
+    & $frameFile 'zero.wav' @(0.0, 0.0); & $frameFile 'mono-zero.wav' @(, 0.0); & $frameFile 'left-zero.wav' @(0.0, 0.25); & $frameFile 'right-zero.wav' @(0.25, 0.0); & $frameFile 'left-nan.wav' @([double]::NaN, 0.25)
     & $wav 'stereo.wav' 48000 2 480; & $wav 'mono.wav' 48000 1 480; & $wav 'slow.wav' 44100 2 480; & $wav 'three.wav' 48000 3 480; & $wav 'empty.wav' 48000 2 0
     [IO.File]::WriteAllText((Join-Path $feedDir 'feeds/text.wav'), 'not a wav file')
     [IO.File]::WriteAllText((Join-Path $Tmp 'outside.wav'), 'x')
@@ -1879,6 +1902,12 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a mono file for different channels'; R = 'feeds/mono.wav'; C = 'different'; W = '*has one channel: channels "different" needs two*' }
         @{ L = 'a file of 3 channels'; R = 'feeds/three.wav'; C = 'same'; W = '*has 3 channels: 1 or 2 are accepted*' }
         @{ L = 'a file without samples'; R = 'feeds/empty.wav'; C = 'different'; W = '*holds no samples*' }
+        @{ L = 'a file of nothing but zeros'; R = 'feeds/zero.wav'; C = 'same'; W = '*feeds/zero.wav has a peak of 0 on channel 1: a silent feed proves nothing*' }
+        @{ L = 'a mono file of nothing but zeros'; R = 'feeds/mono-zero.wav'; C = 'left'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a silent first channel for left only'; R = 'feeds/left-zero.wav'; C = 'left'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a silent first channel for different channels'; R = 'feeds/left-zero.wav'; C = 'different'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a silent second channel for different channels'; R = 'feeds/right-zero.wav'; C = 'different'; W = '*has a peak of 0 on channel 2*' }
+        @{ L = 'a first channel of nothing but NaN (no finite peak)'; R = 'feeds/left-nan.wav'; C = 'same'; W = '*has a peak of 0 on channel 1*' }
         @{ L = 'a file that is not a WAV'; R = 'feeds/text.wav'; C = 'different'; W = '*feeds/text.wav cannot be read*' }
         @{ L = 'a file that is not there'; R = 'feeds/none.wav'; C = 'different'; W = '*feed file not found: feeds/none.wav*' }
         @{ L = 'a path that leaves the directory of the configuration'; R = '../outside.wav'; C = 'different'; W = '*leaves the directory of the configuration file*' }
@@ -1887,6 +1916,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     foreach ($c in $feedBad) {
         & $add "feeds: $($c.L) is a usage error before REAPER starts" $true (Test-Usage { Read-HarnessFeeds -Config (& $feedConf @(& $feedOf $c.R $c.C)) } "USAGE: feeds: 1 problem(s): fs: $($c.W)")
     }
+    & $add 'feeds: a silent second channel is fine where only the first is played' $false ($(try { Read-HarnessFeeds -Config (& $feedConf @((& $feedOf 'feeds/right-zero.wav' 'left'), (& $feedOf 'feeds/right-zero.wav' 'same'))); $true } catch { $false }))
     & $add 'feeds: every problem is listed at once' $true (Test-Usage { Read-HarnessFeeds -Config (& $feedConf @((& $feedOf 'feeds/slow.wav'), (& $feedOf 'feeds/none.wav'))) } 'USAGE: feeds: 2 problem(s): *resampled*; *not found*')
     # The built-in negative case: what REAPER does with Run FX when stopped off and an armed, fed track
     $probeNeg = @(Get-HarnessBuiltinNegatives -Transport)[-1]
@@ -2017,6 +2047,16 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add 'tool JSFX: the probe, the feed and the driver share gmem ReaperHarness, 16 values a slot (clock 0, tested track 1, feed 2)' $false (
         $probeText -cmatch '(?m)^options:gmem=ReaperHarness\r?$' -and $feedText -cmatch '(?m)^options:gmem=ReaperHarness\r?$' -and $probeText -cmatch 'base = floor\(slider1 \+ 0\.5\) \* 16;' -and $feedText -cmatch 'base = floor\(slider1 \+ 0\.5\) \* 16;' -and
         $transportStep -cmatch 'gmem_attach\("ReaperHarness"\)' -and $transportStep -cmatch 'local CLOCK, TESTED, FEED = 0, 16, 32')
+    & $add 'driver: every state reports the blocks and frames the feed played in its window' $true (
+        $transportStep -cmatch 'f0 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and $transportStep -cmatch 'f1 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and
+        $transportStep -cmatch 'put\(p \.\. "fed", int\(f1\[0\] - f0\[0\]\)\)' -and $transportStep -cmatch 'put\(p \.\. "fed_samples", int\(f1\[1\] - f0\[1\]\)\)')
+    & $add 'tool JSFX: the feed starts its file over as often as a block needs (a file can be shorter than a block), and a read that yields nothing ends that' $true (
+        $feedText -cmatch '(?s)while \(frames < samplesblock && more > 0\) \(\s*file_rewind\(h\);\s*file_riff\(h, nch, fsr\);\s*more = file_mem\(')
+    $probeSampleAt = $probeText.IndexOf('@sample')
+    $probeBlockAt = $probeText.IndexOf('@block')
+    & $add 'tool JSFX: the block probe counts a block when its last sample has gone through, together with its silent and signal counts' $true (
+        $probeBlockAt -gt 0 -and $probeSampleAt -gt $probeBlockAt -and $probeText.Substring($probeBlockAt, $probeSampleAt - $probeBlockAt) -cnotmatch 'gmem\[base \+ [0-6]\]' -and
+        $probeText.Substring($probeSampleAt) -cmatch 'i === n \? \(\s*gmem\[base \+ 0\] \+= 1;\s*gmem\[base \+ 1\] \+= n;\s*lsig \|\| rsig \? \(')
     & $add 'tool JSFX: the file the feed opens is the one the harness installs (Data\reaper-harness\feed.wav of the private directory)' $false (
         $feedText -cmatch 'file_open\("reaper-harness/feed\.wav"\)' -and $pluginsText -cmatch "Get-HarnessPrivateSubdir 'Data\\reaper-harness'\) 'feed\.wav'")
     & $add 'wiring: Invoke-HarnessSuite reads the feed files with the states, before the preflight and before installing anything' $false (

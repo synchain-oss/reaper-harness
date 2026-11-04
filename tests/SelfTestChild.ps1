@@ -744,6 +744,22 @@ finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $pl
 $gapRow = @($gapRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
 Write-Case 'end to end: a block probe that is not first in the chain makes the row INCOMPLETE, never PASS or FAIL' $true (
     $gapRun.verdict -ceq 'INCOMPLETE' -and $null -ne $gapRow -and $gapRow.status -ceq 'INCOMPLETE' -and $gapRow.detail -clike "the block probe of the tested track is not the harness's own first in its chain (idx 1*")
+# A feed that played nothing in an armed state whose chain must be silent (it would pass for the wrong reason), and a feed
+# that never ran although a state arms the track: no evidence
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; FeedIdle = 'playing-auto' }
+try { $idleRun = Invoke-HarnessSuite @e2e -Only '^monitor-states$' -NoNegative -SelfTestHooks $hooks }
+finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$idleRow = @($idleRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+Write-Case 'end to end: a feed that played nothing in an armed state makes that state and the row INCOMPLETE, where "silent" would pass' $true (
+    $idleRun.verdict -ceq 'INCOMPLETE' -and $null -ne $idleRow -and $idleRow.status -ceq 'INCOMPLETE' -and $idleRow.detail -clike '*playing-auto: *; no evidence: the feed played no block in the window although the track is armed*' -and
+    @($idleRow.facts.states | Where-Object { $_.name -ceq 'playing-auto' })[0].status -ceq 'INCOMPLETE' -and @($idleRow.facts.states | Where-Object { $_.name -ceq 'stopped-armed-on' })[0].status -ceq 'PASS' -and
+    @($idleRow.facts.states | Where-Object { $_.name -ceq 'stopped-armed-on' })[0].fed -gt 0)
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; FeedIdle = '*' }
+try { $deadRun = Invoke-HarnessSuite @e2e -Only '^monitor-states$' -NoNegative -SelfTestHooks $hooks }
+finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$deadRow = @($deadRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+Write-Case 'end to end: a feed that never ran although a state arms the track makes the row INCOMPLETE' $true (
+    $deadRun.verdict -ceq 'INCOMPLETE' -and $null -ne $deadRow -and $deadRow.status -ceq 'INCOMPLETE' -and $deadRow.detail -ceq 'the feed never ran although a state arms the track')
 Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
     $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
 

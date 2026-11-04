@@ -9,7 +9,8 @@ desc: reaper-harness block probe
 //   0 blocks   1 samples   2 silent blocks (every sample of both channels exactly 0)   3 blocks with signal
 //   4 blocks with signal on the left   5 ... on the right   6 blocks with signal whose left and right are equal sample
 //   for sample   7 the play state seen last   8 the block size seen last   9 the sample rate
-// A block is counted once all of its samples went through, so it is either silent or has signal, never half of each.
+// A block is counted once all of its samples went through, so it is either silent or has signal, never half of each,
+// and all its counts move together. A call without samples is no block.
 // ext_nodenorm keeps REAPER from adding its anti-denormal noise to the input, and the comparisons are exact (=== and
 // !==, not the tolerant == of EEL2): a sample of 1e-9 is signal, not silence.
 // The harness installs this file into the private configuration (Effects/reaper-harness/).
@@ -40,8 +41,6 @@ i = 0;
 lsig = 0;
 rsig = 0;
 diff = 0;
-gmem[base + 0] += 1;
-gmem[base + 1] += samplesblock;
 gmem[base + 7] = play_state;
 gmem[base + 8] = samplesblock;
 gmem[base + 9] = srate;
@@ -52,6 +51,8 @@ spl1 !== 0 ? rsig = 1;
 spl0 !== spl1 ? diff = 1;
 i += 1;
 i === n ? (
+  gmem[base + 0] += 1;
+  gmem[base + 1] += n;
   lsig || rsig ? (
     gmem[base + 3] += 1;
     lsig ? gmem[base + 4] += 1;

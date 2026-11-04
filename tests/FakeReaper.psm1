@@ -354,7 +354,8 @@ function Invoke-FakeLearn($job, $report) {
 # the track is armed, or when "Run FX when stopped" (bit 0 of runallonstop in the private ini) is on and the transport
 # is not paused; input monitoring is in effect when the track is armed and monitoring is on, or auto while not playing;
 # only then does the chain get the feed (Data\reaper-harness\feed.wav of the configuration directory, when the job has
-# a feed and the file is there). A window of n samples is n / block blocks, rounded up, on the clock as well.
+# a feed and the file is there), which plays in every armed state. A window of n samples is n / block blocks, rounded
+# up, on the clock as well. Spec.FeedIdle = a state name: the feed plays nothing in that state; '*': it never runs.
 function Invoke-FakeTransport($job, $report) {
     $sr = [int](Get-FakeIniValue 'dummy_srate')
     $block = [int](Get-FakeIniValue 'dummy_blocksize')
@@ -389,16 +390,18 @@ function Invoke-FakeTransport($job, $report) {
         $blocks = [int][Math]::Ceiling([double]$st['samples'] / $block)
         $b = ($arm -eq 1 -or (($ras -band 1) -and $t -cne 'pause')) ? $blocks : 0
         $monitoring = $arm -eq 1 -and ($mon -eq 1 -or ($mon -eq 2 -and $t -cne 'play'))
-        $sig = ($monitoring -and $nch -gt 0) ? $b : 0
+        $idle = $script:Spec['FeedIdle'] -ceq '*' -or $script:Spec['FeedIdle'] -ceq [string]$st['name']
+        $fedBlocks = ($arm -eq 1 -and $nch -gt 0 -and -not $idle) ? $blocks : 0
+        $sig = ($monitoring -and $fedBlocks -gt 0) ? $b : 0
         $same = ($mode -eq 1 -or ($mode -eq 2 -and $nch -eq 1)) ? $sig : 0
         $values = [ordered]@{
             settled = $blocks * $block; clock = $blocks; clock_samples = $blocks * $block; blocks = $b; samples = $b * $block; silent = $b - $sig; signal = $sig
-            left = $sig; right = ($mode -eq 0) ? 0 : $sig; equal = $same; playstate = @{ stop = 0; play = 1; pause = 2 }[$t]; arm = $arm; monitor = $mon; monitoring = [int]$monitoring
+            left = $sig; right = ($mode -eq 0) ? 0 : $sig; equal = $same; fed = $fedBlocks; fed_samples = $fedBlocks * $block; playstate = @{ stop = 0; play = 1; pause = 2 }[$t]; arm = $arm; monitor = $mon; monitoring = [int]$monitoring
         }
         foreach ($e in $values.GetEnumerator()) { $report.Add("st${n}_$($e.Key)=$($e.Value)") }
     }
     $report.Add("states_done=$n")
-    $handle = (-not $armed) ? -2 : (($nch -gt 0) ? 1 : -1)
+    $handle = (-not $armed -or $script:Spec['FeedIdle'] -ceq '*') ? -2 : (($nch -gt 0) ? 1 : -1)
     foreach ($kv in @("feed_handle=$handle", "feed_channels=$nch", "feed_rate=$rate")) { $report.Add($kv) }
 }
 

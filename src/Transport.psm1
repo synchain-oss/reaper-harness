@@ -5,9 +5,11 @@
 #   Read-HarnessFeeds -Config <config>
 #       every transport scenario whose feed names a WAV file: the path follows the rules of extension paths, the file
 #       must hold samples, its rate must be the scenario's (nothing is resampled), 1 or 2 channels, and 2 for
-#       "different". Problems are usage errors: REAPER is never started. Fills in File, Sha256 (first 12 hex digits)
-#       and FileChannels of the feed.
+#       "different"; a channel the feed plays must not have a peak of 0 (a silent feed would let every "silent"
+#       expectation pass without evidence). Problems are usage errors: REAPER is never started. Fills in File, Sha256
+#       (first 12 hex digits) and FileChannels of the feed.
 #   Get-HarnessTransportJob      the job of the driver's transport step (pure)
+#   Get-HarnessTransportTimeout  the time the driver's transport step may take (pure)
 #   Read-HarnessTransportRow     the numbers the driver reported for one state (pure)
 #   Test-HarnessTransportSetup   the probes, the clock, the feed and the record directory the driver set up (pure)
 #   Test-HarnessTransportState   one state against what it expects (pure)
@@ -28,7 +30,7 @@ Import-Module (Join-Path $PSScriptRoot 'Wav.psm1') -ErrorAction Stop
 $script:MonitorCode = @{ off = 0; on = 1; auto = 2 } # I_RECMON
 $script:PlayCode = @{ stop = 0; play = 1; pause = 2 } # GetPlayState: 1 playing, 2 paused; 4 (recording) never
 $script:FeedMode = @{ left = 0; same = 1; different = 2 } # the Channels parameter of the feed JSFX
-$script:Fields = 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'playstate', 'arm', 'monitor', 'monitoring'
+$script:Fields = 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'fed', 'fed_samples', 'playstate', 'arm', 'monitor', 'monitoring'
 
 function Read-HarnessFeeds {
     param([Parameter(Mandatory)]$Config)
@@ -43,6 +45,12 @@ function Read-HarnessFeeds {
         if ($w.Rate -ne $s.sr) { $bad.Add("$($s.id): feed $rel is at $($w.Rate) Hz and the scenario runs at $($s.sr) Hz: nothing is resampled") }
         if ($w.Channels -notin 1, 2) { $bad.Add("$($s.id): feed $rel has $($w.Channels) channels: 1 or 2 are accepted") }
         elseif ($w.Channels -eq 1 -and $s.feed.Channels -ceq 'different') { $bad.Add("$($s.id): feed $rel has one channel: channels ""different"" needs two") }
+        else {
+            # "left" and "same" play the first channel of the file, "different" both
+            $peaks = [HarnessWav]::ChannelPeaks($w)
+            $played = ($s.feed.Channels -ceq 'different') ? $w.Channels : 1
+            for ($ch = 0; $ch -lt $played; $ch++) { if ($peaks[$ch] -eq 0) { $bad.Add("$($s.id): feed $rel has a peak of 0 on channel $($ch + 1): a silent feed proves nothing") } }
+        }
         $s.feed.File = $file
         $s.feed.Sha256 = (Get-HarnessSha256 $file).Substring(0, 12)
         $s.feed.FileChannels = $w.Channels
@@ -73,6 +81,16 @@ function ConvertTo-TransportNumber([AllowNull()][string]$Text) {
     [long][Math]::Round($v)
 }
 
+# What the Lua step may take: luaTimeoutSec, the settle times and windows three times over (the main thread can stall
+# while the audio runs on) and the 10 s each of a state's two waits gives itself in the driver, so that the driver's own
+# "the device clock stopped" comes before the watchdog. Without settleSamples it counts 5 s a state, REAPER's default.
+function Get-HarnessTransportTimeout {
+    param([Parameter(Mandatory)]$Scenario, [Parameter(Mandatory)][double]$LuaTimeoutSec)
+    $seconds = 0.0
+    foreach ($st in $Scenario.states) { $seconds += ($st.Samples + (($null -ne $Scenario.settleSamples) ? $Scenario.settleSamples : 5 * $Scenario.sr)) / $Scenario.sr }
+    $LuaTimeoutSec + 3 * $seconds + 20 * @($Scenario.states).Count
+}
+
 # The driver's numbers for state N (1-based): $null when the state was not observed (a field missing or unreadable).
 function Read-HarnessTransportRow([Parameter(Mandatory)][hashtable]$Facts, [int]$N) {
     $values = [ordered]@{}
@@ -99,9 +117,10 @@ function Test-HarnessTransportSetup {
     if ($null -ne $Scenario.feed) {
         if ($Facts['feed_ident'] -cne $Idents['harness-feed']) { $bad.Add("the feed of the input chain is not the harness's own ('$($Facts['feed_ident'])')") }
         $h = ConvertTo-TransportNumber $Facts['feed_handle']
-        # -2: the feed never ran (the track was never armed), which leaves nothing to check
+        # -2: the feed never ran, which is right only when no state arms the track (the input chain runs on armed tracks)
         if ($null -eq $h) { $bad.Add('the feed reported nothing') }
         elseif ($h -eq -1 -or $h -lt -2) { $bad.Add('the feed could not open its source') }
+        elseif ($h -eq -2 -and @($Scenario.states | Where-Object { $_.Arm }).Count) { $bad.Add('the feed never ran although a state arms the track') }
         elseif ($h -ge 0) {
             if ((ConvertTo-TransportNumber $Facts['feed_channels']) -ne $Scenario.feed.FileChannels) { $bad.Add("the feed opened a source with $($Facts['feed_channels']) channels, expected $($Scenario.feed.FileChannels)") }
             if ((ConvertTo-TransportNumber $Facts['feed_rate']) -ne $Scenario.sr) { $bad.Add("the feed opened a source at $($Facts['feed_rate']) Hz, expected $($Scenario.sr)") }
@@ -114,10 +133,11 @@ function Format-TransportPlay([long]$Code) { switch ($Code) { 0 { 'stop' } 1 { '
 
 # One state (State: from the configuration) against the driver's numbers (Row, $null when not observed). Status:
 # PASS / FAIL / INCOMPLETE, or recorded for a state without expectations. INCOMPLETE: the device did not run the whole
-# window, or REAPER does not report the transport, arm and monitoring the state asked for (the numbers would describe
-# another state). Line: what was seen, then "; failed: ..." or "; no evidence: ...".
+# window, REAPER does not report the transport, arm and monitoring the state asked for (the numbers would describe
+# another state), or the scenario has a feed (HasFeed), the track is armed and the feed played nothing in the window (a
+# silent input would prove nothing). Line: what was seen, then "; failed: ..." or "; no evidence: ...".
 function Test-HarnessTransportState {
-    param([Parameter(Mandatory)]$State, [AllowNull()]$Row)
+    param([Parameter(Mandatory)]$State, [AllowNull()]$Row, [switch]$HasFeed)
     if ($null -eq $Row) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Line = "$($State.Name): not observed"; Problems = @('not observed') } }
     $r = $Row
     $line = '{0}: blocks={1}/{2} silent={3} signal={4} left={5} right={6} same={7} transport={8} monitoring={9}' -f $State.Name, $r.blocks, $r.clock, $r.silent, $r.signal, $r.left, $r.right, $r.equal, (Format-TransportPlay $r.playstate), $r.monitoring
@@ -126,6 +146,7 @@ function Test-HarnessTransportState {
     if ($r.playstate -ne $script:PlayCode[$State.Transport]) { $gap.Add("the transport reads $(Format-TransportPlay $r.playstate), expected $($State.Transport)") }
     if ($r.arm -ne [int]$State.Arm) { $gap.Add("arm reads $($r.arm), expected $([int]$State.Arm)") }
     if ($r.monitor -ne $script:MonitorCode[$State.Monitor]) { $gap.Add("monitoring mode reads $($r.monitor), expected $($script:MonitorCode[$State.Monitor])") }
+    if ($HasFeed -and $State.Arm -and $r.fed -eq 0) { $gap.Add('the feed played no block in the window although the track is armed') }
     if ($gap.Count) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Line = "$line; no evidence: $($gap -join '; ')"; Problems = $gap.ToArray() } }
     $x = $State.Expect
     if ($null -eq $x) { return [pscustomobject]@{ Status = 'recorded'; Line = $line; Problems = @() } }
@@ -164,4 +185,4 @@ function Test-HarnessTransportState {
     [pscustomobject]@{ Status = 'PASS'; Line = $line; Problems = @() }
 }
 
-Export-ModuleMember -Function Read-HarnessFeeds, Get-HarnessTransportJob, Read-HarnessTransportRow, Test-HarnessTransportSetup, Test-HarnessTransportState
+Export-ModuleMember -Function Read-HarnessFeeds, Get-HarnessTransportJob, Get-HarnessTransportTimeout, Read-HarnessTransportRow, Test-HarnessTransportSetup, Test-HarnessTransportState

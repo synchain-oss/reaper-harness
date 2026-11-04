@@ -593,8 +593,8 @@ function Invoke-HarnessInstancesScenario($Ctx, $s) {
 # The transport kind (Transport.psm1 builds the job and judges). A readback that differs from what was asked for (the
 # device, anticipative FX, Run FX when stopped, the FX of the layout) or a file in the record directory is FAIL; a
 # setup that leaves no evidence is INCOMPLETE; otherwise the worst of the states. The project has no items: what the
-# tested track gets comes through its input. The Lua step gets the time its windows need on top of luaTimeoutSec,
-# three times over (the main thread can stall while the audio runs on).
+# tested track gets comes through its input. The Lua step gets the time its windows need on top of luaTimeoutSec
+# (Get-HarnessTransportTimeout).
 function Invoke-HarnessTransportScenario($Ctx, $s) {
     if (-not $Ctx.ToolJsfx.Count) { return New-HarnessOutcome INCOMPLETE 'the block probe and the feed JSFX were not installed' }
     $Layout = Get-HarnessLayout $Ctx $s.layout
@@ -611,9 +611,7 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
     $Job = Get-HarnessTransportJob -Scenario $s -Layout $Layout -Tools @{ 'harness-block-probe' = $Ctx.ToolJsfx['harness-block-probe'].AddName; 'harness-feed' = $Ctx.ToolJsfx['harness-feed'].AddName } -RecordDir $recordDir
     $Job.project = $r.Project
     $Job.reads = ConvertTo-LuaReads $Reads
-    $seconds = 0.0
-    foreach ($st in $s.states) { $seconds += ($st.Samples + (($null -ne $s.settleSamples) ? $s.settleSamples : 5 * $s.sr)) / $s.sr }
-    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step transport -Job $Job -TimeoutSec ([double]$Ctx.Limits.luaTimeoutSec + 3 * $seconds)
+    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step transport -Job $Job -TimeoutSec (Get-HarnessTransportTimeout -Scenario $s -LuaTimeoutSec ([double]$Ctx.Limits.luaTimeoutSec))
     $recorded = @(Get-ChildItem -LiteralPath $recordDir -Recurse -File -Force -ErrorAction SilentlyContinue)
     if ($recorded.Count) { return New-HarnessOutcome FAIL "$($recorded.Count) file(s) appeared in the record directory of the project: something was recorded" }
     if ($lua.Why) { return New-HarnessOutcome INCOMPLETE $lua.Why }
@@ -629,7 +627,7 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
     $judged = for ($i = 0; $i -lt $s.states.Count; $i++) {
         $st = $s.states[$i]
         $row = Read-HarnessTransportRow $f ($i + 1)
-        $j = Test-HarnessTransportState -State $st -Row $row
+        $j = Test-HarnessTransportState -State $st -Row $row -HasFeed:($null -ne $s.feed)
         $one = [ordered]@{ name = $st.Name; transport = $st.Transport; arm = $st.Arm; monitor = $st.Monitor; windowSamples = $st.Samples; status = $j.Status; problems = @($j.Problems) }
         if ($row) { foreach ($p in $row.PSObject.Properties) { $one[$p.Name] = $p.Value } }
         $perState.Add($one)

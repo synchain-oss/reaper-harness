@@ -249,8 +249,8 @@ end
 -- This step never records: no record action is called anywhere in this file, every wait checks the transport for the
 -- record bit, both tracks have recording disabled and the record path is the work directory.
 -- Reported per state n: st<n>_settled, st<n>_clock and _clock_samples (device blocks and samples of the window),
--- _blocks, _samples, _silent, _signal, _left, _right, _equal (the tested chain), _playstate, _arm, _monitor and
--- _monitoring (read back at the end of the window).
+-- _blocks, _samples, _silent, _signal, _left, _right, _equal (the tested chain), _fed and _fed_samples (blocks and
+-- frames the feed played), _playstate, _arm, _monitor and _monitoring (read back at the end of the window).
 function steps.transport()
     openAndWait(job.project)
     put("dev_bsize", device("BSIZE"))
@@ -341,12 +341,14 @@ function steps.transport()
         transport(st.transport)
         local p = "st" .. n .. "_"
         put(p .. "settled", int(waitSamples(settle)))
-        local c0, t0 = snap(CLOCK), snap(TESTED)
+        local c0, t0, f0 = snap(CLOCK), snap(TESTED), snap(FEED)
         waitSamples(st.samples)
-        local c1, t1 = snap(CLOCK), snap(TESTED)
+        local c1, t1, f1 = snap(CLOCK), snap(TESTED), snap(FEED)
         put(p .. "clock", int(c1[0] - c0[0]))
         put(p .. "clock_samples", int(c1[1] - c0[1]))
         for i, key in ipairs({ "blocks", "samples", "silent", "signal", "left", "right", "equal" }) do put(p .. key, int(t1[i - 1] - t0[i - 1])) end
+        put(p .. "fed", int(f1[0] - f0[0]))
+        put(p .. "fed_samples", int(f1[1] - f0[1]))
         put(p .. "playstate", reaper.GetPlayState())
         put(p .. "arm", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECARM")))
         put(p .. "monitor", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECMON")))

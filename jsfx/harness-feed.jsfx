@@ -5,7 +5,8 @@ desc: reaper-harness input feed
 // chain of the tested track (the chain REAPER runs on the record input of an armed track), so what reaches the track's
 // own FX chain has come through arming and input monitoring the way a hardware input does. The file is
 // Data/reaper-harness/feed.wav of the private configuration, which the harness writes before the launch. It is played
-// frame by frame at the device's pace, from its start and over again without a gap, with no resampling and a gain of 1;
+// frame by frame at the device's pace, from its start and over again without a gap, however short it is, with no
+// resampling and a gain of 1;
 // what came in on the input (silence on the dummy device) is replaced.
 // Channels: left only (the right channel is 0), both the same (the file's first channel on both), both different (the
 // file's two channels; a file with one channel then plays it on both).
@@ -54,7 +55,8 @@ pos = 0;
 h >= 0 && nch >= 1 && nch <= 2 ? (
   got = file_mem(h, buf, samplesblock * nch);
   frames = floor(got / nch);
-  frames < samplesblock ? (
+  more = 1;
+  while (frames < samplesblock && more > 0) (
     file_rewind(h);
     file_riff(h, nch, fsr);
     more = file_mem(h, buf + frames * nch, (samplesblock - frames) * nch);
