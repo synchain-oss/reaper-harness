@@ -674,7 +674,7 @@ Write-Case 'end to end: the transport row reports every state as the stand-in me
         'playing-auto: blocks=10/10 silent=10 signal=0 left=0 right=0 same=0 transport=play monitoring=0 | ' +
         'paused-unarmed: blocks=0/10 silent=0 signal=0 left=0 right=0 same=0 transport=pause monitoring=0') -and
     @($msRow.facts.states).Count -eq 4 -and $msRow.facts.states[3].status -ceq 'recorded' -and $msRow.facts.states[1].status -ceq 'PASS' -and $msRow.facts.runFxWhenStopped -eq $true -and
-    $msRow.facts.feed.source -ceq 'test signal' -and $msRow.facts.feed.channels -ceq 'different' -and $msRow.facts.settleSamples -eq 4800)
+    $msRow.facts.feed.source -ceq 'test signal' -and $msRow.facts.feed.channels -ceq 'different' -and $msRow.facts.settleSamples -eq 240000)
 $offRows = @($rowsOut | Where-Object { $_.id -like 'monitor-stopped-off-*' })
 Write-Case "end to end: with Run FX when stopped off the unarmed chain is not called, at each block size of the matrix ($(@($offRows | ForEach-Object { $_.id }) -join ', '))" $false (
     $offRows.Count -eq 2 -and @($offRows | Where-Object { $_.detail -cnotmatch '^unarmed: blocks=0/(75|5) [^|]* \| armed-on: blocks=(75|5)/(75|5) silent=0 signal=(75|5) left=(75|5) right=0 same=0 ' }).Count -eq 0 -and
@@ -760,6 +760,14 @@ finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $pl
 $deadRow = @($deadRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
 Write-Case 'end to end: a feed that never ran although a state arms the track makes the row INCOMPLETE' $true (
     $deadRun.verdict -ceq 'INCOMPLETE' -and $null -ne $deadRow -and $deadRow.status -ceq 'INCOMPLETE' -and $deadRow.detail -ceq 'the feed never ran although a state arms the track')
+# A record path that does not read back: the step stops before it arms anything, and the row is INCOMPLETE
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; RecordPathFails = $true }
+try { $pathRun = Invoke-HarnessSuite @e2e -Only '^monitor-states$' -NoNegative -SelfTestHooks $hooks }
+finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$pathRow = @($pathRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+Write-Case 'end to end: a record path that does not read back ends the transport step before anything is armed: the row is INCOMPLETE and has no states' $true (
+    $pathRun.verdict -ceq 'INCOMPLETE' -and $null -ne $pathRow -and $pathRow.status -ceq 'INCOMPLETE' -and
+    $pathRow.detail -ceq 'the Lua driver reported an error: the record path of the project could not be set to the work directory; nothing was armed')
 # A state without a clean reading of its counts: that state is not observed, the others are judged
 Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; Unread = 'playing-auto' }
 try { $unreadRun = Invoke-HarnessSuite @e2e -Only '^monitor-states$' -NoNegative -SelfTestHooks $hooks }

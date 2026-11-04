@@ -135,7 +135,8 @@ The `transport` kind arms a track and turns its input monitoring on. It never re
 - recording is disabled (record mode "disabled") on both tracks it arms, the tested one and its own clock track, and
   their input is none: what the tested track gets comes from the feed JSFX in its input FX chain;
 - the project's record path is set to a directory in the work directory before anything is armed, and read back; a
-  path that does not read back is INCOMPLETE;
+  path that does not read back stops the step there, before anything is armed or the transport is touched, and the row
+  is INCOMPLETE;
 - every wait checks the transport for the record bit; seen, the transport is stopped and the row is INCOMPLETE;
 - any file in that record directory after the launch makes the row FAIL, whatever its states say;
 - at the end the transport is stopped and both tracks are disarmed.

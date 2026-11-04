@@ -87,7 +87,7 @@
     { "id": "instances", "kind": "instances", "plugins": ["gain", "bus"] },
     { "id": "ext-count", "kind": "fixture-count", "count": 3 },
     {
-      "id": "monitor-states", "kind": "transport", "layout": "chain", "feed": { "channels": "different" }, "settleSamples": 4800,
+      "id": "monitor-states", "kind": "transport", "layout": "chain", "feed": { "channels": "different" }, "settleSamples": 240000,
       "states": [
         { "name": "stopped-unarmed", "transport": "stop", "arm": false, "monitor": "off", "samples": 4800, "expect": { "called": true, "input": "silent", "monitoring": false } },
         { "name": "stopped-armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "called": true, "input": "signal", "channels": "different", "monitoring": true } },
@@ -96,7 +96,7 @@
       ]
     },
     {
-      "id": "monitor-stopped-off", "kind": "transport", "layout": "chain", "host": { "runFxWhenStopped": false }, "feed": { "channels": "left" }, "settleSamples": 4800, "matrix": { "block": [64, 1024] },
+      "id": "monitor-stopped-off", "kind": "transport", "layout": "chain", "host": { "runFxWhenStopped": false }, "feed": { "channels": "left" }, "matrix": { "block": [64, 1024] },
       "states": [
         { "name": "unarmed", "transport": "stop", "arm": false, "monitor": "off", "samples": 4800, "expect": { "called": false } },
         { "name": "armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "called": true, "channels": "left" } }
@@ -109,7 +109,7 @@
     { "id": "neg-states-swapped", "kind": "render", "layout": "states", "maxDiffDb": 0, "stems": [ { "track": "Quiet", "rmsChangeDb": { "L": [5.9, 6.1] } } ], "expect": "FAIL", "expectDetail": "\\| stem Quiet: .*; failed: rms change L -6\\.02 dB outside" },
     { "id": "neg-ext-count", "kind": "fixture-count", "count": 0, "expect": "FAIL", "expectDetail": "^counted 0, expected at least 1$" },
     {
-      "id": "neg-feed-is-not-same", "kind": "transport", "layout": "chain", "feed": { "channels": "different" }, "settleSamples": 4800,
+      "id": "neg-feed-is-not-same", "kind": "transport", "layout": "chain", "feed": { "channels": "different" },
       "states": [ { "name": "armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "channels": "same" } } ],
       "expect": "FAIL", "expectDetail": "^armed-on: [^|]*; failed: left and right differ in [1-9][0-9]* of [1-9][0-9]* blocks with signal$"
     }

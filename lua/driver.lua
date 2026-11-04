@@ -266,7 +266,10 @@ function steps.transport()
     putTracks("", job.reads)
     local setOk = reaper.GetSetProjectInfo_String(0, "RECORD_PATH", job.recordDir, true)
     local _, path = reaper.GetSetProjectInfo_String(0, "RECORD_PATH", "", false)
-    put("record_path", (setOk and path == job.recordDir) and "ok" or "failed")
+    local pathOk = setOk and path == job.recordDir
+    put("record_path", pathOk and "ok" or "failed")
+    -- Fail closed: without the record path in the work directory nothing is armed and the transport is never touched
+    if not pathOk then error("the record path of the project could not be set to the work directory; nothing was armed") end
     local tested = reaper.GetTrack(0, job.track)
     if not tested then error("the project has no track " .. tostring(job.track)) end
     reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)

@@ -368,6 +368,8 @@ function Invoke-FakeTransport($job, $report) {
     }
     foreach ($kv in @("dev_bsize=$block", "dev_srate=$sr", 'dev_mode=dummy', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$ras", 'cfg_runafterstop=4000')) { $report.Add($kv) }
     Add-FakeTracks $report '' $job['project'] $job['reads']
+    # Spec.RecordPathFails: the record path does not read back, and like the driver the step stops before it arms anything
+    if ($script:Spec['RecordPathFails']) { $report.Add('record_path=failed'); $report.Add('error=the record path of the project could not be set to the work directory; nothing was armed'); return }
     $report.Add('record_path=ok')
     $tracks = Read-FakeProject ([IO.File]::ReadAllText($job['project']))
     $probe = Find-FakePlugin $job['probe']

@@ -349,7 +349,7 @@ recorded ([SAFETY.md](SAFETY.md#nothing-is-recorded)).
 | `track` | the tested track, by name; may be left out when the layout has one track |
 | `states` | required, 1 … 64 states, taken in order |
 | `feed` | `{ "wav": "<file>", "channels": "left" \| "same" \| "different" }`: what the input of the tested track gets (below); without it the input gets nothing |
-| `settleSamples` | device samples to let pass after each change of state before its window opens (0 … 115200000); default REAPER's "run FX after stopping" time (`runafterstop`, 4000 ms unless set) plus half a second |
+| `settleSamples` | device samples to let pass after each change of state before its window opens (0 … 115200000); default REAPER's "run FX after stopping" time (`runafterstop`, 4000 ms unless set) plus half a second; a shorter time lets the chain's run-on after the previous state into the window |
 | `sr`, `block`, `host`, `matrix` | as `device`; the matrix has `sr` and `block` only |
 
 A state:
@@ -386,8 +386,8 @@ file is checked before REAPER starts (a usage error otherwise), copied to `Data/
 private configuration directory, and named in the result with the first 12 hex digits of its sha256.
 
 How it is observed: the driver opens the project (tracks without items), reads it back like `device` (block size,
-sample rate, anticipative FX, Run FX when stopped, every FX), sets the project's record path to the work directory and
-adds
+sample rate, anticipative FX, Run FX when stopped, every FX), sets the project's record path to the work directory
+(when it does not read back, the step stops there with nothing armed and the row is INCOMPLETE) and adds
 
 - `jsfx/harness-block-probe.jsfx` first in the FX chain of the tested track: it counts the blocks it is run with and
   what they carry (signal or not, on which side, left equal to right), so it sees what the first plugin gets;

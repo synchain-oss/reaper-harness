@@ -1845,7 +1845,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     $job = Get-HarnessTransportJob -Scenario $ms -Layout $conf.Layouts[$ms.layout] -Tools $tools -RecordDir 'R'
     $codes = @($job.states | ForEach-Object { "$($_.name)/$($_.transport)/$($_.arm)/$($_.monitor)/$($_.samples)" }) -join ','
     & $add "transport job: the tested track by index, the probe and the feed by name, the feed mode, the settle time, each state as numbers ($codes)" $false (
-        $job.track -eq 0 -and $job.probe -ceq 'JS:p' -and $job.feed -ceq 'JS:f' -and $job.feedMode -eq 2 -and $job.settle -eq 4800 -and $job.sr -eq 48000 -and $job.recordDir -ceq 'R' -and
+        $job.track -eq 0 -and $job.probe -ceq 'JS:p' -and $job.feed -ceq 'JS:f' -and $job.feedMode -eq 2 -and $job.settle -eq 240000 -and $job.sr -eq 48000 -and $job.recordDir -ceq 'R' -and
         $codes -ceq 'stopped-unarmed/stop/0/0/4800,stopped-armed-on/stop/1/1/4800,playing-auto/play/1/2/4800,paused-unarmed/pause/0/0/4800')
     $leftOnly = @($conf.Scenarios | Where-Object { $_.id -like 'monitor-stopped-off-*' })[0]
     & $add 'transport job: the feed mode of left only is 0' $false ((Get-HarnessTransportJob -Scenario $leftOnly -Layout $conf.Layouts[$leftOnly.layout] -Tools $tools -RecordDir 'R').feedMode -eq 0)
@@ -2044,6 +2044,11 @@ function Get-WiringCases([string]$RepoRoot) {
         $transportStep.StartsWith('function steps.transport()', [StringComparison]::Ordinal) -and ($recModes -join ',') -ceq '2' -and
         $transportStep.IndexOf('"RECORD_PATH", job.recordDir, true') -gt 0 -and $transportStep.IndexOf('"RECORD_PATH", job.recordDir, true') -lt $transportStep.IndexOf('"I_RECARM"') -and
         $transportStep -cmatch '(?s)local function waitSamples\(n\).*?while [^\n]*\n\s*noRecord\(\)' -and $transportStep -cmatch 'GetPlayState\(\) & 4 ~= 0')
+    $pathStop = $transportStep.IndexOf('if not pathOk then error(')
+    & $add 'driver: a record path that does not read back is reported and stops the step before anything is armed or the transport is touched' $true (
+        $transportStep -cmatch 'local pathOk = setOk and path == job\.recordDir\r?\n\s*put\("record_path", pathOk and "ok" or "failed"\)' -and
+        $pathStop -gt $transportStep.IndexOf('put("record_path"') -and $pathStop -lt $transportStep.IndexOf('"I_RECARM"') -and $pathStop -lt $transportStep.IndexOf('OnPlayButton') -and
+        $pathStop -lt $transportStep.IndexOf('InsertTrackAtIndex'))
     # The tool JSFX and the driver agree on the shared memory and on the feed file the harness installs
     $probeText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'jsfx/harness-block-probe.jsfx'))
     $feedText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'jsfx/harness-feed.jsfx'))
