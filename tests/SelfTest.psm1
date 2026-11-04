@@ -1778,7 +1778,8 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     foreach ($badValue in $null, 'seven', 'NaN', 'inf', '-nan(ind)') {
         $f2 = $facts.Clone()
         if ($null -eq $badValue) { $f2.Remove('st2_equal') } else { $f2['st2_equal'] = $badValue }
-        & $add "transport: a state with a number $(($null -eq $badValue) ? 'missing' : "reading '$badValue'") is not observed" $true ($null -eq (Read-HarnessTransportRow $f2 2))
+        $rowRead = try { Read-HarnessTransportRow $f2 2 } catch { "threw: $($_.Exception.Message)" }
+        & $add "transport: a state with a number $(($null -eq $badValue) ? 'missing' : "reading '$badValue'") is not observed" $true ($null -eq $rowRead)
     }
     # The setup the driver reports
     $idents = @{ 'harness-block-probe' = 'reaper-harness/harness-block-probe.jsfx'; 'harness-feed' = 'reaper-harness/harness-feed.jsfx' }
@@ -2019,7 +2020,7 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add 'tool JSFX: the file the feed opens is the one the harness installs (Data\reaper-harness\feed.wav of the private directory)' $false (
         $feedText -cmatch 'file_open\("reaper-harness/feed\.wav"\)' -and $pluginsText -cmatch "Get-HarnessPrivateSubdir 'Data\\reaper-harness'\) 'feed\.wav'")
     & $add 'wiring: Invoke-HarnessSuite reads the feed files with the states, before the preflight and before installing anything' $false (
-        (& $at $suite 'Read-HarnessFeeds')[0] -gt (& $at $suite 'Read-HarnessStates')[0] -and (& $at $suite 'Read-HarnessFeeds')[0] -lt (& $at $suite 'Get-HarnessPreflight')[0] -and
+        'Read-HarnessFeeds' -in $suite.Name -and 'Install-HarnessToolJsfx' -in $suite.Name -and (& $at $suite 'Read-HarnessFeeds')[0] -gt (& $at $suite 'Read-HarnessStates')[0] -and (& $at $suite 'Read-HarnessFeeds')[0] -lt (& $at $suite 'Get-HarnessPreflight')[0] -and
         (& $at $suite 'Install-HarnessToolJsfx')[0] -gt (& $at $suite 'Assert-HarnessStateIdentity')[0])
     # Below 7.4 the real path resolution meets members that do not exist; both entry points say so up front
     foreach ($script in 'run.ps1', 'doctor.ps1') {
