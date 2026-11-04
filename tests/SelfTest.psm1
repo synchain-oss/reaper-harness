@@ -1856,7 +1856,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'transport job: a tested track that is not in the layout throws' $true $(try { $null = Get-HarnessTransportJob -Scenario $ghost -Layout $conf.Layouts[$ms.layout] -Tools $tools -RecordDir 'R'; $false } catch { $_.Exception.Message -clike "*'Ghost' is not in the layout*" })
     # What the configuration makes of transport scenarios
     & $add 'configuration: a transport scenario on a one-track layout tests that track; feed and settle time as given; Run FX when stopped on unless turned off; a state without expect has none' $false (
-        $ms.track -ceq 'Voice' -and $ms.feed.Channels -ceq 'different' -and $ms.feed.Wav -ceq '' -and $ms.settleSamples -eq 4800 -and $ms.host.RunFxWhenStopped -and @($ms.states).Count -eq 4 -and
+        $ms.track -ceq 'Voice' -and $ms.feed.Channels -ceq 'different' -and $ms.feed.Wav -ceq '' -and $ms.settleSamples -eq 240000 -and $ms.host.RunFxWhenStopped -and @($ms.states).Count -eq 4 -and
         $null -eq $ms.states[3].Expect -and $ms.states[1].Expect.Channels -ceq 'different' -and $ms.states[0].Expect.Called -eq $true -and $null -eq $ms.states[2].Expect.Called)
     $offRows = @($conf.Scenarios | Where-Object { $_.id -like 'monitor-stopped-off-*' })
     & $add "configuration: the block matrix of a transport scenario gives one scenario per block size, each with its settings ($(@($offRows | ForEach-Object { $_.id }) -join ', '))" $false (
