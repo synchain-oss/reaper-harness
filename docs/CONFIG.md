@@ -376,7 +376,10 @@ A state:
 it has no input"). `called: false` together with either is refused, and so is `input: "silent"` with `channels`.
 
 The feed: `wav` is a WAV file (a path relative to the configuration file, under the same rules as extension paths)
-at the scenario's sample rate, nothing is resampled, with 1 or 2 channels (2 for `different`); it plays in a loop.
+at the scenario's sample rate, nothing is resampled, with 1 or 2 channels (2 for `different`); it plays in a loop,
+without a gap however short it is. A channel it plays (the first for `left` and `same`, both for `different`) must
+not have a peak of 0: with a silent feed every `input: "silent"` would pass without evidence. Only a peak of 0 is
+caught: a file with just a few samples other than 0 gets through and proves little.
 Without `wav` it is the configured test signal, in stereo. `channels` (default `different`) says what reaches the
 input: the first channel on the left only, the first channel on both sides, or the two channels as they are. The
 file is checked before REAPER starts (a usage error otherwise), copied to `Data/reaper-harness/feed.wav` of the
@@ -409,12 +412,14 @@ stopped-armed-on: blocks=94/94 silent=0 signal=94 left=94 right=94 same=0 transp
 signal; `left`, `right`: blocks with signal on that side; `same`: blocks with signal whose left and right are equal;
 `transport` and `monitoring` as read back at the end of the window. A state that fails adds `; failed: ...`. A state
 whose numbers describe another state than the one asked for is INCOMPLETE (`; no evidence: ...`): the device ran
-less than the window, or the transport, the arm or the monitoring mode did not read back as asked. The row is
-INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is not first in the chain, the
-record path could not be set, the feed could not open its file or not every state was observed; it is FAIL, whatever
+less than the window, or the transport, the arm or the monitoring mode did not read back as asked. So is an armed
+state of a scenario with a feed in whose window the feed played no block: its chain would be silent for the wrong
+reason. The row is INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is not first in
+the chain, the record path could not be set, the feed could not open its file, the feed never ran although a state
+arms the track, or not every state was observed; it is FAIL, whatever
 the states say, when any file appeared in the record directory. Facts: `track`, `runFxWhenStopped`,
 `runFxAfterStopMs`, `settleSamples`, `feed` (`source`, `sha256`, `channels`) and per state its settings, `status`,
-`problems` and the numbers.
+`problems` and the numbers, among them `fed` and `fed_samples`: the blocks and frames the feed played in the window.
 
 ```json
 { "id": "monitor-states", "kind": "transport", "layout": "vocal", "feed": { "channels": "different" },
@@ -446,6 +451,7 @@ Also measured there:
 - with no armed track in the project and Run FX when stopped off, nothing is run while stopped, and "monitoring in
   effect" is not updated (it read 1 on a track that had been disarmed). Hence the clock track;
 - the Dummy device has no inputs (`num_audio_in` 0): the feed in the input FX chain is the only input there is;
+- the feed is run in every armed state, whatever the transport and the monitoring mode, and not on an unarmed track;
 - record mode "disabled" on the tested track made no difference to any of the above against record mode "input";
 - `-1000` as the position of `TrackFX_AddByName` puts the probe first in the chain; the record bit of the transport
   was never seen.

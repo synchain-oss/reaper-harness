@@ -146,7 +146,7 @@ function Test-HarnessTransportState {
     if ($r.playstate -ne $script:PlayCode[$State.Transport]) { $gap.Add("the transport reads $(Format-TransportPlay $r.playstate), expected $($State.Transport)") }
     if ($r.arm -ne [int]$State.Arm) { $gap.Add("arm reads $($r.arm), expected $([int]$State.Arm)") }
     if ($r.monitor -ne $script:MonitorCode[$State.Monitor]) { $gap.Add("monitoring mode reads $($r.monitor), expected $($script:MonitorCode[$State.Monitor])") }
-    if ($HasFeed -and $State.Arm -and $r.fed -eq 0) { $gap.Add('the feed played no block in the window although the track is armed') }
+    if ($HasFeed -and $State.Arm -and $r.fed_samples -eq 0) { $gap.Add('the feed played no block in the window although the track is armed') }
     if ($gap.Count) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Line = "$line; no evidence: $($gap -join '; ')"; Problems = $gap.ToArray() } }
     $x = $State.Expect
     if ($null -eq $x) { return [pscustomobject]@{ Status = 'recorded'; Line = $line; Problems = @() } }

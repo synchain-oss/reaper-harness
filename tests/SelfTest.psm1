@@ -1772,6 +1772,8 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     & $add "transport: armed with a feed that played nothing is INCOMPLETE, even where 'silent' holds ($($idleSilent.Line))" $true ($idleSilent.Status -ceq 'INCOMPLETE' -and $idleSilent.Line.EndsWith($noFeedBlocks, [StringComparison]::Ordinal))
     $idleRecorded = Test-HarnessTransportState -State (& $state $null) -Row (& $row $feedIdle) -HasFeed
     & $add 'transport: armed with a feed that played nothing is INCOMPLETE in a state without expectations too' $true ($idleRecorded.Status -ceq 'INCOMPLETE' -and $idleRecorded.Line.EndsWith($noFeedBlocks, [StringComparison]::Ordinal))
+    $emptyCalls = Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row @{ fed = 3; fed_samples = 0; silent = 10; signal = 0; left = 0; right = 0 }) -HasFeed
+    & $add 'transport: armed with a feed that was called without samples is INCOMPLETE' $true ($emptyCalls.Status -ceq 'INCOMPLETE' -and $emptyCalls.Line.EndsWith($noFeedBlocks, [StringComparison]::Ordinal))
     & $add 'transport: armed with a feed that played is judged as usual' $false ((Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row @{ silent = 10; signal = 0; left = 0; right = 0 }) -HasFeed).Status -ceq 'PASS')
     & $add 'transport: not armed, the feed is not expected to play' $false ((Test-HarnessTransportState -State (& $state @{ called = $true } 'stop' $false 'off') -Row (& $row @{ fed = 0; fed_samples = 0; arm = 0; monitor = 0 }) -HasFeed).Status -ceq 'PASS')
     & $add 'transport: armed in a scenario without a feed, nothing is expected to play' $false ((Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row $feedIdle)).Status -ceq 'PASS')
@@ -1887,7 +1889,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     $null = New-Item -ItemType Directory -Path (Join-Path $feedDir 'feeds')
     $wav = { param([string]$WavName, [int]$WavRate, [int]$Channels, [int]$Frames) [HarnessWav]::Write((Join-Path $feedDir "feeds/$WavName"), $WavRate, $Channels, 'float32', $false, [double[]](, 0.25 * ($Frames * $Channels))) }
     $frameFile = { param([string]$WavName, [double[]]$Frame) [HarnessWav]::Write((Join-Path $feedDir "feeds/$WavName"), 48000, $Frame.Count, 'float32', $false, [double[]](1..480 | ForEach-Object { $Frame })) }
-    & $frameFile 'zero.wav' @(0.0, 0.0); & $frameFile 'mono-zero.wav' @(, 0.0); & $frameFile 'left-zero.wav' @(0.0, 0.25); & $frameFile 'right-zero.wav' @(0.25, 0.0); & $frameFile 'left-nan.wav' @([double]::NaN, 0.25)
+    & $frameFile 'zero.wav' @(0.0, 0.0); & $frameFile 'mono-zero.wav' @(, 0.0); & $frameFile 'left-zero.wav' @(0.0, 0.25); & $frameFile 'right-zero.wav' @(0.25, 0.0); & $frameFile 'left-nan.wav' @([double]::NaN, 0.25); & $frameFile 'left-inf.wav' @([double]::PositiveInfinity, 0.25)
     & $wav 'stereo.wav' 48000 2 480; & $wav 'mono.wav' 48000 1 480; & $wav 'slow.wav' 44100 2 480; & $wav 'three.wav' 48000 3 480; & $wav 'empty.wav' 48000 2 0
     [IO.File]::WriteAllText((Join-Path $feedDir 'feeds/text.wav'), 'not a wav file')
     [IO.File]::WriteAllText((Join-Path $Tmp 'outside.wav'), 'x')
@@ -1908,6 +1910,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a silent first channel for different channels'; R = 'feeds/left-zero.wav'; C = 'different'; W = '*has a peak of 0 on channel 1*' }
         @{ L = 'a silent second channel for different channels'; R = 'feeds/right-zero.wav'; C = 'different'; W = '*has a peak of 0 on channel 2*' }
         @{ L = 'a first channel of nothing but NaN (no finite peak)'; R = 'feeds/left-nan.wav'; C = 'same'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a first channel of nothing but infinities (no finite peak)'; R = 'feeds/left-inf.wav'; C = 'same'; W = '*has a peak of 0 on channel 1*' }
         @{ L = 'a file that is not a WAV'; R = 'feeds/text.wav'; C = 'different'; W = '*feeds/text.wav cannot be read*' }
         @{ L = 'a file that is not there'; R = 'feeds/none.wav'; C = 'different'; W = '*feed file not found: feeds/none.wav*' }
         @{ L = 'a path that leaves the directory of the configuration'; R = '../outside.wav'; C = 'different'; W = '*leaves the directory of the configuration file*' }
@@ -2047,6 +2050,9 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add 'tool JSFX: the probe, the feed and the driver share gmem ReaperHarness, 16 values a slot (clock 0, tested track 1, feed 2)' $false (
         $probeText -cmatch '(?m)^options:gmem=ReaperHarness\r?$' -and $feedText -cmatch '(?m)^options:gmem=ReaperHarness\r?$' -and $probeText -cmatch 'base = floor\(slider1 \+ 0\.5\) \* 16;' -and $feedText -cmatch 'base = floor\(slider1 \+ 0\.5\) \* 16;' -and
         $transportStep -cmatch 'gmem_attach\("ReaperHarness"\)' -and $transportStep -cmatch 'local CLOCK, TESTED, FEED = 0, 16, 32')
+    $transportCalls = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessTransportScenario'
+    & $add 'wiring: the transport scenario gives the Lua step the time Get-HarnessTransportTimeout works out' $true (
+        'Get-HarnessTransportTimeout' -in $transportCalls.Name -and ([IO.File]::ReadAllText((Join-Path $RepoRoot 'src/Scenarios.psm1'))) -cmatch 'Step transport -Job \$Job -TimeoutSec \(Get-HarnessTransportTimeout ')
     & $add 'driver: every state reports the blocks and frames the feed played in its window' $true (
         $transportStep -cmatch 'f0 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and $transportStep -cmatch 'f1 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and
         $transportStep -cmatch 'put\(p \.\. "fed", int\(f1\[0\] - f0\[0\]\)\)' -and $transportStep -cmatch 'put\(p \.\. "fed_samples", int\(f1\[1\] - f0\[1\]\)\)')
