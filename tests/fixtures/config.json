@@ -2,7 +2,7 @@
   "$schema": "../../schema/config.schema.json",
   "schema": 1,
   "name": "fixture",
-  "notes": "Self-test configuration: two stand-in plugins with two named states, the PDC JSFX, a chain, a folder bus, sends and stems. The self-test runs it against a stand-in for REAPER.",
+  "notes": "Self-test configuration: two stand-in plugins with two named states, the PDC JSFX, a chain, a folder bus, sends and stems, transport states. The self-test runs it against a stand-in for REAPER.",
   "plugins": {
     "gain": {
       "bundle": "Fixture Gain.vst3",
@@ -85,13 +85,34 @@
     { "id": "pdc-device", "kind": "device", "layout": "pdc", "block": 2048, "host": { "anticipativeFx": false } },
     { "id": "pdc-unreported", "kind": "render", "layout": "pdc-off", "lag": 16, "maxDiffDb": -120 },
     { "id": "instances", "kind": "instances", "plugins": ["gain", "bus"] },
-    { "id": "ext-count", "kind": "fixture-count", "count": 3 }
+    { "id": "ext-count", "kind": "fixture-count", "count": 3 },
+    {
+      "id": "monitor-states", "kind": "transport", "layout": "chain", "feed": { "channels": "different" }, "settleSamples": 240000,
+      "states": [
+        { "name": "stopped-unarmed", "transport": "stop", "arm": false, "monitor": "off", "samples": 4800, "expect": { "called": true, "input": "silent", "monitoring": false } },
+        { "name": "stopped-armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "called": true, "input": "signal", "channels": "different", "monitoring": true } },
+        { "name": "playing-auto", "transport": "play", "arm": true, "monitor": "auto", "samples": 4800, "expect": { "input": "silent", "monitoring": false } },
+        { "name": "paused-unarmed", "transport": "pause", "arm": false, "monitor": "off", "samples": 4800 }
+      ]
+    },
+    {
+      "id": "monitor-stopped-off", "kind": "transport", "layout": "chain", "host": { "runFxWhenStopped": false }, "feed": { "channels": "left" }, "matrix": { "block": [64, 1024] },
+      "states": [
+        { "name": "unarmed", "transport": "stop", "arm": false, "monitor": "off", "samples": 4800, "expect": { "called": false } },
+        { "name": "armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "called": true, "channels": "left" } }
+      ]
+    }
   ],
   "negative": [
     { "id": "neg-bus-is-not-chain", "kind": "render", "layout": "bus", "compare": { "layout": "chain" }, "expect": "FAIL", "expectDetail": "^identical=no lag=0 " },
     { "id": "neg-pdc-unreported", "kind": "render", "layout": "pdc-off", "expect": "FAIL", "expectDetail": "^identical=no lag=16 " },
     { "id": "neg-states-swapped", "kind": "render", "layout": "states", "maxDiffDb": 0, "stems": [ { "track": "Quiet", "rmsChangeDb": { "L": [5.9, 6.1] } } ], "expect": "FAIL", "expectDetail": "\\| stem Quiet: .*; failed: rms change L -6\\.02 dB outside" },
-    { "id": "neg-ext-count", "kind": "fixture-count", "count": 0, "expect": "FAIL", "expectDetail": "^counted 0, expected at least 1$" }
+    { "id": "neg-ext-count", "kind": "fixture-count", "count": 0, "expect": "FAIL", "expectDetail": "^counted 0, expected at least 1$" },
+    {
+      "id": "neg-feed-is-not-same", "kind": "transport", "layout": "chain", "feed": { "channels": "different" },
+      "states": [ { "name": "armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "channels": "same" } } ],
+      "expect": "FAIL", "expectDetail": "^armed-on: [^|]*; failed: left and right differ in [1-9][0-9]* of [1-9][0-9]* blocks with signal$"
+    }
   ],
   "extensions": { "modules": ["ext/FixtureExtension.psm1"], "lua": ["ext/fixture-steps.lua"] }
 }

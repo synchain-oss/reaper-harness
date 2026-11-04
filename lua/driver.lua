@@ -12,6 +12,8 @@
 --   savereopen  open a project, read its FX, then cycles times: save it as a new file, open that and read the FX again
 --   instances   add and remove plugin instances many times; touch a mark file after the warm-up and at the end so
 --               the runner can sample handle and memory counts there
+--   transport   open a project, read it back like device, then take the tested track through a list of transport, arm
+--               and monitoring states and count, per state, the blocks its FX chain is run with and what they carry
 --   hang        never finishes (watchdog negative cases)
 -- Extension steps: job.extensions lists Lua files; each returns a table of step name -> function(h), where h gives
 -- the job and the helpers below. A step name that is already taken is an error (the runner checks the names in the
@@ -63,6 +65,11 @@ end
 local function named(track, fx, key)
     local ok, v = reaper.TrackFX_GetNamedConfigParm(track, fx, key)
     return ok and v or ""
+end
+
+local function config(name)
+    local ok, v = reaper.get_config_var_string(name)
+    return ok and v or "unavailable"
 end
 
 local function findParam(track, fx, name)
@@ -173,8 +180,8 @@ function steps.device()
     put("dev_srate", device("SRATE"))
     put("dev_mode", device("MODE"))
     put("project_srate", reaper.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false))
-    local ok, wr = reaper.get_config_var_string("workrender")
-    put("cfg_workrender", ok and wr or "unavailable")
+    put("cfg_workrender", config("workrender"))
+    put("cfg_runallonstop", config("runallonstop"))
     putTracks("", job.reads)
     if job.saveAs then
         reaper.Main_SaveProjectEx(0, job.saveAs, 0)
@@ -230,6 +237,145 @@ function steps.instances()
     put("tracks_left", reaper.CountTracks(0))
     touch(job.loopMark)
     wait(0.8)
+end
+
+-- job.track: index of the tested track; job.probe, job.feed: the names to add the block probe and the feed JSFX by
+-- (no feed without job.feed); job.feedMode: the feed's Channels parameter; job.settle: device samples to let pass after
+-- each change of state (default: REAPER's "run FX after stopping" time plus half a second); job.sr; job.recordDir;
+-- job.states: list of { name, transport = "stop" | "play" | "pause", arm = 0 | 1, monitor = 0 | 1 | 2, samples }.
+-- After the readback a clock track goes at the end (armed, recording disabled, no input, monitoring off, no master
+-- send) with a block probe in gmem slot 0; a block probe goes first in the chain of the tested track (slot 1) and the
+-- feed into its input chain (slot 2). Settling and windows are counted in clock samples, not in wall-clock time.
+-- They write their counts one at a time on the audio thread, with value 10 of the slot, a generation, odd meanwhile: a
+-- reading counts only if that was even and the same before and after it, so no half-written block is taken as evidence.
+-- This step never records: no record action is called anywhere in this file, every wait checks the transport for the
+-- record bit, both tracks have recording disabled and the record path is the work directory.
+-- Reported per state n: st<n>_settled, st<n>_clock and _clock_samples (device blocks and samples of the window),
+-- _blocks, _samples, _silent, _signal, _left, _right, _equal (the tested chain), _fed and _fed_samples (blocks and
+-- frames the feed played), _playstate, _arm, _monitor and _monitoring (read back at the end of the window). A state
+-- without a clean reading has no _clock up to _fed_samples, which makes it a state that was not observed.
+function steps.transport()
+    openAndWait(job.project)
+    put("dev_bsize", device("BSIZE"))
+    put("dev_srate", device("SRATE"))
+    put("dev_mode", device("MODE"))
+    put("cfg_workrender", config("workrender"))
+    put("cfg_runallonstop", config("runallonstop"))
+    local after = config("runafterstop")
+    put("cfg_runafterstop", after)
+    putTracks("", job.reads)
+    local setOk = reaper.GetSetProjectInfo_String(0, "RECORD_PATH", job.recordDir, true)
+    local _, path = reaper.GetSetProjectInfo_String(0, "RECORD_PATH", "", false)
+    local pathOk = setOk and path == job.recordDir
+    put("record_path", pathOk and "ok" or "failed")
+    -- Fail closed: without the record path in the work directory nothing is armed and the transport is never touched
+    if not pathOk then error("the record path of the project could not be set to the work directory; nothing was armed") end
+    local tested = reaper.GetTrack(0, job.track)
+    if not tested then error("the project has no track " .. tostring(job.track)) end
+    reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
+    local clock = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
+    reaper.GetSetMediaTrackInfo_String(clock, "P_NAME", "harness-clock", true)
+    for _, kv in ipairs({ { "I_RECINPUT", -1 }, { "I_RECMODE", 2 }, { "I_RECMON", 0 }, { "B_MAINSEND", 0 }, { "I_RECARM", 1 } }) do
+        reaper.SetMediaTrackInfo_Value(clock, kv[1], kv[2])
+    end
+    reaper.SetMediaTrackInfo_Value(tested, "I_RECINPUT", -1)
+    reaper.SetMediaTrackInfo_Value(tested, "I_RECMODE", 2)
+    local cfx = reaper.TrackFX_AddByName(clock, job.probe, false, -1000)
+    local pfx = reaper.TrackFX_AddByName(tested, job.probe, false, -1000)
+    put("clock_ident", cfx >= 0 and named(clock, cfx, "fx_ident") or "")
+    put("probe_idx", pfx)
+    put("probe_ident", pfx >= 0 and named(tested, pfx, "fx_ident") or "")
+    put("probe_fx_count", reaper.TrackFX_GetCount(tested))
+    local ffx = 0
+    if job.feed then
+        ffx = reaper.TrackFX_AddByName(tested, job.feed, true, -1)
+        if ffx >= 0 and ffx < 0x1000000 then ffx = ffx + 0x1000000 end -- the input chain is addressed from 0x1000000
+        put("feed_ident", ffx >= 0 and named(tested, ffx, "fx_ident") or "")
+    end
+    if cfx < 0 or pfx < 0 or ffx < 0 then error("the block probes or the feed could not be added") end
+    reaper.TrackFX_SetParam(clock, cfx, 0, 0)
+    reaper.TrackFX_SetParam(tested, pfx, 0, 1)
+    if job.feed then
+        reaper.TrackFX_SetParam(tested, ffx, 0, 2)
+        reaper.TrackFX_SetParam(tested, ffx, 1, job.feedMode)
+    end
+    reaper.gmem_attach("ReaperHarness")
+    local CLOCK, TESTED, FEED = 0, 16, 32
+    for i = 0, 47 do reaper.gmem_write(i, 0) end
+    reaper.gmem_write(FEED + 11, -2) -- the feed writes its file_open result here when it first runs
+    local function int(x) return math.floor(x + 0.5) end
+    local function noRecord()
+        if reaper.GetPlayState() & 4 ~= 0 then
+            reaper.OnStopButton()
+            error("the transport showed the record state; stopped")
+        end
+    end
+    local function waitSamples(n)
+        local start = reaper.gmem_read(CLOCK + 1)
+        local deadline = reaper.time_precise() + 3 * n / job.sr + 10
+        while reaper.gmem_read(CLOCK + 1) - start < n do
+            noRecord()
+            if reaper.time_precise() > deadline then
+                error("the device clock stopped: " .. int(reaper.gmem_read(CLOCK + 1) - start) .. " of " .. n .. " samples")
+            end
+            coroutine.yield()
+        end
+        noRecord()
+        return reaper.gmem_read(CLOCK + 1) - start
+    end
+    local SNAP_TRIES = 1000 -- bounded: this spins on the main thread
+    local function snap(base)
+        for _ = 1, SNAP_TRIES do
+            local g = reaper.gmem_read(base + 10)
+            if g % 2 == 0 then
+                local v = {}
+                for i = 0, 15 do v[i] = reaper.gmem_read(base + i) end
+                if reaper.gmem_read(base + 10) == g then return v end
+            end
+        end
+    end
+    local function transport(want)
+        local ps = reaper.GetPlayState()
+        if want == "stop" then
+            if ps ~= 0 then reaper.OnStopButton() end
+        elseif want == "play" then
+            if ps & 1 == 0 or ps & 2 ~= 0 then reaper.OnPlayButton() end
+        elseif want == "pause" then
+            if ps & 2 == 0 then reaper.OnPauseButton() end
+        end
+    end
+    local settle = job.settle or int(((tonumber(after) or 4000) + 500) * job.sr / 1000)
+    put("settle", settle)
+    local done = 0
+    for n, st in ipairs(job.states) do
+        reaper.SetMediaTrackInfo_Value(tested, "I_RECARM", st.arm)
+        reaper.SetMediaTrackInfo_Value(tested, "I_RECMON", st.monitor)
+        transport(st.transport)
+        local p = "st" .. n .. "_"
+        put(p .. "settled", int(waitSamples(settle)))
+        local c0, t0, f0 = snap(CLOCK), snap(TESTED), snap(FEED)
+        waitSamples(st.samples)
+        local c1, t1, f1 = snap(CLOCK), snap(TESTED), snap(FEED)
+        if c0 and t0 and f0 and c1 and t1 and f1 then
+            put(p .. "clock", int(c1[0] - c0[0]))
+            put(p .. "clock_samples", int(c1[1] - c0[1]))
+            for i, key in ipairs({ "blocks", "samples", "silent", "signal", "left", "right", "equal" }) do put(p .. key, int(t1[i - 1] - t0[i - 1])) end
+            put(p .. "fed", int(f1[0] - f0[0]))
+            put(p .. "fed_samples", int(f1[1] - f0[1]))
+        end
+        put(p .. "playstate", reaper.GetPlayState())
+        put(p .. "arm", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECARM")))
+        put(p .. "monitor", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECMON")))
+        put(p .. "monitoring", int(reaper.GetMediaTrackInfo_Value(tested, "B_RECMON_IN_EFFECT")))
+        done = n
+    end
+    reaper.OnStopButton()
+    reaper.SetMediaTrackInfo_Value(tested, "I_RECARM", 0)
+    reaper.SetMediaTrackInfo_Value(clock, "I_RECARM", 0)
+    put("states_done", done)
+    put("feed_handle", int(reaper.gmem_read(FEED + 11)))
+    put("feed_channels", int(reaper.gmem_read(FEED + 12)))
+    put("feed_rate", int(reaper.gmem_read(FEED + 13)))
 end
 
 function steps.hang()

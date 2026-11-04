@@ -31,6 +31,7 @@ Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Learn.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Extensions.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'States.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Transport.psm1') -ErrorAction Stop
 
 $script:LabelPattern = '^[0-9A-Za-z._-]{1,40}$'
 
@@ -210,13 +211,14 @@ function Invoke-HarnessNegativeRow {
 }
 
 # Pure function: the positive and negative cases -Only (a regex on the id) and -NoNegative pick. Built-in negative
-# cases come after the configuration's own. An invalid regex, or nothing picked, is a usage error: a round with
+# cases come after the configuration's own (the one of the transport kind only when the configuration has a transport
+# scenario). An invalid regex, or nothing picked, is a usage error: a round with
 # zero cases has no conclusion and must not end as PASS.
 function Select-HarnessScenarios {
     param([Parameter(Mandatory)]$Config, [string]$Only = '', [switch]$NoNegative)
     if ($Only) { try { $null = [regex]::new($Only) } catch { Stop-Usage "-Only is not a valid regex: $($_.Exception.Message)" } }
     $positive = @($Config.Scenarios | Where-Object { -not $Only -or $_.id -match $Only })
-    $all = @($Config.Negative) + @(Get-HarnessBuiltinNegatives)
+    $all = @($Config.Negative) + @(Get-HarnessBuiltinNegatives -Transport:(@($Config.Scenarios | Where-Object { $_.kind -ceq 'transport' }).Count -gt 0))
     $negative = $NoNegative ? @() : @($all | Where-Object { -not $Only -or $_.id -match $Only })
     if ($positive.Count + $negative.Count -eq 0) {
         Stop-Usage ("-Only '{0}' picked no scenario{1}" -f $Only, ($NoNegative ? ' (negative cases are not run with -NoNegative)' : ''))
@@ -228,7 +230,7 @@ function Select-HarnessScenarios {
 # extension kinds). Built-in negative cases never do.
 function Test-HarnessNeedsLearn($Scenario) {
     if ($Scenario.builtin) { return $false }
-    if ($Scenario.kind -eq 'instances' -or $Scenario.kind -cnotin 'render', 'device', 'savereopen') { return $true }
+    if ($Scenario.kind -eq 'instances' -or $Scenario.kind -cnotin 'render', 'device', 'savereopen', 'transport') { return $true }
     $p = $Scenario.PSObject.Properties
     if ($p['layout'] -and $Scenario.layout -and $Scenario.layout -notlike '@*') { return $true }
     [bool]($p['compare'] -and $Scenario.compare -and $Scenario.compare.Kind -eq 'variant' -and $Scenario.compare.Layout -notlike '@*')
@@ -251,6 +253,7 @@ function Invoke-HarnessSuite {
     $ext = Import-HarnessExtensions (Read-HarnessConfigExtensions $Config)
     $conf = Read-HarnessConfig -Path $Config -Kinds $ext.Kinds
     $states = Read-HarnessStates -Config $conf # a template or state file that does not hold the block: usage error
+    Read-HarnessFeeds -Config $conf # a feed file that is not there, not a WAV or at another rate: usage error
     $picked = Select-HarnessScenarios -Config $conf -Only $Only -NoNegative:$NoNegative # nothing picked: usage error, nothing started
     $pre = Get-HarnessPreflight -ReaperExe $ReaperExe -PluginDir $PluginDir -Config $conf -SkipMarkers $SkipMarker -ExtensionPreflight $ext.Preflight
     $Shas = [ordered]@{}
@@ -281,6 +284,7 @@ function Invoke-HarnessSuite {
         $stamp = [DateTime]::Now.ToString('yyyyMMdd-HHmmss')
         $driver = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../lua/driver.lua'))
         $all = @($picked.Positive) + @($picked.Negative)
+        $toolJsfx = @($all | Where-Object { $_.kind -ceq 'transport' }).Count ? (Install-HarnessToolJsfx) : @{}
         $needLearn = @($all | Where-Object { Test-HarnessNeedsLearn $_ }).Count -gt 0
         $variants = Get-HarnessLearnVariants -Config $conf -Scenarios @($all | Where-Object { Test-HarnessNeedsLearn $_ })
         $firstId = @($conf.Scenarios)[0].id
@@ -290,7 +294,7 @@ function Invoke-HarnessSuite {
             $null = New-Item -ItemType Directory -Force -Path $work
             $before = Get-HarnessDefaultCfgSnapshot
             $ctx = New-HarnessContext -ReaperExe $ReaperExe -WorkDir $work -Driver $driver -Config $conf -Installed $installed -Jsfx $jsfx -States $states -Locks $locks -SkipMarkers $SkipMarker `
-                -LuaExtensions $ext.Lua -Kinds $ext.Kinds
+                -LuaExtensions $ext.Lua -Kinds $ext.Kinds -ToolJsfx $toolJsfx
             if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
             if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
             if ($SelfTestHooks['Stopper']) { $ctx.Stopper = $SelfTestHooks['Stopper'] }
@@ -360,6 +364,7 @@ function Invoke-HarnessSuite {
                 defaultCfgDir = [ordered]@{ unchanged = $cmp.Same; entries = $cmp.Count; changed = @($changesSeen | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }); unreadable = @($cmp.Unreadable | Select-Object -First 8 | ForEach-Object { Hide-HarnessPaths $_ }) }
                 reaperProcessesLeft = $ownLeft.Count
                 stillRunning = $notEnded
+                retries = @($ctx.Retries | ForEach-Object { [ordered]@{ label = $_.Label; reason = $_.Reason } })
                 moduleCheck = [ordered]@{ status = $mods.Status; detail = (Hide-HarnessPaths $mods.Detail); launches = $mods.Facts.launches; foreign = @($mods.Facts.foreign); otherPlugins = $mods.Facts.otherPlugins }
                 scenarios = $rows.ToArray()
             }

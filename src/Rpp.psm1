@@ -17,7 +17,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:Inv = [Globalization.CultureInfo]::InvariantCulture
-$script:RenderSpeed = @{ offline = 0; '1x' = 1; online = 2 } # RENDER_1X: 1 = real-time speed but plugins are told offline; 2 = online render
+$script:RenderSpeed = @{ offline = 0; '1x' = 1; online = 2 } # RENDER_1X: 1 = 1x offline render (real-time speed, still offline); 2 = online render
 $script:SendMode = @{ post = 0; prefx = 1; pre = 3 } # AUXRECV modes: post-fader, pre-FX, post-FX (pre-fader)
 
 function Write-HarnessText {
@@ -66,7 +66,8 @@ function Get-HarnessFolderFlags([object[]]$Tracks) {
 # of the source tracks (a built-in negative case uses 0.5). Sources: track name -> signal file for tracks with a
 # signal of their own (the others get SourceWav). Stems: track names rendered as stems: the render then writes
 # <RenderName>-stem-<track>.wav per stem and <RenderName>-stem-Master.wav (REAPER's "master mix + stems of selected
-# tracks"; Get-HarnessRunFiles in Scenarios.psm1 expects these names).
+# tracks"; Get-HarnessRunFiles in Scenarios.psm1 expects these names). NoItems: no track plays anything (the transport
+# kind: what a track gets comes through its input).
 function New-HarnessProjectText {
     param(
         [Parameter(Mandatory)]$Layout,
@@ -82,7 +83,8 @@ function New-HarnessProjectText {
         [double]$Seconds = 4.0,
         [double]$VolumeScale = 1.0,
         [string[]]$Stems = @(),
-        [switch]$NoFx
+        [switch]$NoFx,
+        [switch]$NoItems
     )
     $flags = Get-HarnessFolderFlags $Layout.Tracks
     $sb = [Text.StringBuilder]::new()
@@ -129,7 +131,7 @@ function New-HarnessProjectText {
             }
             & $add '    >'
         }
-        if ($t.Source) {
+        if ($t.Source -and -not $NoItems) {
             & $add '    <ITEM'
             & $add '      POSITION 0'
             & $add "      LENGTH $(Format-Number $Seconds)"

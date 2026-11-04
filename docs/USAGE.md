@@ -56,8 +56,10 @@ pwsh run.ps1 -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\
 
 Each round: the plugin bundles are copied into the private `plugins` directory, the plugin path and the scan
 shield are written, one learn launch proves the private copies are what REAPER loads, then every scenario runs,
-then the negative cases. The work files of a round go to `<ResultDir>/work/<time>-run<n>/`; the result file is
-`<ResultDir>/<time>-<config name>-<build label>.json` ([RESULTS.md](RESULTS.md)).
+then the negative cases (with a `transport` scenario, its block probe and feed JSFX are copied into the private
+`Effects/reaper-harness/` too). A launch that REAPER's evaluation licence reminder ended is done once more, through
+every guard again ([SAFETY.md](SAFETY.md#dialogs)). The work files of a round go to `<ResultDir>/work/<time>-run<n>/`;
+the result file is `<ResultDir>/<time>-<config name>-<build label>.json` ([RESULTS.md](RESULTS.md)).
 
 While a run is going on, do not use REAPER on the same machine: the run refuses to start next to a running
 `reaper.exe`, but cannot stop you from starting one in the middle. Create one of your skip markers first if you

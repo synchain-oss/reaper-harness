@@ -8,6 +8,7 @@
 # The mix follows what REAPER was measured to do (docs/CONFIG.md): folders sum their children, sends tap before the
 # FX (prefx), after the FX (pre) or after the fader (post), pan is a balance (the far side is turned down), a muted
 # track and all its sends are silent, a stem is the track's output whether or not it goes to the master.
+# The transport step follows what REAPER was measured to do too (see Invoke-FakeTransport).
 # Plugins: a parameter named "Trim" is a gain of 2 x its value (0.5 = unchanged); every other parameter does
 # nothing. The PDC JSFX reports "Delay (samples)" as PDC and, being compensated, leaves the timing alone; with
 # "Report delay as PDC" off it delays the audio instead.
@@ -349,6 +350,65 @@ function Invoke-FakeLearn($job, $report) {
     $report.Add('saved=true')
 }
 
+# The transport step, as REAPER 7.82 was measured to behave (docs/CONFIG.md): the chain of the tested track is run when
+# the track is armed, or when "Run FX when stopped" (bit 0 of runallonstop in the private ini) is on and the transport
+# is not paused; input monitoring is in effect when the track is armed and monitoring is on, or auto while not playing;
+# only then does the chain get the feed (Data\reaper-harness\feed.wav of the configuration directory, when the job has
+# a feed and the file is there), which plays in every armed state. A window of n samples is n / block blocks, rounded
+# up, on the clock as well. Spec.FeedIdle = a state name: the feed plays nothing in that state; '*': it never runs.
+# Spec.Unread = a state name: no clean reading of that state's counts, so it reports none of them, like the driver.
+function Invoke-FakeTransport($job, $report) {
+    $sr = [int](Get-FakeIniValue 'dummy_srate')
+    $block = [int](Get-FakeIniValue 'dummy_blocksize')
+    $ras = [int](Get-FakeIniValue 'runallonstop' '1')
+    # Spec.RecordFor = a scenario id: a file appears in the record directory of that scenario, as if it had recorded
+    if ($script:Spec['RecordFor'] -and (Split-Path -Leaf ([string]$job['recordDir'])) -ceq "$($script:Spec['RecordFor'])-record") {
+        $null = New-Item -ItemType Directory -Force -Path $job['recordDir']
+        [IO.File]::WriteAllText((Join-Path $job['recordDir'] 'take.wav'), 'recorded')
+    }
+    foreach ($kv in @("dev_bsize=$block", "dev_srate=$sr", 'dev_mode=dummy', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$ras", 'cfg_runafterstop=4000')) { $report.Add($kv) }
+    Add-FakeTracks $report '' $job['project'] $job['reads']
+    # Spec.RecordPathFails: the record path does not read back, and like the driver the step stops before it arms anything
+    if ($script:Spec['RecordPathFails']) { $report.Add('record_path=failed'); $report.Add('error=the record path of the project could not be set to the work directory; nothing was armed'); return }
+    $report.Add('record_path=ok')
+    $tracks = Read-FakeProject ([IO.File]::ReadAllText($job['project']))
+    $probe = Find-FakePlugin $job['probe']
+    $ident = $probe ? $probe.Ident : ''
+    foreach ($kv in @("clock_ident=$ident", "probe_idx=$($script:Spec['ProbeIdx'] ?? 0)", "probe_ident=$ident", "probe_fx_count=$($tracks[[int]$job['track']].Fx.Count + 1)")) { $report.Add($kv) }
+    $nch = 0; $rate = 0
+    if ($job.Contains('feed')) {
+        $feed = Find-FakePlugin $job['feed']
+        $report.Add("feed_ident=$($feed ? $feed.Ident : '')")
+        $file = Join-Path $script:Spec.CfgDir 'Data\reaper-harness\feed.wav'
+        if (Test-Path -LiteralPath $file) { $w = Read-HarnessWav $file; $nch = $w.Channels; $rate = $w.Rate }
+    }
+    $mode = $job.Contains('feedMode') ? [int]$job['feedMode'] : 2
+    $report.Add("settle=$($job.Contains('settle') ? [int]$job['settle'] : [int](4.5 * $sr))")
+    $n = 0
+    $armed = $false
+    foreach ($st in @($job['states'])) {
+        $n++
+        $arm = [int]$st['arm']; $mon = [int]$st['monitor']; $t = [string]$st['transport']
+        $armed = $armed -or $arm -eq 1
+        $blocks = [int][Math]::Ceiling([double]$st['samples'] / $block)
+        $b = ($arm -eq 1 -or (($ras -band 1) -and $t -cne 'pause')) ? $blocks : 0
+        $monitoring = $arm -eq 1 -and ($mon -eq 1 -or ($mon -eq 2 -and $t -cne 'play'))
+        $idle = $script:Spec['FeedIdle'] -ceq '*' -or $script:Spec['FeedIdle'] -ceq [string]$st['name']
+        $fedBlocks = ($arm -eq 1 -and $nch -gt 0 -and -not $idle) ? $blocks : 0
+        $sig = ($monitoring -and $fedBlocks -gt 0) ? $b : 0
+        $same = ($mode -eq 1 -or ($mode -eq 2 -and $nch -eq 1)) ? $sig : 0
+        $values = [ordered]@{
+            settled = $blocks * $block; clock = $blocks; clock_samples = $blocks * $block; blocks = $b; samples = $b * $block; silent = $b - $sig; signal = $sig
+            left = $sig; right = ($mode -eq 0) ? 0 : $sig; equal = $same; fed = $fedBlocks; fed_samples = $fedBlocks * $block; playstate = @{ stop = 0; play = 1; pause = 2 }[$t]; arm = $arm; monitor = $mon; monitoring = [int]$monitoring
+        }
+        if ($script:Spec['Unread'] -ceq [string]$st['name']) { foreach ($k in 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'fed', 'fed_samples') { $values.Remove($k) } }
+        foreach ($e in $values.GetEnumerator()) { $report.Add("st${n}_$($e.Key)=$($e.Value)") }
+    }
+    $report.Add("states_done=$n")
+    $handle = (-not $armed -or $script:Spec['FeedIdle'] -ceq '*') ? -2 : (($nch -gt 0) ? 1 : -1)
+    foreach ($kv in @("feed_handle=$handle", "feed_channels=$nch", "feed_rate=$rate")) { $report.Add($kv) }
+}
+
 # Runs one step; returns how the stand-in process should behave: quick, linger (alive long enough to be sampled) or
 # hang.
 function Invoke-FakeStep([string]$JobFile) {
@@ -361,9 +421,13 @@ function Invoke-FakeStep([string]$JobFile) {
             Invoke-FakeLearn $job $report
         }
         'device' {
-            foreach ($kv in @("dev_bsize=$(Get-FakeIniValue 'dummy_blocksize')", "dev_srate=$(Get-FakeIniValue 'dummy_srate')", 'dev_mode=dummy', 'project_srate=0', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')")) { $report.Add($kv) }
+            foreach ($kv in @("dev_bsize=$(Get-FakeIniValue 'dummy_blocksize')", "dev_srate=$(Get-FakeIniValue 'dummy_srate')", 'dev_mode=dummy', 'project_srate=0', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$(Get-FakeIniValue 'runallonstop' '1')")) { $report.Add($kv) }
             Add-FakeTracks $report '' $job['project'] $job['reads']
-            if ($job.Contains('saveAs')) { Copy-Item -LiteralPath $job['project'] -Destination $job['saveAs']; $report.Add('saved=true') }
+            # Like the driver, saved says the file is there, whoever wrote it. Spec.SaveFails: this launch cannot save.
+            if ($job.Contains('saveAs')) {
+                if (-not $script:Spec['SaveFails']) { Copy-Item -LiteralPath $job['project'] -Destination $job['saveAs'] }
+                $report.Add("saved=$((Test-Path -LiteralPath $job['saveAs']) ? 'true' : 'false')")
+            }
         }
         'savereopen' {
             Add-FakeTracks $report 'before_' $job['project'] $job['reads']
@@ -377,6 +441,7 @@ function Invoke-FakeStep([string]$JobFile) {
             $report.Add("cycles_done=$([int]$job['cycles'])"); $report.Add('tracks_left=0')
             foreach ($mark in $job['warmMark'], $job['loopMark']) { [IO.File]::WriteAllText($mark, '1') }
         }
+        'transport' { Invoke-FakeTransport $job $report }
         'hang' { return 'hang' }
         default { $report.Add("error=no such step: $($job['step'])") }
     }

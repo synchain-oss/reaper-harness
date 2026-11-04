@@ -41,16 +41,16 @@ $script:ChannelPattern = '^(L|R|[1-9][0-9]?)$'
 $script:StemNamePattern = '^(?:[A-Za-z0-9()+_-]|[A-Za-z0-9()+_.-][A-Za-z0-9 ()+_.-]*[A-Za-z0-9()+_-])$'
 $script:Modes = 'offline', '1x', 'online'
 $script:Expectable = 'PASS', 'FAIL', 'SKIPPED', 'INCOMPLETE', 'REFUSED'
-$script:BuiltinKinds = 'render', 'device', 'savereopen', 'instances'
+$script:BuiltinKinds = 'render', 'device', 'savereopen', 'instances', 'transport'
 $script:InternalKinds = 'hang', 'guard' # built-in negative cases only; never accepted from a configuration file
 $script:SendModes = @{ post = 0; prefx = 1; pre = 3 } # REAPER's send modes: post-fader, pre-FX, post-FX (pre-fader)
-$script:JsfxNames = 'harness-pdc-delay' # the JSFX shipped in jsfx/
+$script:JsfxNames = 'harness-pdc-delay' # the JSFX in jsfx/ a configuration can name (the others are tools of the transport kind)
 
 function New-HarnessSpec {
     $defs = [ordered]@{}
     $rate = SInt 8000 384000 'sample rate in Hz'
     $block = SInt 16 8192 'audio device block size in samples'
-    $mode = SStr -Enum $script:Modes -Doc 'offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time'
+    $mode = SStr -Enum $script:Modes -Doc 'offline: full-speed offline render; 1x: REAPER''s 1x offline render, at real-time speed but still offline; online: online render, in real time. Whether a plugin is told it runs offline depends on REAPER''s preference to inform plugins of the offline rendering state, which the tool does not set'
     $range = SArr (SNum -400 24) -Min 2 -Max 2 -Doc '[min, max] in dB'
     $defs.paramValue = SAny @((SNum 0 1), (SObj ([ordered]@{ normalized = (SNum 0 1); display = (SStr '^[^\u0000-\u001f]{0,128}$') }) @('normalized'))) 'a normalized value 0..1, or { normalized, display }'
     $params = SMap '^[^\u0000-\u001f]{1,128}$' (SRef paramValue) -Doc 'parameter name -> value, set by name and read back by the Lua driver'
@@ -97,7 +97,29 @@ function New-HarnessSpec {
     $defs.matrix = SObj ([ordered]@{ mode = (SArr $mode -Min 1 -Unique); sr = (SArr $rate -Min 1 -Unique); block = (SArr $block -Min 1 -Unique) })
     # The device step renders nothing, so a render mode would only multiply identical scenarios
     $defs.deviceMatrix = SObj ([ordered]@{ sr = (SArr $rate -Min 1 -Unique); block = (SArr $block -Min 1 -Unique) })
-    $defs.host = SObj ([ordered]@{ anticipativeFx = (SBool -Doc 'REAPER''s anticipative FX processing (default true, as REAPER ships)') })
+    $defs.host = SObj ([ordered]@{
+            anticipativeFx   = (SBool -Doc 'REAPER''s anticipative FX processing (default true, as REAPER ships)')
+            runFxWhenStopped = (SBool -Doc 'REAPER''s "Run FX when stopped" (default true, as REAPER ships); off, the FX of a track that is not armed and has no media are not run while stopped, nor (measured on REAPER 7.82) while playing')
+        })
+    # The transport kind: a sequence of transport, arm and monitoring states, each observed for a number of device samples
+    $defs.transportExpect = SObj ([ordered]@{
+            called     = (SBool -Doc 'the FX chain of the tested track is run in this state (true) or not at all (false)')
+            input      = (SStr -Enum 'silent', 'signal' -Doc 'silent: every block the chain gets is all zeros; signal: none is')
+            channels   = (SStr -Enum 'left', 'same', 'different' -Doc 'left: signal on the left only; same: left and right equal sample for sample; different: both carry signal and differ')
+            monitoring = (SBool -Doc 'REAPER reports input monitoring in effect on the tested track (B_RECMON_IN_EFFECT)')
+        })
+    $defs.transportState = SObj ([ordered]@{
+            name      = (SStr $script:StatePattern)
+            transport = (SStr -Enum 'stop', 'play', 'pause')
+            arm       = (SBool -Doc 'the tested track is armed (it never records: the harness never starts a recording)')
+            monitor   = (SStr -Enum 'off', 'on', 'auto' -Doc 'input monitoring of the tested track: off, on, or auto (REAPER''s tape style: only while not playing)')
+            samples   = (SInt 64 115200000 -Doc 'length of the observation window in device samples, default 2 x sr')
+            expect    = (SRef transportExpect)
+        }) @('name', 'transport', 'arm', 'monitor')
+    $defs.feed = SObj ([ordered]@{
+            wav      = $relPath
+            channels = (SStr -Enum 'left', 'same', 'different' -Doc 'left: the source''s first channel on the left, the right silent; same: the first channel on both; different: the source''s two channels (default)')
+        }) -Doc 'the input fed to the tested track through its input FX chain: the harness test signal, or a WAV file at the scenario sample rate'
     # Criteria of one render file, also used by stems
     $criteria = [ordered]@{
         maxDiffDb     = (SNum -400 24 -Doc 'allowed residual in dBFS (a mix of several tracks can differ by more than full scale); absent means bit-identical')
@@ -133,6 +155,14 @@ function New-HarnessSpec {
     $p = & $common 'instances'
     foreach ($e in ([ordered]@{ plugins = (SArr (SStr $script:IdPattern) -Min 1 -Unique); cycles = (SInt 1 10000); warmup = (SInt 0 10000); play = (SBool); maxHandleGrowth = (SInt 0 1000000); maxPrivateGrowthMB = (SNum 0 1000000); sr = $rate; block = $block; host = (SRef host) }).GetEnumerator()) { $p[$e.Key] = $e.Value }
     $Kinds.instances = SObj $p @('id', 'kind')
+    $p = & $common 'transport'
+    foreach ($e in ([ordered]@{
+                layout = (SStr $script:IdPattern); track = (SStr $script:TrackNamePattern -Doc 'the tested track, by name; may be left out when the layout has one track')
+                sr = $rate; block = $block; host = (SRef host); matrix = (SRef deviceMatrix); feed = (SRef feed)
+                settleSamples = (SInt 0 115200000 -Doc 'device samples to let pass after each change of state before its window opens; default: REAPER''s "run FX after stopping" time plus half a second')
+                states = (SArr (SRef transportState) -Min 1 -Max 64)
+            }).GetEnumerator()) { $p[$e.Key] = $e.Value }
+    $Kinds.transport = SObj $p @('id', 'kind', 'layout', 'states')
     $root = SObj ([ordered]@{
             '$schema'  = (SStr)
             schema     = (SInt 1 1)
@@ -362,12 +392,20 @@ function Get-Or($Dict, [string]$Key, $Default) { ($null -ne $Dict -and $Dict.Con
 
 # ---- built-in negative cases ----
 # Product independent: two that prove the comparer (on a layout without plugins), two that prove the watchdog, three
-# that prove the entry guards. Like every negative case, a row only passes when both the outcome and the reason
-# (expectDetail) match; a case that could not run is INCOMPLETE, never PASS.
+# that prove the entry guards, and with -Transport one that proves the block probe of the transport kind. Like every
+# negative case, a row only passes when both the outcome and the reason (expectDetail) match; a case that could not run
+# is INCOMPLETE, never PASS.
 function Get-HarnessBuiltinNegatives {
+    param([switch]$Transport)
     $dry = '@dry' # internal layout: one source track, no FX ('@' cannot appear in configuration ids)
     $make = { param($h) [pscustomobject]$h }
     $render = { param($h) foreach ($e in (New-RenderDefaults).GetEnumerator()) { if (-not $h.ContainsKey($e.Key)) { $h[$e.Key] = $e.Value } }; [pscustomobject]$h }
+    # Only with a transport scenario in the configuration: the block probe in both directions. Unarmed and stopped with
+    # "Run FX when stopped" off the chain is not run, so expecting it called must fail as "not called"; armed and
+    # monitored the probe sees the feed, so expecting silence must fail as "signal in". A probe that sees nothing fails
+    # the second state as "not called" instead: the reason does not match, and the case is not verified.
+    $expect = { param($c, $i) [pscustomobject]@{ Called = $c; Input = $i; Channels = $null; Monitoring = $null } }
+    $state = { param($n, $a, $m, $x) [pscustomobject]@{ Name = $n; Transport = 'stop'; Arm = $a; Monitor = $m; Samples = 48000; Expect = $x } }
     @(
         (& $render @{ id = 'neg-offset-1-sample'; kind = 'render'; negative = $true; builtin = $true; layout = $dry; mode = 'offline'; sr = 48000; block = 512; mono = $false; bypass = @(); compare = [pscustomobject]@{ Kind = 'dry' }
                 mutate = [pscustomobject]@{ sourceOffsetSamples = 1; trackVolume = 1.0 }; expect = 'FAIL'; expectDetail = '^identical=no lag=1 ' })
@@ -379,6 +417,13 @@ function Get-HarnessBuiltinNegatives {
         (& $make @{ id = 'neg-sentinel-missing'; kind = 'guard'; negative = $true; builtin = $true; guard = 'sentinel-missing'; expect = 'REFUSED'; expectDetail = '^REFUSED: .*sentinel' })
         (& $make @{ id = 'neg-default-dir'; kind = 'guard'; negative = $true; builtin = $true; guard = 'default-dir'; expect = 'REFUSED'; expectDetail = '^REFUSED: .*never touched' })
     )
+    if ($Transport) {
+        & $make @{ id = 'neg-transport-probe'; kind = 'transport'; negative = $true; builtin = $true; layout = $dry; track = 'Dry'; sr = 48000; block = 512; settleSamples = $null
+            host = [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $false }
+            feed = [pscustomobject]@{ Wav = ''; Channels = 'different'; File = ''; Sha256 = ''; FileChannels = 2 }
+            states = @((& $state 'stopped-unarmed' $false 'off' (& $expect $true $null)), (& $state 'stopped-armed' $true 'on' (& $expect $null 'silent')))
+            expect = 'FAIL'; expectDetail = '^stopped-unarmed: blocks=0/[1-9][0-9]* [^|]*; failed: not called \(0 blocks while the device ran [1-9][0-9]*\) \| stopped-armed: blocks=[1-9][0-9]*/[1-9][0-9]* [^|]*; failed: signal in [1-9][0-9]* of [1-9][0-9]* blocks$' }
+    }
 }
 
 # The criteria fields of a render scenario (and of a stem) when the configuration gives none.
@@ -388,7 +433,7 @@ function New-RenderDefaults {
     $d.stems = @(); $d.host = (New-HostDefaults); $d.mutate = $null
     $d
 }
-function New-HostDefaults { [pscustomobject]@{ AnticipativeFx = $true } }
+function New-HostDefaults { [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $true } }
 
 # ---- normalisation and cross-reference checks ----
 function ConvertTo-Bypass($Value, [string]$Path, $LayoutPlugins, $Problems, $AllPlugins) {
@@ -601,6 +646,7 @@ function ConvertTo-Criteria($Raw, $Base, [string]$Path, [int]$Channels, [bool]$H
 function ConvertTo-Host($Raw) {
     $h = New-HostDefaults
     if ($null -ne $Raw -and $Raw.Contains('anticipativeFx')) { $h.AnticipativeFx = [bool]$Raw['anticipativeFx'] }
+    if ($null -ne $Raw -and $Raw.Contains('runFxWhenStopped')) { $h.RunFxWhenStopped = [bool]$Raw['runFxWhenStopped'] }
     $h
 }
 
@@ -693,8 +739,52 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
             foreach ($k in 'cycles', 'warmup', 'play', 'maxHandleGrowth', 'maxPrivateGrowthMB') { $o[$k] = Get-Or $Raw $k $Limits.instances[$k] }
             if ([int]$o.warmup -ge [int]$o.cycles) { $Problems.Add("${Path}: warmup ($($o.warmup)) must be smaller than cycles ($($o.cycles))") }
         }
+        'transport' {
+            $o.track = ''
+            if ($layout) {
+                $names = @($layout.Tracks | ForEach-Object { $_.Name })
+                if ($Raw.Contains('track')) {
+                    $o.track = [string]$Raw['track']
+                    if ($o.track -cnotin $names) { $Problems.Add("$Path.track: '$($o.track)' is not a track of layout '$($o.layout)'") }
+                } elseif ($names.Count -eq 1) { $o.track = $names[0] }
+                else { $Problems.Add("${Path}: layout '$($o.layout)' has $($names.Count) tracks: name the tested one in 'track'") }
+            }
+            $o.settleSamples = $Raw.Contains('settleSamples') ? [int]$Raw['settleSamples'] : $null
+            $f = Get-Or $Raw 'feed' $null
+            # File, Sha256 and FileChannels are filled in by Read-HarnessFeeds (Transport.psm1), which reads the file
+            $o.feed = ($null -eq $f) ? $null : [pscustomobject]@{ Wav = [string](Get-Or $f 'wav' ''); Channels = [string](Get-Or $f 'channels' 'different'); File = ''; Sha256 = ''; FileChannels = 2 }
+            $o.states = ConvertTo-TransportStates @($Raw['states']) $Path $o.sr $o.block $Problems
+        }
     }
     [pscustomobject]$o
+}
+
+# The states of a transport scenario: names unique, at least one with an expectation (a scenario that judges nothing
+# would be an empty PASS), no expectation that contradicts itself, every window at least 4 blocks long.
+function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int]$DeviceBlock, $Problems) {
+    $seen = @{}
+    $judged = 0
+    $out = for ($i = 0; $i -lt $Raw.Count; $i++) {
+        $r = $Raw[$i]
+        $p = "$Path.states[$i]"
+        $stateName = [string]$r['name']
+        if ($seen.ContainsKey($stateName)) { $Problems.Add("${p}: state name '$stateName' is used twice") }
+        $seen[$stateName] = $true
+        $samples = [int](Get-Or $r 'samples' (2 * $Sr))
+        if ($samples -lt 4 * $DeviceBlock) { $Problems.Add("$p.samples: $samples samples are less than 4 blocks of $DeviceBlock") }
+        $e = Get-Or $r 'expect' $null
+        $x = $null
+        if ($null -ne $e) {
+            $judged++
+            if ($e.get_Count() -eq 0) { $Problems.Add("$p.expect: needs at least one of called, input, channels, monitoring") }
+            $x = [pscustomobject]@{ Called = (Get-Or $e 'called' $null); Input = (Get-Or $e 'input' $null); Channels = (Get-Or $e 'channels' $null); Monitoring = (Get-Or $e 'monitoring' $null) }
+            if ($false -eq $x.Called -and ($null -ne $x.Input -or $null -ne $x.Channels)) { $Problems.Add("$p.expect: called false leaves no input to judge: drop input and channels, or expect called true") }
+            if ('silent' -ceq $x.Input -and $null -ne $x.Channels) { $Problems.Add("$p.expect: channels describe a signal, and input silent says there is none") }
+        }
+        [pscustomobject]@{ Name = $stateName; Transport = [string]$r['transport']; Arm = [bool]$r['arm']; Monitor = [string]$r['monitor']; Samples = $samples; Expect = $x }
+    }
+    if ($Raw.Count -and $judged -eq 0) { $Problems.Add("$Path.states: no state has an expect: the scenario would judge nothing") }
+    , @($out)
 }
 
 # Reads, validates and normalises one configuration file. Kinds: extension kinds already registered (kind -> @{
@@ -733,7 +823,7 @@ function Test-HarnessConfigData {
     $Layouts = [ordered]@{}
     foreach ($k in $Raw.layouts.get_Keys()) { $Layouts[$k] = ConvertTo-Layout $k $Raw.layouts[$k] $Plugins $Signal $Problems }
     $all = [Collections.Generic.List[object]]::new()
-    $reserved = @(Get-HarnessBuiltinNegatives | ForEach-Object { $_.id })
+    $reserved = @(Get-HarnessBuiltinNegatives -Transport | ForEach-Object { $_.id })
     foreach ($section in 'scenarios', 'negative') {
         $Items = @(Get-Or $Raw $section @())
         for ($i = 0; $i -lt $Items.Count; $i++) {
@@ -742,7 +832,7 @@ function Test-HarnessConfigData {
             if ($section -eq 'negative' -and $item.Contains('matrix')) { $Problems.Add("${Path}: matrix is not allowed in negative cases"); continue }
             if ($item.Contains('matrix')) {
                 foreach ($axis in $item['matrix'].get_Keys()) { if ($item.Contains($axis)) { $Problems.Add("${Path}: '$axis' is given both directly and in matrix") } }
-                if ($item['matrix'].get_Count() -eq 0) { $Problems.Add("${Path}.matrix: needs at least one of mode, sr, block (device: sr, block)") }
+                if ($item['matrix'].get_Count() -eq 0) { $Problems.Add("${Path}.matrix: needs at least one of mode, sr, block (device and transport: sr, block)") }
             }
             foreach ($expanded in (Expand-Matrix $item)) { $all.Add((ConvertTo-Scenario $expanded $Path ($section -eq 'negative') $Layouts $Plugins $Limits $Problems $Kinds)) }
         }

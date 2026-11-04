@@ -164,6 +164,17 @@ public static class HarnessWav {
 
     static bool Finite(double v) { return !double.IsNaN(v) && !double.IsInfinity(v); }
 
+    // Largest |x| of each channel over its finite samples
+    public static double[] ChannelPeaks(HarnessWavData w) {
+        var peaks = new double[w.Channels];
+        for (long i = 0; i < w.Samples.LongLength; i++) {
+            double v = Math.Abs(w.Samples[i]);
+            int ch = (int)(i % w.Channels);
+            if (!double.IsNaN(v) && !double.IsInfinity(v) && v > peaks[ch]) peaks[ch] = v;
+        }
+        return peaks;
+    }
+
     public static double[] Rms(HarnessWavData w) {
         var sum = new double[w.Channels]; var count = new long[w.Channels]; var r = new double[w.Channels];
         for (long i = 0; i < w.Samples.LongLength; i++) {

@@ -13,6 +13,8 @@
 #   savereopen  FX state survives save and reopen (cycles times); the reopened project renders bit-identical to the
 #               original
 #   instances   add and remove instances many times; handle and memory growth stay below the limits
+#   transport   a sequence of transport, arm and monitoring states of one track: whether its FX chain is run in each,
+#               and what it gets (Transport.psm1)
 #   hang        a driver step that never finishes (only for the built-in watchdog negative cases)
 # Extension kinds are registered through Extensions.psm1 and receive the same context and the API in Ctx.Api.
 
@@ -25,6 +27,8 @@ Import-Module (Join-Path $PSScriptRoot 'Locks.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Rpp.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Wav.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Config.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Plugins.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Transport.psm1') -ErrorAction Stop
 
 function New-HarnessOutcome([string]$Status, [string]$Detail = '', $Facts = $null) {
     $o = [ordered]@{ Status = $Status; Detail = $Detail }
@@ -80,7 +84,7 @@ function New-HarnessContext {
     param(
         [Parameter(Mandatory)][string]$ReaperExe, [Parameter(Mandatory)][string]$WorkDir, [Parameter(Mandatory)][string]$Driver,
         [Parameter(Mandatory)]$Config, [object[]]$Installed = @(), [object[]]$Jsfx = @(), $States = $null, [Parameter(Mandatory)][string[]]$Locks, [string[]]$SkipMarkers = @(),
-        [string[]]$LuaExtensions = @(), [hashtable]$Kinds = @{}
+        [string[]]$LuaExtensions = @(), [hashtable]$Kinds = @{}, [hashtable]$ToolJsfx = @{}
     )
     $byId = @{}
     foreach ($row in $Installed) { $byId[$row.Id] = $row }
@@ -90,7 +94,8 @@ function New-HarnessContext {
         Exe = $ReaperExe; Work = $WorkDir; Driver = $Driver; Config = $Config; Limits = $Config.Limits; Signal = $Config.Signal
         Locks = $Locks; LockWaitSec = [double]$Config.Limits.lockWaitSec; SkipMarkers = $SkipMarkers; LuaExtensions = $LuaExtensions; Kinds = $Kinds
         Installed = $byId; Jsfx = $jsById; States = ($States ?? [ordered]@{}); Blocks = @{}; Names = @{}; AddNames = @{}; Launches = 0; LaunchLog = [Collections.Generic.List[object]]::new()
-        Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new()
+        Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new(); ToolJsfx = $ToolJsfx
+        Retries = [Collections.Generic.List[object]]::new() # launches started once more (see Invoke-HarnessLaunch)
         Started = [Collections.Generic.List[object]]::new() # every process started: Pid, StartUtc
         StillRunning = $null # set when the watchdog could not end a process: Pid, Label, Lock
         Launcher = $null; ModuleSampler = $null; Stopper = $null # self-test only
@@ -107,14 +112,24 @@ function Get-HarnessWorkrender([AllowNull()][AllowEmptyString()][string]$Current
     $AnticipativeFx ? ($v -bor 1) : ($v -band -bnot 1)
 }
 
+# "Run FX when stopped" is bit 0 of [REAPER] runallonstop; without the key REAPER uses 1. Measured on REAPER 7.82 (see
+# docs/CONFIG.md). Pure function: the value to write, other bits kept.
+function Get-HarnessRunAllOnStop([AllowNull()][AllowEmptyString()][string]$Current, [bool]$RunFxWhenStopped) {
+    $v = 0
+    if (-not [int]::TryParse($Current, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { $v = 1 }
+    $RunFxWhenStopped ? ($v -bor 1) : ($v -band -bnot 1)
+}
+
 # Private ini: Dummy audio device (silent), sample rate and block size; no save prompt after recording;
-# anticipative FX processing on or off.
-function Set-HarnessAudioConfig([int]$Sr, [int]$Block, [bool]$AnticipativeFx = $true) {
+# anticipative FX processing on or off; "Run FX when stopped" on or off (written every time, so it is never left over
+# from an earlier scenario).
+function Set-HarnessAudioConfig([int]$Sr, [int]$Block, [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true) {
     $null = Set-HarnessIniValue -Section audioconfig -Key mode -Value 4
     $null = Set-HarnessIniValue -Section audioconfig -Key dummy_srate -Value $Sr
     $null = Set-HarnessIniValue -Section audioconfig -Key dummy_blocksize -Value $Block
     $null = Set-HarnessIniValue -Section REAPER -Key promptendrec -Value 0
     $null = Set-HarnessIniValue -Section REAPER -Key workrender -Value (Get-HarnessWorkrender (Get-HarnessIniValue -Section REAPER -Key workrender) $AnticipativeFx)
+    $null = Set-HarnessIniValue -Section REAPER -Key runallonstop -Value (Get-HarnessRunAllOnStop (Get-HarnessIniValue -Section REAPER -Key runallonstop) $RunFxWhenStopped)
 }
 
 function Get-HarnessSkipMarkerHit([string[]]$Markers) { @($Markers | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) | Select-Object -First 1 }
@@ -123,12 +138,30 @@ function Get-HarnessSkipMarkerHit([string[]]$Markers) { @($Markers | Where-Objec
 # back. Referenced from here so that no garbage collection closes them earlier, which would end them just the same.
 $script:KeptLocks = [Collections.Generic.List[object]]::new()
 
-# Starts REAPER once while holding every lock of the set. Lock not available -> Status LockBusy; a skip marker that
+# Starts REAPER while holding every lock of the set. Lock not available -> Status LockBusy; a skip marker that
 # appeared since the preflight -> Status SkipMarker; an earlier process of this context that could not be ended ->
 # Status Blocked. In all three REAPER is not started (the caller records INCOMPLETE; the harness never runs REAPER
 # without its locks, nor next to a REAPER it could not end). The launch that reports StillRunning keeps its locks: its
 # window may still be on the desktop, and the next start of any harness has to wait for it.
+# REAPER's evaluation licence reminder comes up now and then at the start of a launch and ends it (stuck dialog): it is
+# never clicked away, the launch is ended by its PID as always, and then the whole launch is done once more, through
+# every guard again (skip marker, locks, the configuration directory), after deleting Outputs (the files the launch
+# is to write, so that nothing the first attempt left counts for the second). Only once, never after StillRunning; a
+# second reminder ends the launch like any stuck dialog. Each retry is listed in Ctx.Retries (the result has them).
 function Invoke-HarnessLaunch {
+    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs, [string]$Label = '', [string[]]$Outputs = @())
+    $Run = Invoke-HarnessLaunchOnce -Ctx $Ctx -HostArgs $HostArgs -Label $Label
+    if ($Run.Status -ceq 'Modal' -and $Run.Modal -ceq 'license-nag' -and -not $Run.StillRunning) {
+        # What the first launch left behind must not be read as the second one's: when it cannot be removed, no retry
+        foreach ($f in $Outputs) { if (Test-Path -LiteralPath $f) { try { Remove-Item -LiteralPath $f -Force } catch { return $Run } } }
+        $Ctx.Retries.Add([pscustomobject]@{ Label = $Label; Reason = 'license-nag' })
+        Write-Host "  [retry] $Label`: the evaluation licence reminder ended the launch; starting it once more"
+        $Run = Invoke-HarnessLaunchOnce -Ctx $Ctx -HostArgs $HostArgs -Label $Label
+    }
+    $Run
+}
+
+function Invoke-HarnessLaunchOnce {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs, [string]$Label = '')
     $none = { param($s) [pscustomobject]@{ Status = $s; ExitCode = $null; Seconds = 0; Pid = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{}; SampleLost = @(); Modules = @{}; ModuleScans = 0; PluginModules = @(); StillRunning = $false } }
     if ($Ctx.StillRunning) { return & $none 'Blocked' }
@@ -217,7 +250,7 @@ function Get-HarnessRunFiles([string]$Work, [string]$Name, [string[]]$Stems = @(
 function New-HarnessRun {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)]$Layout, [int]$Sr = 48000, [int]$Block = 512,
           [string]$Mode = 'offline', [int]$Channels = 2, [string[]]$Bypass = @(), [double]$VolumeScale = 1.0, [int]$OffsetSamples = 0, [switch]$NoFx,
-          [hashtable]$Blocks = $null, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true)
+          [hashtable]$Blocks = $null, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true, [switch]$NoItems)
     $files = Get-HarnessRunFiles $Ctx.Work $Name $Stems
     $Project = $files.Project
     $Wav = $files.Wav
@@ -226,16 +259,16 @@ function New-HarnessRun {
     $sources = @{}
     foreach ($t in $Layout.Tracks) { if ($t.Source -and $null -ne $t.Signal) { $sources[$t.Name] = Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples -Spec $t.Signal } }
     $Text = New-HarnessProjectText -Layout $Layout -Blocks ($Blocks ?? $Ctx.Blocks) -SourceWav (Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples) -Sources $sources -RenderDir $Ctx.Work -RenderName $Name `
-        -SampleRate $Sr -Channels $Channels -Mode $Mode -Bypass $Bypass -Seconds $Ctx.Signal.Seconds -VolumeScale $VolumeScale -Stems $Stems -NoFx:$NoFx
+        -SampleRate $Sr -Channels $Channels -Mode $Mode -Bypass $Bypass -Seconds $Ctx.Signal.Seconds -VolumeScale $VolumeScale -Stems $Stems -NoFx:$NoFx -NoItems:$NoItems
     Write-HarnessText -Path $Project -Text $Text
-    Set-HarnessAudioConfig -Sr $Sr -Block $Block -AnticipativeFx $AnticipativeFx
+    Set-HarnessAudioConfig -Sr $Sr -Block $Block -AnticipativeFx $AnticipativeFx -RunFxWhenStopped $RunFxWhenStopped
     $Ctx.Files.Add($Project); $Ctx.Files.Add($Wav); foreach ($f in $stemFiles.get_Values()) { $Ctx.Files.Add($f) }
     [pscustomobject]@{ Project = $Project; Wav = $Wav; Stems = $stemFiles }
 }
 
 # Renders a project. Also: further files the render must produce (stems).
 function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Label = 'render', [string[]]$Also = @()) {
-    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Label -HostArgs @{ ReaperArgs = @('-renderproject', $Project); TimeoutSec = [double]$Ctx.Limits.renderTimeoutSec }
+    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Label -HostArgs @{ ReaperArgs = @('-renderproject', $Project); TimeoutSec = [double]$Ctx.Limits.renderTimeoutSec } -Outputs (@($Wav) + $Also)
     $why = Get-HarnessHostFailure $Run
     if (-not $why -and -not (Test-Path -LiteralPath $Wav)) { $why = 'the render produced no file' }
     if (-not $why) {
@@ -257,7 +290,7 @@ function Invoke-HarnessLuaStep {
     $full = @{ step = $Step; result = $resultFile; extensions = @($Ctx.LuaExtensions) }
     foreach ($k in $Job.get_Keys()) { $full[$k] = $Job[$k] }
     Write-HarnessText -Path $jobFile -Text (ConvertTo-HarnessLuaTable $full)
-    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -HostArgs @{
+    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -Outputs (@($resultFile) + @($Watch.get_Values()) + @($Job['saveAs'] | Where-Object { $_ })) -HostArgs @{
         ReaperArgs = @($Ctx.Driver); Environment = @{ REAPER_HARNESS_JOB = $jobFile }; WatchFiles = $Watch
         TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
     }
@@ -361,14 +394,20 @@ function Test-HarnessStateProof {
 function Test-HarnessHasStates($Layout) { [bool]@($Layout.Tracks | ForEach-Object { $_.Fx } | Where-Object { $_.State }).Count }
 
 # Pure function: the audio settings the device step read back (Facts: the driver's report) against the scenario's:
-# block size, sample rate, and anticipative FX processing (bit 0 of workrender). Returns the problems.
-function Test-HarnessHostReadback([Parameter(Mandatory)][hashtable]$Facts, [int]$Block, [int]$Sr, [bool]$AnticipativeFx) {
+# block size, sample rate, anticipative FX processing (bit 0 of workrender) and, when given, "Run FX when stopped"
+# (bit 0 of runallonstop). Returns the problems.
+function Test-HarnessHostReadback([Parameter(Mandatory)][hashtable]$Facts, [int]$Block, [int]$Sr, [bool]$AnticipativeFx, [Nullable[bool]]$RunFxWhenStopped = $null) {
     $bad = [Collections.Generic.List[string]]::new()
     if ($Facts['dev_bsize'] -ne "$Block") { $bad.Add("block size reads $($Facts['dev_bsize']), expected $Block") }
     if ($Facts['dev_srate'] -ne "$Sr") { $bad.Add("sample rate reads $($Facts['dev_srate']), expected $Sr") }
     $wr = 0
     if (-not [int]::TryParse([string]$Facts['cfg_workrender'], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$wr)) { $bad.Add("workrender reads '$($Facts['cfg_workrender'])'") }
     elseif ([bool]($wr -band 1) -ne $AnticipativeFx) { $bad.Add("anticipative FX processing reads $(($wr -band 1) ? 'on' : 'off'), expected $($AnticipativeFx ? 'on' : 'off')") }
+    if ($null -ne $RunFxWhenStopped) {
+        $ro = 0
+        if (-not [int]::TryParse([string]$Facts['cfg_runallonstop'], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$ro)) { $bad.Add("runallonstop reads '$($Facts['cfg_runallonstop'])'") }
+        elseif ([bool]($ro -band 1) -ne $RunFxWhenStopped) { $bad.Add("Run FX when stopped reads $(($ro -band 1) ? 'on' : 'off'), expected $($RunFxWhenStopped ? 'on' : 'off')") }
+    }
     , $bad.ToArray()
 }
 
@@ -389,17 +428,17 @@ function Test-HarnessReopenFacts([Parameter(Mandatory)][hashtable]$Facts, [int]$
 # -------- kinds --------
 
 # The name of a dry reference render (pure); it starts with '_' (see Get-HarnessRunFiles).
-function Get-HarnessReferenceName([string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true) {
-    $key = "_dry-$($LayoutId.TrimStart('@'))-$Sr-$Block-$Mode-$Channels" + ($AnticipativeFx ? '' : '-noaf')
+function Get-HarnessReferenceName([string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true) {
+    $key = "_dry-$($LayoutId.TrimStart('@'))-$Sr-$Block-$Mode-$Channels" + ($AnticipativeFx ? '' : '-noaf') + ($RunFxWhenStopped ? '' : '-norfs')
     if ($Stems.Count) { $key += '-stems-' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Stems -join "`n"))).Substring(0, 8).ToLowerInvariant() }
     $key
 }
 
 # The dry reference: the layout without any FX. Stems: tracks rendered as stems as well. Cached per round.
-function Get-HarnessReference($Ctx, [string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true) {
-    $key = Get-HarnessReferenceName $LayoutId $Sr $Block $Mode $Channels $Stems $AnticipativeFx
+function Get-HarnessReference($Ctx, [string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true) {
+    $key = Get-HarnessReferenceName $LayoutId $Sr $Block $Mode $Channels $Stems $AnticipativeFx $RunFxWhenStopped
     if (-not $Ctx.Refs.ContainsKey($key)) {
-        $r = New-HarnessRun -Ctx $Ctx -Name $key -Layout (Get-HarnessLayout $Ctx $LayoutId) -Sr $Sr -Block $Block -Mode $Mode -Channels $Channels -Stems $Stems -AnticipativeFx $AnticipativeFx -NoFx
+        $r = New-HarnessRun -Ctx $Ctx -Name $key -Layout (Get-HarnessLayout $Ctx $LayoutId) -Sr $Sr -Block $Block -Mode $Mode -Channels $Channels -Stems $Stems -AnticipativeFx $AnticipativeFx -RunFxWhenStopped $RunFxWhenStopped -NoFx
         $res = Invoke-HarnessRender $Ctx $r.Project $r.Wav 'reference' -Also @($r.Stems.get_Values())
         $Ctx.Refs[$key] = [pscustomobject]@{ Wav = $r.Wav; Stems = $r.Stems; Why = $res.Why }
     }
@@ -423,6 +462,7 @@ function Invoke-HarnessRenderScenario($Ctx, $s) {
     $offset = $mut ? [int]$mut.sourceOffsetSamples : 0
     $vol = $mut ? [double]$mut.trackVolume : 1.0
     $af = [bool]$s.host.AnticipativeFx
+    $rfs = [bool]$s.host.RunFxWhenStopped
     $Layout = Get-HarnessLayout $Ctx $s.layout
     $Stems = @($s.stems)
     $refStems = @($Stems | Where-Object { $_.Compare -eq 'reference' } | ForEach-Object { $_.Track })
@@ -430,22 +470,22 @@ function Invoke-HarnessRenderScenario($Ctx, $s) {
     $ref = $null
     switch ($c.Kind) {
         'dry' {
-            $ref = Get-HarnessReference $Ctx $s.layout ([int]$s.sr) ([int]$s.block) $s.mode $ch -Stems $refStems -AnticipativeFx $af
+            $ref = Get-HarnessReference $Ctx $s.layout ([int]$s.sr) ([int]$s.block) $s.mode $ch -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs
             if ($ref.Why) { return New-HarnessOutcome INCOMPLETE "the dry reference render failed: $($ref.Why)" }
         }
         'repeat' {
-            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-first" -Layout $Layout -Sr $s.sr -Block $s.block -Mode $s.mode -Channels $ch -Bypass $s.bypass -Stems $refStems -AnticipativeFx $af
+            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-first" -Layout $Layout -Sr $s.sr -Block $s.block -Mode $s.mode -Channels $ch -Bypass $s.bypass -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs
             $res0 = Invoke-HarnessRender $Ctx $ref.Project $ref.Wav -Also @($ref.Stems.get_Values())
             if ($res0.Why) { return New-HarnessOutcome INCOMPLETE "the first render failed: $($res0.Why)" }
         }
         'variant' {
-            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-variant" -Layout (Get-HarnessLayout $Ctx $c.Layout) -Sr $s.sr -Block $c.Block -Mode $c.Mode -Channels $ch -Bypass $c.Bypass -Stems $refStems -AnticipativeFx $af
+            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-variant" -Layout (Get-HarnessLayout $Ctx $c.Layout) -Sr $s.sr -Block $c.Block -Mode $c.Mode -Channels $ch -Bypass $c.Bypass -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs
             $res0 = Invoke-HarnessRender $Ctx $ref.Project $ref.Wav -Also @($ref.Stems.get_Values())
             if ($res0.Why) { return New-HarnessOutcome INCOMPLETE "the variant render failed: $($res0.Why)" }
         }
     }
     $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $Layout -Sr $s.sr -Block $s.block -Mode $s.mode -Channels $ch -Bypass $s.bypass -VolumeScale $vol -OffsetSamples $offset `
-        -Stems @($Stems | ForEach-Object { $_.Track }) -AnticipativeFx $af
+        -Stems @($Stems | ForEach-Object { $_.Track }) -AnticipativeFx $af -RunFxWhenStopped $rfs
     $res = Invoke-HarnessRender $Ctx $r.Project $r.Wav -Also @($r.Stems.get_Values())
     if ($res.Why) { return New-HarnessOutcome INCOMPLETE $res.Why }
     $master = Invoke-HarnessCompare $Ctx $s ($ref ? $ref.Wav : '') $r.Wav
@@ -461,7 +501,8 @@ function Invoke-HarnessRenderScenario($Ctx, $s) {
 function Invoke-HarnessDeviceScenario($Ctx, $s) {
     $Layout = Get-HarnessLayout $Ctx $s.layout
     $af = [bool]$s.host.AnticipativeFx
-    $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $Layout -Sr $s.sr -Block $s.block -AnticipativeFx $af
+    $rfs = [bool]$s.host.RunFxWhenStopped
+    $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $Layout -Sr $s.sr -Block $s.block -AnticipativeFx $af -RunFxWhenStopped $rfs
     $Reads = Get-HarnessParamReads $Layout
     $Job = @{ project = $r.Project; reads = (ConvertTo-LuaReads $Reads) }
     $hasStates = Test-HarnessHasStates $Layout
@@ -474,7 +515,7 @@ function Invoke-HarnessDeviceScenario($Ctx, $s) {
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step device -Job $Job
     if ($lua.Why) { return New-HarnessOutcome INCOMPLETE $lua.Why }
     $bad = [Collections.Generic.List[string]]::new()
-    foreach ($p in (Test-HarnessHostReadback -Facts $lua.Result -Block $s.block -Sr $s.sr -AnticipativeFx $af)) { $bad.Add($p) }
+    foreach ($p in (Test-HarnessHostReadback -Facts $lua.Result -Block $s.block -Sr $s.sr -AnticipativeFx $af -RunFxWhenStopped $rfs)) { $bad.Add($p) }
     foreach ($p in (Test-HarnessFxReport -Facts $lua.Result -Layout $Layout -Names $Ctx.Names -Plugins $Ctx.Config.Plugins -Reads $Reads)) { $bad.Add($p) }
     $proof = $null
     if ($hasStates) {
@@ -493,7 +534,7 @@ function Invoke-HarnessSaveReopenScenario($Ctx, $s) {
     $Layout = Get-HarnessLayout $Ctx $s.layout
     $af = [bool]$s.host.AnticipativeFx
     $reopens = [int]$s.cycles
-    $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $Layout -Sr $s.sr -Block $s.block -Mode $s.mode -Bypass $s.bypass -AnticipativeFx $af
+    $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $Layout -Sr $s.sr -Block $s.block -Mode $s.mode -Bypass $s.bypass -AnticipativeFx $af -RunFxWhenStopped ([bool]$s.host.RunFxWhenStopped)
     $copy = Join-Path $Ctx.Work "$($s.id)-saved.rpp"
     if (Test-Path -LiteralPath $copy) { Remove-Item -LiteralPath $copy }
     $Ctx.Files.Add($copy)
@@ -530,7 +571,7 @@ function Invoke-HarnessSaveReopenScenario($Ctx, $s) {
 
 function Invoke-HarnessInstancesScenario($Ctx, $s) {
     $empty = [pscustomobject]@{ Id = '@empty'; Tracks = @(); Plugins = @() }
-    $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $empty -Sr $s.sr -Block $s.block -AnticipativeFx ([bool]$s.host.AnticipativeFx)
+    $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $empty -Sr $s.sr -Block $s.block -AnticipativeFx ([bool]$s.host.AnticipativeFx) -RunFxWhenStopped ([bool]$s.host.RunFxWhenStopped)
     $Watch = @{ warm = (Join-Path $Ctx.Work "$($s.id).warm"); loop = (Join-Path $Ctx.Work "$($s.id).loop") }
     $Names = @($s.plugins | ForEach-Object { $Ctx.AddNames.ContainsKey($_) ? $Ctx.AddNames[$_] : $Ctx.Names[$_] })
     if (@($Names | Where-Object { -not $_ }).Count) { return New-HarnessOutcome INCOMPLETE 'a plugin of this scenario has no learned name' }
@@ -547,6 +588,53 @@ function Invoke-HarnessInstancesScenario($Ctx, $s) {
     $summary = "$($s.cycles) cycles ($($s.warmup) warm-up) of $($s.plugins -join '+'): handles $($dh -ge 0 ? '+' : '')$dh, private memory $($dm -ge 0 ? '+' : '')$dm MB, tracks left $($lua.Result['tracks_left'])"
     if ($dh -gt [int]$s.maxHandleGrowth -or $dm -gt [double]$s.maxPrivateGrowthMB) { return New-HarnessOutcome FAIL "growth above the limits (handles $($s.maxHandleGrowth), memory $($s.maxPrivateGrowthMB) MB): $summary" }
     New-HarnessOutcome PASS $summary
+}
+
+# The transport kind (Transport.psm1 builds the job and judges). A readback that differs from what was asked for (the
+# device, anticipative FX, Run FX when stopped, the FX of the layout) or a file in the record directory is FAIL; a
+# setup that leaves no evidence is INCOMPLETE; otherwise the worst of the states. The project has no items: what the
+# tested track gets comes through its input. The Lua step gets the time its windows need on top of luaTimeoutSec
+# (Get-HarnessTransportTimeout).
+function Invoke-HarnessTransportScenario($Ctx, $s) {
+    if (-not $Ctx.ToolJsfx.Count) { return New-HarnessOutcome INCOMPLETE 'the block probe and the feed JSFX were not installed' }
+    $Layout = Get-HarnessLayout $Ctx $s.layout
+    $af = [bool]$s.host.AnticipativeFx
+    $rfs = [bool]$s.host.RunFxWhenStopped
+    $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $Layout -Sr $s.sr -Block $s.block -AnticipativeFx $af -RunFxWhenStopped $rfs -NoItems
+    $feed = $null
+    if ($null -ne $s.feed) {
+        Install-HarnessFeedWav -Source ($s.feed.File ? $s.feed.File : (Get-HarnessSignal $Ctx $s.sr 2))
+        $feed = [ordered]@{ source = ($s.feed.Wav ? $s.feed.Wav : 'test signal'); sha256 = ($s.feed.Wav ? $s.feed.Sha256 : $null); channels = $s.feed.Channels }
+    }
+    $recordDir = Join-Path $Ctx.Work "$($s.id)-record"
+    $Reads = Get-HarnessParamReads $Layout
+    $Job = Get-HarnessTransportJob -Scenario $s -Layout $Layout -Tools @{ 'harness-block-probe' = $Ctx.ToolJsfx['harness-block-probe'].AddName; 'harness-feed' = $Ctx.ToolJsfx['harness-feed'].AddName } -RecordDir $recordDir
+    $Job.project = $r.Project
+    $Job.reads = ConvertTo-LuaReads $Reads
+    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step transport -Job $Job -TimeoutSec (Get-HarnessTransportTimeout -Scenario $s -LuaTimeoutSec ([double]$Ctx.Limits.luaTimeoutSec))
+    $recorded = @(Get-ChildItem -LiteralPath $recordDir -Recurse -File -Force -ErrorAction SilentlyContinue)
+    if ($recorded.Count) { return New-HarnessOutcome FAIL "$($recorded.Count) file(s) appeared in the record directory of the project: something was recorded" }
+    if ($lua.Why) { return New-HarnessOutcome INCOMPLETE $lua.Why }
+    $f = $lua.Result
+    $bad = [Collections.Generic.List[string]]::new()
+    foreach ($p in (Test-HarnessHostReadback -Facts $f -Block $s.block -Sr $s.sr -AnticipativeFx $af -RunFxWhenStopped $rfs)) { $bad.Add($p) }
+    foreach ($p in (Test-HarnessFxReport -Facts $f -Layout $Layout -Names $Ctx.Names -Plugins $Ctx.Config.Plugins -Reads $Reads)) { $bad.Add($p) }
+    if ($bad.Count) { return New-HarnessOutcome FAIL ($bad -join '; ') }
+    $idents = @{ 'harness-block-probe' = $Ctx.ToolJsfx['harness-block-probe'].Ident; 'harness-feed' = $Ctx.ToolJsfx['harness-feed'].Ident }
+    $gap = Test-HarnessTransportSetup -Facts $f -Scenario $s -Idents $idents -FxCount @($Layout.Tracks[$Job.track].Fx).Count
+    if ($gap.Count) { return New-HarnessOutcome INCOMPLETE ($gap -join '; ') }
+    $perState = [Collections.Generic.List[object]]::new()
+    $judged = for ($i = 0; $i -lt $s.states.Count; $i++) {
+        $st = $s.states[$i]
+        $row = Read-HarnessTransportRow $f ($i + 1)
+        $j = Test-HarnessTransportState -State $st -Row $row -HasFeed:($null -ne $s.feed)
+        $one = [ordered]@{ name = $st.Name; transport = $st.Transport; arm = $st.Arm; monitor = $st.Monitor; windowSamples = $st.Samples; status = $j.Status; problems = @($j.Problems) }
+        if ($row) { foreach ($p in $row.PSObject.Properties) { $one[$p.Name] = $p.Value } }
+        $perState.Add($one)
+        $j
+    }
+    $seen = [ordered]@{ track = $s.track; runFxWhenStopped = $rfs; runFxAfterStopMs = $f['cfg_runafterstop']; settleSamples = $f['settle']; feed = $feed; states = $perState.ToArray() }
+    New-HarnessOutcome (Get-HarnessOutcomeStatus @($judged | ForEach-Object { $_.Status })) (@($judged | ForEach-Object { $_.Line }) -join ' | ') $seen
 }
 
 # A driver step that never finishes: timeout and kill must both end as INCOMPLETE, with the process gone and every
@@ -574,7 +662,7 @@ function Invoke-HarnessHangScenario($Ctx, $s) {
 
 $script:Handlers = @{
     render = ${function:Invoke-HarnessRenderScenario}; device = ${function:Invoke-HarnessDeviceScenario}; savereopen = ${function:Invoke-HarnessSaveReopenScenario}
-    instances = ${function:Invoke-HarnessInstancesScenario}; hang = ${function:Invoke-HarnessHangScenario}
+    instances = ${function:Invoke-HarnessInstancesScenario}; transport = ${function:Invoke-HarnessTransportScenario}; hang = ${function:Invoke-HarnessHangScenario}
 }
 
 function Get-HarnessScenarioKinds { , @($script:Handlers.get_Keys() | Sort-Object) }
@@ -609,4 +697,4 @@ function Invoke-HarnessScenario {
 Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, Hide-HarnessFacts, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
     Get-HarnessLayout, Get-HarnessRunFiles, Get-HarnessReferenceName, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
     Get-HarnessScenarioKinds, Get-HarnessApi, Invoke-HarnessScenario, Get-HarnessSkipMarkerHit, Get-HarnessWorkrender, Test-HarnessStateProof, Invoke-HarnessCompare,
-    Test-HarnessHostReadback, Test-HarnessReopenFacts
+    Test-HarnessHostReadback, Test-HarnessReopenFacts, Get-HarnessRunAllOnStop

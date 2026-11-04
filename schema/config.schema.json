@@ -461,7 +461,7 @@
         "mode": {
           "type": "string",
           "enum": ["offline", "1x", "online"],
-          "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+          "description": "offline: full-speed offline render; 1x: REAPER's 1x offline render, at real-time speed but still offline; online: online render, in real time. Whether a plugin is told it runs offline depends on REAPER's preference to inform plugins of the offline rendering state, which the tool does not set"
         },
         "bypass": {
           "anyOf": [
@@ -490,7 +490,7 @@
           "items": {
             "type": "string",
             "enum": ["offline", "1x", "online"],
-            "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+            "description": "offline: full-speed offline render; 1x: REAPER's 1x offline render, at real-time speed but still offline; online: online render, in real time. Whether a plugin is told it runs offline depends on REAPER's preference to inform plugins of the offline rendering state, which the tool does not set"
           },
           "minItems": 1,
           "uniqueItems": true
@@ -554,9 +554,87 @@
         "anticipativeFx": {
           "type": "boolean",
           "description": "REAPER's anticipative FX processing (default true, as REAPER ships)"
+        },
+        "runFxWhenStopped": {
+          "type": "boolean",
+          "description": "REAPER's \"Run FX when stopped\" (default true, as REAPER ships); off, the FX of a track that is not armed and has no media are not run while stopped, nor (measured on REAPER 7.82) while playing"
         }
       },
       "additionalProperties": false
+    },
+    "transportExpect": {
+      "type": "object",
+      "properties": {
+        "called": {
+          "type": "boolean",
+          "description": "the FX chain of the tested track is run in this state (true) or not at all (false)"
+        },
+        "input": {
+          "type": "string",
+          "enum": ["silent", "signal"],
+          "description": "silent: every block the chain gets is all zeros; signal: none is"
+        },
+        "channels": {
+          "type": "string",
+          "enum": ["left", "same", "different"],
+          "description": "left: signal on the left only; same: left and right equal sample for sample; different: both carry signal and differ"
+        },
+        "monitoring": {
+          "type": "boolean",
+          "description": "REAPER reports input monitoring in effect on the tested track (B_RECMON_IN_EFFECT)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "transportState": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["stop", "play", "pause"]
+        },
+        "arm": {
+          "type": "boolean",
+          "description": "the tested track is armed (it never records: the harness never starts a recording)"
+        },
+        "monitor": {
+          "type": "string",
+          "enum": ["off", "on", "auto"],
+          "description": "input monitoring of the tested track: off, on, or auto (REAPER's tape style: only while not playing)"
+        },
+        "samples": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 115200000,
+          "description": "length of the observation window in device samples, default 2 x sr"
+        },
+        "expect": {
+          "$ref": "#/$defs/transportExpect"
+        }
+      },
+      "required": ["name", "transport", "arm", "monitor"],
+      "additionalProperties": false
+    },
+    "feed": {
+      "type": "object",
+      "properties": {
+        "wav": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001f]{1,260}$",
+          "description": "a path relative to the configuration file, inside its directory"
+        },
+        "channels": {
+          "type": "string",
+          "enum": ["left", "same", "different"],
+          "description": "left: the source's first channel on the left, the right silent; same: the first channel on both; different: the source's two channels (default)"
+        }
+      },
+      "additionalProperties": false,
+      "description": "the input fed to the tested track through its input FX chain: the harness test signal, or a WAV file at the scenario sample rate"
     },
     "stem": {
       "anyOf": [
@@ -704,7 +782,7 @@
               "mode": {
                 "type": "string",
                 "enum": ["offline", "1x", "online"],
-                "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+                "description": "offline: full-speed offline render; 1x: REAPER's 1x offline render, at real-time speed but still offline; online: online render, in real time. Whether a plugin is told it runs offline depends on REAPER's preference to inform plugins of the offline rendering state, which the tool does not set"
               },
               "sr": {
                 "type": "integer",
@@ -920,7 +998,7 @@
               "mode": {
                 "type": "string",
                 "enum": ["offline", "1x", "online"],
-                "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+                "description": "offline: full-speed offline render; 1x: REAPER's 1x offline render, at real-time speed but still offline; online: online render, in real time. Whether a plugin is told it runs offline depends on REAPER's preference to inform plugins of the offline rendering state, which the tool does not set"
               },
               "sr": {
                 "type": "integer",
@@ -1038,6 +1116,75 @@
             "required": ["id", "kind"],
             "additionalProperties": false
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "transport"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "transport"
+              },
+              "layout": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "track": {
+                "type": "string",
+                "pattern": "^[^\"\\u0000-\\u001f]{1,64}$",
+                "description": "the tested track, by name; may be left out when the layout has one track"
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "host": {
+                "$ref": "#/$defs/host"
+              },
+              "matrix": {
+                "$ref": "#/$defs/deviceMatrix"
+              },
+              "feed": {
+                "$ref": "#/$defs/feed"
+              },
+              "settleSamples": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 115200000,
+                "description": "device samples to let pass after each change of state before its window opens; default: REAPER's \"run FX after stopping\" time plus half a second"
+              },
+              "states": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/transportState"
+                },
+                "minItems": 1,
+                "maxItems": 64
+              }
+            },
+            "required": ["id", "kind", "layout", "states"],
+            "additionalProperties": false
+          }
         }
       ]
     },
@@ -1090,7 +1237,7 @@
               "mode": {
                 "type": "string",
                 "enum": ["offline", "1x", "online"],
-                "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+                "description": "offline: full-speed offline render; 1x: REAPER's 1x offline render, at real-time speed but still offline; online: online render, in real time. Whether a plugin is told it runs offline depends on REAPER's preference to inform plugins of the offline rendering state, which the tool does not set"
               },
               "sr": {
                 "type": "integer",
@@ -1316,7 +1463,7 @@
               "mode": {
                 "type": "string",
                 "enum": ["offline", "1x", "online"],
-                "description": "offline: full-speed offline render; 1x: real-time speed but plugins are told it is offline; online: real-time render, plugins are told it is real time"
+                "description": "offline: full-speed offline render; 1x: REAPER's 1x offline render, at real-time speed but still offline; online: online render, in real time. Whether a plugin is told it runs offline depends on REAPER's preference to inform plugins of the offline rendering state, which the tool does not set"
               },
               "sr": {
                 "type": "integer",
@@ -1445,6 +1592,80 @@
               }
             },
             "required": ["id", "kind", "expect", "expectDetail"],
+            "additionalProperties": false
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "transport"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,59}$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "transport"
+              },
+              "layout": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "track": {
+                "type": "string",
+                "pattern": "^[^\"\\u0000-\\u001f]{1,64}$",
+                "description": "the tested track, by name; may be left out when the layout has one track"
+              },
+              "sr": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 384000,
+                "description": "sample rate in Hz"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 8192,
+                "description": "audio device block size in samples"
+              },
+              "host": {
+                "$ref": "#/$defs/host"
+              },
+              "feed": {
+                "$ref": "#/$defs/feed"
+              },
+              "settleSamples": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 115200000,
+                "description": "device samples to let pass after each change of state before its window opens; default: REAPER's \"run FX after stopping\" time plus half a second"
+              },
+              "states": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/transportState"
+                },
+                "minItems": 1,
+                "maxItems": 64
+              },
+              "expect": {
+                "type": "string",
+                "enum": ["PASS", "FAIL", "SKIPPED", "INCOMPLETE", "REFUSED"]
+              },
+              "expectDetail": {
+                "type": "string",
+                "description": "regex (.NET, case sensitive) the outcome detail must match"
+              }
+            },
+            "required": ["id", "kind", "layout", "states", "expect", "expectDetail"],
             "additionalProperties": false
           }
         }

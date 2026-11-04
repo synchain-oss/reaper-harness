@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:Src = Join-Path $PSScriptRoot '../src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $PSScriptRoot 'TempDir.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'FakeReaper.psm1') -ErrorAction Stop
 
@@ -709,6 +709,13 @@ function Get-HostCases {
         $r = & $v '#32770' $true $box
         & $add "dialog: '$box' is no plugin window: stuck (unknown-dialog)" $true ($r.Action -eq 'Fatal' -and $r.Name -eq 'unknown-dialog')
     }
+    $fin = & $v '#32770' $true 'Finished in 0:06 (1.0x realtime)'
+    & $add 'dialog: the finished render window ("Finished in ...", as REAPER 7.82 titles it) is let be: it stays until REAPER quits' $false ($fin.Action -eq 'Benign' -and $fin.Name -ceq 'render-finished')
+    # Anchored, case-sensitive, with the blank after it, and never with trouble in the title
+    foreach ($box in 'Finished', 'Finished in', 'Finish in 0:06', 'finished in 0:06', 'FINISHED IN 0:06', ' Finished in 0:06', 'Fake Finished in 0:06', 'Finished in 0:06 (error)', 'Finished in 0:06 - render failed') {
+        $r = & $v '#32770' $true $box
+        & $add "dialog: '$box' is no finished render window: stuck (unknown-dialog)" $true ($r.Action -eq 'Fatal' -and $r.Name -eq 'unknown-dialog')
+    }
     & $add 'dialog: the evaluation licence reminder is never clicked away; stuck, and named' $true (($nag = & $v '#32770' $true 'About REAPER v7.82/win64 rev 1 (Oct') -and $nag.Action -eq 'Fatal' -and $nag.Name -eq 'license-nag')
     foreach ($pair in @(@('Project Load Warning', 'project-load-warning'), @('REAPER Error', 'reaper-error'), @('Select files to save or delete', 'record-save-prompt'), @('REAPER', 'no-audio-device'), @('Brand New Box', 'unknown-dialog'))) {
         $r = & $v '#32770' $true $pair[0]
@@ -1022,7 +1029,7 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     $configFile = Join-Path $RepoRoot 'tests/fixtures/config.json'
     $extensions = Import-HarnessExtensions (Read-HarnessConfigExtensions $configFile)
     $conf = Read-HarnessConfig -Path $configFile -Kinds $extensions.Kinds
-    & $add 'configuration: the fixture configuration is valid; the matrix expands to four scenarios' $false ($conf.Name -eq 'fixture' -and @($conf.Scenarios).Count -eq 20 -and @($conf.Scenarios | Where-Object { $_.id -like 'chain-*-4*' }).Count -eq 4)
+    & $add 'configuration: the fixture configuration is valid; the matrix expands to four scenarios' $false ($conf.Name -eq 'fixture' -and @($conf.Scenarios).Count -eq 23 -and @($conf.Scenarios | Where-Object { $_.id -like 'chain-*-4*' }).Count -eq 4)
     $text = [IO.File]::ReadAllText($configFile)
     $problems = {
         param([scriptblock]$Edit)
@@ -1088,6 +1095,31 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'savereopen with 0 cycles'; E = { param($c) (& $scenario $c 'states-reopen')['cycles'] = 0 }; M = 'cycles' }
         @{ L = 'an unknown host setting'; E = { param($c) (& $scenario $c 'pdc')['host']['lowLatency'] = $true }; M = "unknown key 'lowLatency'" }
         @{ L = 'a render mode axis in the matrix of a device scenario (the device step renders nothing)'; E = { param($c) (& $scenario $c 'bus-device')['matrix'] = [ordered]@{ mode = @('offline', '1x') } }; M = "matrix: unknown key 'mode'" }
+        @{ L = 'a transport state with an unknown transport (recording is no state the harness can be asked for)'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['transport'] = 'record' }; M = 'states[0].transport' }
+        @{ L = 'a transport state with an unknown monitoring mode'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['monitor'] = 'always' }; M = 'states[0].monitor' }
+        @{ L = 'a transport state without arm'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0].Remove('arm') }; M = "missing 'arm'" }
+        @{ L = 'a transport state whose arm is not a boolean'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['arm'] = 1 }; M = 'states[0].arm' }
+        @{ L = 'an unknown key in a transport state'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['record'] = $true }; M = "unknown key 'record'" }
+        @{ L = 'an unknown key in the expectation of a state'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['expect']['latency'] = 0 }; M = "unknown key 'latency'" }
+        @{ L = 'an unknown input expectation'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['expect']['input'] = 'loud' }; M = 'expect.input' }
+        @{ L = 'an unknown channel layout of a feed'; E = { param($c) (& $scenario $c 'monitor-states')['feed']['channels'] = 'both' }; M = 'feed.channels' }
+        @{ L = 'a state window shorter than 64 samples'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['samples'] = 32 }; M = 'states[0].samples' }
+        @{ L = 'a negative settle time'; E = { param($c) (& $scenario $c 'monitor-states')['settleSamples'] = -1 }; M = 'settleSamples' }
+        @{ L = 'a transport scenario without states'; E = { param($c) (& $scenario $c 'monitor-states')['states'] = @() }; M = 'states: needs at least 1' }
+        @{ L = 'a transport scenario of 65 states'; E = { param($c) $t = & $scenario $c 'monitor-states'; $firstState = $t['states'][0]; $t['states'] = @(foreach ($i in 1..65) { $n = ConvertFrom-HarnessJson (ConvertTo-HarnessJsonText -Value $firstState); $n['name'] = "s$i"; $n }) }; M = 'has more than 64 items' }
+        @{ L = 'a render mode axis in the matrix of a transport scenario (nothing is rendered)'; E = { param($c) (& $scenario $c 'monitor-states')['matrix'] = [ordered]@{ mode = @('offline', '1x') } }; M = "matrix: unknown key 'mode'" }
+        @{ L = 'Run FX when stopped that is not a boolean'; E = { param($c) (& $scenario $c 'monitor-states')['host'] = [ordered]@{ runFxWhenStopped = 'yes' } }; M = 'runFxWhenStopped' }
+        @{ L = 'a state name that breaks the pattern'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['name'] = 'a b' }; M = 'states[0].name' }
+        @{ L = 'a tool JSFX of the transport kind configured as a plugin'; E = { param($c) $c['plugins']['delay']['jsfx'] = 'harness-feed' }; M = 'plugins.delay.jsfx' }
+        @{ L = 'a state name used twice'; E = { param($c) (& $scenario $c 'monitor-states')['states'][1]['name'] = 'stopped-unarmed' }; M = "state name 'stopped-unarmed' is used twice" }
+        @{ L = 'no state with an expectation (the scenario would judge nothing)'; E = { param($c) foreach ($st in (& $scenario $c 'monitor-states')['states']) { $st.Remove('expect') } }; M = 'no state has an expect' }
+        @{ L = 'an empty expectation'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['expect'] = [ordered]@{} }; M = 'needs at least one of called, input, channels, monitoring' }
+        @{ L = 'called false together with an input'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['expect'] = [ordered]@{ called = $false; input = 'silent' } }; M = 'called false leaves no input to judge' }
+        @{ L = 'input silent together with channels'; E = { param($c) (& $scenario $c 'monitor-states')['states'][0]['expect'] = [ordered]@{ input = 'silent'; channels = 'left' } }; M = 'channels describe a signal' }
+        @{ L = 'a state window of fewer than 4 device blocks'; E = { param($c) $t = & $scenario $c 'monitor-states'; $t['block'] = 512; $t['states'][0]['samples'] = 1024 }; M = '1024 samples are less than 4 blocks of 512' }
+        @{ L = 'a tested track that is not in the layout'; E = { param($c) (& $scenario $c 'monitor-states')['track'] = 'Ghost' }; M = "track: 'Ghost' is not a track of layout 'chain'" }
+        @{ L = 'a layout of several tracks without naming the tested one'; E = { param($c) (& $scenario $c 'monitor-states')['layout'] = 'bus' }; M = "layout 'bus' has 3 tracks: name the tested one in 'track'" }
+        @{ L = 'a negative id that clashes with the built-in transport one'; E = { param($c) $c['negative'][0]['id'] = 'neg-transport-probe' }; M = 'neg-transport-probe' }
     )
     foreach ($mu in $mutations) {
         $found = & $problems $mu.E
@@ -1123,7 +1155,7 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'JSON: keys named Count, Keys and Values are written back as they were read' $false ((ConvertTo-HarnessJsonText -Value (ConvertFrom-HarnessJson $jsonText)) -ceq $jsonText)
     # Selection
     $picked = Select-HarnessScenarios -Config $conf
-    & $add 'selection: without -Only every scenario and negative case (own and built-in) is picked' $false ($picked.Positive.Count -eq 20 -and $picked.Negative.Count -eq 11)
+    & $add 'selection: without -Only every scenario and negative case (own and built-in, the transport one too) is picked' $false ($picked.Positive.Count -eq 23 -and $picked.Negative.Count -eq 13 -and @($picked.Negative)[-1].id -ceq 'neg-transport-probe')
     # Defaults and the parts of the extended layouts
     $rt = @($conf.Layouts['routing'].Tracks)
     & $add 'configuration: a send is post-fader at volume 1 unless given; master send is on unless turned off; pan and mute as given' $false (
@@ -1154,7 +1186,7 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'selection: an -Only that is not a valid regex is a usage error' $true (Test-Usage { Select-HarnessScenarios -Config $conf -Only '(' } '*not a valid regex*')
     & $add 'learning: needed by every scenario with a configured layout, by instances and by extension kinds; never by built-in negative cases' $false (
         (Test-HarnessNeedsLearn @($conf.Scenarios)[0]) -and (Test-HarnessNeedsLearn (@($conf.Scenarios) | Where-Object id -eq 'instances')) -and (Test-HarnessNeedsLearn (@($conf.Scenarios) | Where-Object id -eq 'ext-count')) -and
-        @(Get-HarnessBuiltinNegatives | Where-Object { Test-HarnessNeedsLearn $_ }).Count -eq 0)
+        @(Get-HarnessBuiltinNegatives -Transport | Where-Object { Test-HarnessNeedsLearn $_ }).Count -eq 0)
     # The schema file is generated from the validator: it must be current, and Test-Json must agree with the validator
     $schemaFile = Join-Path $RepoRoot 'schema/config.schema.json'
     $schemaText = [IO.File]::ReadAllText($schemaFile)
@@ -1162,13 +1194,17 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     $agree = { param([string]$Json, [bool]$Accepted) $schemaOk = try { Test-Json -Json $Json -Schema $schemaText -ErrorAction Stop } catch { $false }; $schemaOk -eq $Accepted }
     & $add 'schema: Test-Json accepts the fixture configuration, like the validator' $false (& $agree $text $true)
     $structural = @($mutations | Where-Object { $_.L -in 'an unknown key at the top', 'an unknown key in a scenario', 'schema 2', 'a string where a number belongs', 'a sample rate out of range', 'a scenario id that breaks the pattern', 'an unknown expected outcome', 'a negative case without expectDetail',
-            'a state with both a template and a state file', 'a template state without the FX number', 'an unknown JSFX', 'an unknown send mode', 'a pan out of range', 'a range of one number', 'a range of three numbers', 'savereopen with 0 cycles', 'an unknown host setting', 'a render mode axis in the matrix of a device scenario (the device step renders nothing)' })
+            'a state with both a template and a state file', 'a template state without the FX number', 'an unknown JSFX', 'an unknown send mode', 'a pan out of range', 'a range of one number', 'a range of three numbers', 'savereopen with 0 cycles', 'an unknown host setting', 'a render mode axis in the matrix of a device scenario (the device step renders nothing)',
+            'a transport state with an unknown transport (recording is no state the harness can be asked for)', 'a transport state with an unknown monitoring mode', 'a transport state without arm', 'a transport state whose arm is not a boolean',
+            'an unknown key in a transport state', 'an unknown key in the expectation of a state', 'an unknown input expectation', 'an unknown channel layout of a feed', 'a state window shorter than 64 samples', 'a negative settle time',
+            'a transport scenario without states', 'a transport scenario of 65 states', 'a render mode axis in the matrix of a transport scenario (nothing is rendered)', 'Run FX when stopped that is not a boolean', 'a state name that breaks the pattern',
+            'a tool JSFX of the transport kind configured as a plugin' })
     $disagree = @(foreach ($mu in $structural) {
             $raw = ConvertFrom-HarnessJson $text
             & $mu.E $raw
             if (-not (& $agree (ConvertTo-HarnessJsonText -Value $raw) $false)) { $mu.L }
         })
-    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 18 -and $disagree.Count -eq 0)
+    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 34 -and $disagree.Count -eq 0)
     $cases
 }
 
@@ -1657,6 +1693,291 @@ function Get-ExampleCases([string]$RepoRoot) {
     $cases
 }
 
+# ---------------------------------------------------------------- transport states
+function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    # A state as the configuration gives it, and what the driver reports for it: by default armed, monitoring on,
+    # stopped, a stereo feed with different channels in each of 10 blocks
+    $state = {
+        param([hashtable]$Expect, [string]$Transport = 'stop', [bool]$Arm = $true, [string]$Monitor = 'on')
+        $x = ($null -eq $Expect) ? $null : [pscustomobject]@{ Called = $Expect['called']; Input = $Expect['input']; Channels = $Expect['channels']; Monitoring = $Expect['monitoring'] }
+        [pscustomobject]@{ Name = 's'; Transport = $Transport; Arm = $Arm; Monitor = $Monitor; Samples = 4800; Expect = $x }
+    }
+    $row = {
+        param([hashtable]$Set = @{})
+        $v = [ordered]@{ clock = 10; clock_samples = 5120; blocks = 10; samples = 5120; silent = 0; signal = 10; left = 10; right = 10; equal = 0; fed = 10; fed_samples = 5120; playstate = 0; arm = 1; monitor = 1; monitoring = 1 }
+        foreach ($k in $Set.get_Keys()) { $v[$k] = $Set[$k] }
+        [pscustomobject]$v
+    }
+    $judge = { param($Expect, [hashtable]$Set = @{}, [string]$Transport = 'stop', [bool]$Arm = $true, [string]$Monitor = 'on') Test-HarnessTransportState -State (& $state $Expect $Transport $Arm $Monitor) -Row (& $row $Set) }
+    $quiet = @{ silent = 10; signal = 0; left = 0; right = 0 }
+    $idle = @{ blocks = 0; samples = 0; silent = 0; signal = 0; left = 0; right = 0 }
+    $ok = & $judge @{ called = $true; input = 'signal'; channels = 'different'; monitoring = $true }
+    & $add "transport: armed, monitoring on, a stereo feed in every block: PASS, and the line says what was seen ($($ok.Line))" $false (
+        $ok.Status -ceq 'PASS' -and $ok.Line -ceq 's: blocks=10/10 silent=0 signal=10 left=10 right=10 same=0 transport=stop monitoring=1' -and @($ok.Problems).Count -eq 0)
+    $fails = @(
+        @{ L = 'called, and the chain ran in no block'; X = @{ called = $true }; S = $idle; W = 'not called (0 blocks while the device ran 10)' }
+        @{ L = 'not called, and the chain ran'; X = @{ called = $false }; S = @{ blocks = 3 }; W = 'called in 3 blocks' }
+        @{ L = 'silent, with signal in some blocks'; X = @{ input = 'silent' }; S = @{ silent = 8; signal = 2; left = 2; right = 2 }; W = 'signal in 2 of 10 blocks' }
+        @{ L = 'a signal, with a silent block'; X = @{ input = 'signal' }; S = @{ silent = 1; signal = 9; left = 9; right = 9 }; W = 'silent in 1 of 10 blocks' }
+        @{ L = 'an input expected of a chain that never ran'; X = @{ input = 'silent' }; S = $idle; W = 'not called, so it has no input' }
+        @{ L = 'left only, with signal on the right'; X = @{ channels = 'left' }; S = @{ right = 3 }; W = 'signal on the right in 3 of 10 blocks' }
+        @{ L = 'left only, the left missing in some blocks'; X = @{ channels = 'left' }; S = @{ left = 7; right = 0 }; W = 'no signal on the left in 3 of 10 blocks with signal' }
+        @{ L = 'left only, no signal at all'; X = @{ channels = 'left' }; S = $quiet; W = 'no signal' }
+        @{ L = 'the same on both, differing in some blocks'; X = @{ channels = 'same' }; S = @{ equal = 8 }; W = 'left and right differ in 2 of 10 blocks with signal' }
+        @{ L = 'the same on both, no signal'; X = @{ channels = 'same' }; S = $quiet; W = 'no signal' }
+        @{ L = 'different, the left missing in a block'; X = @{ channels = 'different' }; S = @{ left = 9 }; W = 'no signal on the left in 1 of 10 blocks with signal' }
+        @{ L = 'different, the right missing in a block'; X = @{ channels = 'different' }; S = @{ right = 9 }; W = 'no signal on the right in 1 of 10 blocks with signal' }
+        @{ L = 'different, the same on both in a block'; X = @{ channels = 'different' }; S = @{ equal = 1 }; W = 'left and right are the same in 1 of 10 blocks with signal' }
+        @{ L = 'different, no signal'; X = @{ channels = 'different' }; S = $quiet; W = 'no signal' }
+        @{ L = 'monitoring expected, and not in effect'; X = @{ monitoring = $true }; S = @{ monitoring = 0 }; W = 'monitoring in effect reads 0, expected 1' }
+        @{ L = 'no monitoring expected, and in effect'; X = @{ monitoring = $false }; S = @{}; W = 'monitoring in effect reads 1, expected 0' }
+    )
+    foreach ($c in $fails) {
+        $j = & $judge $c.X $c.S
+        & $add "transport: $($c.L) is FAIL: $($c.W) ($($j.Line))" $true ($j.Status -ceq 'FAIL' -and $j.Line.EndsWith("; failed: $($c.W)", [StringComparison]::Ordinal) -and (@($j.Problems) -join '|') -ceq $c.W)
+    }
+    $passes = @(
+        @{ L = 'called false, and the chain never ran'; X = @{ called = $false }; S = $idle }
+        @{ L = 'called, silent in every block, no monitoring'; X = @{ called = $true; input = 'silent'; monitoring = $false }; S = $quiet + @{ monitoring = 0 } }
+        @{ L = 'left only'; X = @{ channels = 'left' }; S = @{ right = 0 } }
+        @{ L = 'a signal, the same on both'; X = @{ input = 'signal'; channels = 'same' }; S = @{ equal = 10 } }
+    )
+    foreach ($c in $passes) {
+        $j = & $judge $c.X $c.S
+        & $add "transport: $($c.L) is PASS ($($j.Line))" $false ($j.Status -ceq 'PASS' -and @($j.Problems).Count -eq 0 -and $j.Line -cnotmatch 'failed|no evidence')
+    }
+    $two = & $judge @{ called = $true; input = 'signal'; monitoring = $true } ($idle + @{ monitoring = 0 })
+    & $add "transport: every failed criterion is listed in order; a chain that never ran is not blamed for its input as well ($($two.Line))" $true (
+        $two.Status -ceq 'FAIL' -and $two.Line.EndsWith('; failed: not called (0 blocks while the device ran 10); monitoring in effect reads 0, expected 1', [StringComparison]::Ordinal))
+    # Numbers that describe another state than the one asked for are no evidence: INCOMPLETE, even where the expectation fails
+    $gaps = @(
+        @{ L = 'a device that ran less than the window'; S = @{ clock_samples = 4000 }; W = 'the device ran 4000 of 4800 samples' }
+        @{ L = 'the transport reading play when stop was asked for'; S = @{ playstate = 1 }; W = 'the transport reads play, expected stop' }
+        @{ L = 'the transport reading the record bit'; S = @{ playstate = 5 }; W = 'the transport reads 5, expected stop' }
+        @{ L = 'arm reading off'; S = @{ arm = 0 }; W = 'arm reads 0, expected 1' }
+        @{ L = 'the monitoring mode reading auto when on was asked for'; S = @{ monitor = 2 }; W = 'monitoring mode reads 2, expected 1' }
+    )
+    foreach ($c in $gaps) {
+        $j = & $judge @{ called = $false } $c.S
+        & $add "transport: $($c.L) is INCOMPLETE, not FAIL ($($j.Line))" $true ($j.Status -ceq 'INCOMPLETE' -and $j.Line.EndsWith("; no evidence: $($c.W)", [StringComparison]::Ordinal))
+    }
+    $unseen = Test-HarnessTransportState -State (& $state @{ called = $true }) -Row $null
+    & $add 'transport: a state the driver did not report is INCOMPLETE (not observed)' $true ($unseen.Status -ceq 'INCOMPLETE' -and $unseen.Line -ceq 's: not observed')
+    # The feed in the window of an armed state: a silent input proves nothing when the feed played nothing
+    $feedIdle = @{ fed = 0; fed_samples = 0; silent = 10; signal = 0; left = 0; right = 0 }
+    $noFeedBlocks = '; no evidence: the feed played no block in the window although the track is armed'
+    $idleSilent = Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row $feedIdle) -HasFeed
+    & $add "transport: armed with a feed that played nothing is INCOMPLETE, even where 'silent' holds ($($idleSilent.Line))" $true ($idleSilent.Status -ceq 'INCOMPLETE' -and $idleSilent.Line.EndsWith($noFeedBlocks, [StringComparison]::Ordinal))
+    $idleRecorded = Test-HarnessTransportState -State (& $state $null) -Row (& $row $feedIdle) -HasFeed
+    & $add 'transport: armed with a feed that played nothing is INCOMPLETE in a state without expectations too' $true ($idleRecorded.Status -ceq 'INCOMPLETE' -and $idleRecorded.Line.EndsWith($noFeedBlocks, [StringComparison]::Ordinal))
+    $emptyCalls = Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row @{ fed = 3; fed_samples = 0; silent = 10; signal = 0; left = 0; right = 0 }) -HasFeed
+    & $add 'transport: armed with a feed that was called without samples is INCOMPLETE' $true ($emptyCalls.Status -ceq 'INCOMPLETE' -and $emptyCalls.Line.EndsWith($noFeedBlocks, [StringComparison]::Ordinal))
+    & $add 'transport: armed with a feed that played is judged as usual' $false ((Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row @{ silent = 10; signal = 0; left = 0; right = 0 }) -HasFeed).Status -ceq 'PASS')
+    & $add 'transport: not armed, the feed is not expected to play' $false ((Test-HarnessTransportState -State (& $state @{ called = $true } 'stop' $false 'off') -Row (& $row @{ fed = 0; fed_samples = 0; arm = 0; monitor = 0 }) -HasFeed).Status -ceq 'PASS')
+    & $add 'transport: armed in a scenario without a feed, nothing is expected to play' $false ((Test-HarnessTransportState -State (& $state @{ input = 'silent' }) -Row (& $row $feedIdle)).Status -ceq 'PASS')
+    $rec = & $judge $null $idle
+    & $add 'transport: a state without expectations is recorded, never judged' $false ($rec.Status -ceq 'recorded' -and @($rec.Problems).Count -eq 0 -and $rec.Line -cnotmatch 'failed')
+    & $add 'transport: paused, playing, auto monitoring and unarmed read back as asked' $false (
+        (& $judge @{ called = $true } @{ playstate = 2 } 'pause').Status -ceq 'PASS' -and (& $judge @{ called = $true } @{ playstate = 1 } 'play').Status -ceq 'PASS' -and
+        (& $judge @{ called = $true } @{ monitor = 2 } 'stop' $true 'auto').Status -ceq 'PASS' -and (& $judge @{ called = $true } @{ arm = 0; monitor = 0 } 'stop' $false 'off').Status -ceq 'PASS')
+    # The numbers as the driver writes them
+    $facts = @{}
+    foreach ($k in 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'fed', 'fed_samples', 'playstate', 'arm', 'monitor', 'monitoring') { $facts["st2_$k"] = '7.0' }
+    $r2 = Read-HarnessTransportRow $facts 2
+    & $add 'transport: the numbers of state n are read from st<n>_ (Lua may write whole numbers as 7.0)' $false ($null -ne $r2 -and $r2.blocks -eq 7 -and $r2.monitoring -eq 7 -and $null -eq (Read-HarnessTransportRow $facts 1))
+    foreach ($badValue in $null, 'seven', 'NaN', 'inf', '-nan(ind)') {
+        $f2 = $facts.Clone()
+        if ($null -eq $badValue) { $f2.Remove('st2_equal') } else { $f2['st2_equal'] = $badValue }
+        $rowRead = try { Read-HarnessTransportRow $f2 2 } catch { "threw: $($_.Exception.Message)" }
+        & $add "transport: a state with a number $(($null -eq $badValue) ? 'missing' : "reading '$badValue'") is not observed" $true ($null -eq $rowRead)
+    }
+    foreach ($fedField in 'fed', 'fed_samples') {
+        $f3 = $facts.Clone(); $f3.Remove("st2_$fedField")
+        & $add "transport: a state without $fedField is not observed" $true ($null -eq (Read-HarnessTransportRow $f3 2))
+    }
+    # The setup the driver reports
+    $idents = @{ 'harness-block-probe' = 'reaper-harness/harness-block-probe.jsfx'; 'harness-feed' = 'reaper-harness/harness-feed.jsfx' }
+    $fed = [pscustomobject]@{ sr = 48000; states = @([pscustomobject]@{ Arm = $false }, [pscustomobject]@{ Arm = $true }); feed = [pscustomobject]@{ FileChannels = 2 } }
+    $setup = {
+        param([hashtable]$Set = @{}, [string[]]$Drop = @(), $Scen = $fed)
+        $f = @{ probe_ident = $idents['harness-block-probe']; probe_idx = '0'; probe_fx_count = '3'; clock_ident = $idents['harness-block-probe']; record_path = 'ok'; states_done = '2'
+            feed_ident = $idents['harness-feed']; feed_handle = '1'; feed_channels = '2'; feed_rate = '48000' }
+        foreach ($k in $Set.get_Keys()) { $f[$k] = $Set[$k] }
+        foreach ($k in $Drop) { $f.Remove($k) }
+        @(Test-HarnessTransportSetup -Facts $f -Scenario $Scen -Idents $idents -FxCount 2)
+    }
+    & $add 'transport setup: the probes of the harness first in the chain and on the clock, the record path, every state, the feed opened at the rate: no problem' $false ((& $setup).Count -eq 0)
+    $setupBad = @(
+        @{ L = 'a probe that is not the copy of the harness'; S = @{ probe_ident = 'other/probe.jsfx' }; W = "not the harness's own first in its chain" }
+        @{ L = 'the probe not first in the chain'; S = @{ probe_idx = '1' }; W = "not the harness's own first in its chain" }
+        @{ L = 'a chain that does not hold the probe'; S = @{ probe_fx_count = '2' }; W = 'the tested track has 2 FX with the probe, expected 3' }
+        @{ L = 'a clock track without the probe'; S = @{ clock_ident = '' }; W = 'the clock track has no block probe' }
+        @{ L = 'a record path that could not be set'; S = @{ record_path = 'failed' }; W = 'the record path of the project could not be set' }
+        @{ L = 'a state not observed'; S = @{ states_done = '1' }; W = '1 of 2 states were observed' }
+        @{ L = 'a feed that is not the copy of the harness'; S = @{ feed_ident = 'other/feed.jsfx' }; W = "the feed of the input chain is not the harness's own" }
+        @{ L = 'a feed that reported nothing'; D = @('feed_handle'); W = 'the feed reported nothing' }
+        @{ L = 'a feed that could not open its file'; S = @{ feed_handle = '-1' }; W = 'the feed could not open its source' }
+        @{ L = 'a feed handle below -2'; S = @{ feed_handle = '-3' }; W = 'the feed could not open its source' }
+        @{ L = 'a feed that never ran although a state arms the track'; S = @{ feed_handle = '-2'; feed_channels = '0'; feed_rate = '0' }; W = 'the feed never ran although a state arms the track' }
+        @{ L = 'a feed that opened another channel count'; S = @{ feed_channels = '1' }; W = 'with 1 channels, expected 2' }
+        @{ L = 'a feed that opened another rate'; S = @{ feed_rate = '44100' }; W = 'at 44100 Hz, expected 48000' }
+    )
+    foreach ($c in $setupBad) {
+        $found = & $setup ($c['S'] ?? @{}) ($c['D'] ?? @())
+        & $add "transport setup: $($c.L) leaves no evidence ($($found -join ' | '))" $true ($found.Count -eq 1 -and $found[0] -clike "*$($c.W)*")
+    }
+    $neverArmed = [pscustomobject]@{ sr = 48000; states = @([pscustomobject]@{ Arm = $false }, [pscustomobject]@{ Arm = $false }); feed = [pscustomobject]@{ FileChannels = 2 } }
+    & $add 'transport setup: a feed that never ran (-2) is no problem when no state arms the track' $false ((& $setup @{ feed_handle = '-2'; feed_channels = '0'; feed_rate = '0' } @() $neverArmed).Count -eq 0)
+    & $add 'transport setup: without a feed its facts are not asked for' $false ((& $setup @{} @('feed_ident', 'feed_handle', 'feed_channels', 'feed_rate') ([pscustomobject]@{ sr = 48000; states = @(1, 2); feed = $null })).Count -eq 0)
+    # The time the step gets: the driver's own deadlines (3 n / sr + 10 s a wait, two waits a state) come first
+    $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800 }, [pscustomobject]@{ Samples = 9600 }) }
+    $timedDefault = [pscustomobject]@{ sr = 48000; settleSamples = $null; states = $timed.states }
+    & $add 'transport timeout: luaTimeoutSec, the settle times and windows three times over, and 20 s a state' $false ([Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 101.5) -lt 1e-9)
+    & $add 'transport timeout: without a settle time it counts 5 s a state' $false ([Math]::Abs((Get-HarnessTransportTimeout -Scenario $timedDefault -LuaTimeoutSec 60) - 130.9) -lt 1e-9)
+    # The job of the driver, from the fixture configuration
+    $cfgFile = Join-Path $RepoRoot 'tests/fixtures/config.json'
+    $cfgExt = Import-HarnessExtensions (Read-HarnessConfigExtensions $cfgFile)
+    $conf = Read-HarnessConfig -Path $cfgFile -Kinds $cfgExt.Kinds
+    $ms = @($conf.Scenarios | Where-Object id -ceq 'monitor-states')[0]
+    $tools = @{ 'harness-block-probe' = 'JS:p'; 'harness-feed' = 'JS:f' }
+    $job = Get-HarnessTransportJob -Scenario $ms -Layout $conf.Layouts[$ms.layout] -Tools $tools -RecordDir 'R'
+    $codes = @($job.states | ForEach-Object { "$($_.name)/$($_.transport)/$($_.arm)/$($_.monitor)/$($_.samples)" }) -join ','
+    & $add "transport job: the tested track by index, the probe and the feed by name, the feed mode, the settle time, each state as numbers ($codes)" $false (
+        $job.track -eq 0 -and $job.probe -ceq 'JS:p' -and $job.feed -ceq 'JS:f' -and $job.feedMode -eq 2 -and $job.settle -eq 240000 -and $job.sr -eq 48000 -and $job.recordDir -ceq 'R' -and
+        $codes -ceq 'stopped-unarmed/stop/0/0/4800,stopped-armed-on/stop/1/1/4800,playing-auto/play/1/2/4800,paused-unarmed/pause/0/0/4800')
+    $leftOnly = @($conf.Scenarios | Where-Object { $_.id -like 'monitor-stopped-off-*' })[0]
+    & $add 'transport job: the feed mode of left only is 0' $false ((Get-HarnessTransportJob -Scenario $leftOnly -Layout $conf.Layouts[$leftOnly.layout] -Tools $tools -RecordDir 'R').feedMode -eq 0)
+    $plain = [pscustomobject]@{ track = $ms.track; sr = 44100; settleSamples = $null; feed = $null; states = $ms.states }
+    $job2 = Get-HarnessTransportJob -Scenario $plain -Layout $conf.Layouts[$ms.layout] -Tools $tools -RecordDir 'R'
+    & $add 'transport job: without a feed or a settle time the job has neither (the driver then waits for run FX after stopping plus half a second)' $false (-not $job2.Contains('feed') -and -not $job2.Contains('feedMode') -and -not $job2.Contains('settle') -and $job2.sr -eq 44100)
+    $ghost = [pscustomobject]@{ track = 'Ghost'; sr = 48000; settleSamples = $null; feed = $null; states = $ms.states }
+    & $add 'transport job: a tested track that is not in the layout throws' $true $(try { $null = Get-HarnessTransportJob -Scenario $ghost -Layout $conf.Layouts[$ms.layout] -Tools $tools -RecordDir 'R'; $false } catch { $_.Exception.Message -clike "*'Ghost' is not in the layout*" })
+    # What the configuration makes of transport scenarios
+    & $add 'configuration: a transport scenario on a one-track layout tests that track; feed and settle time as given; Run FX when stopped on unless turned off; a state without expect has none' $false (
+        $ms.track -ceq 'Voice' -and $ms.feed.Channels -ceq 'different' -and $ms.feed.Wav -ceq '' -and $ms.settleSamples -eq 240000 -and $ms.host.RunFxWhenStopped -and @($ms.states).Count -eq 4 -and
+        $null -eq $ms.states[3].Expect -and $ms.states[1].Expect.Channels -ceq 'different' -and $ms.states[0].Expect.Called -eq $true -and $null -eq $ms.states[2].Expect.Called)
+    $offRows = @($conf.Scenarios | Where-Object { $_.id -like 'monitor-stopped-off-*' })
+    & $add "configuration: the block matrix of a transport scenario gives one scenario per block size, each with its settings ($(@($offRows | ForEach-Object { $_.id }) -join ', '))" $false (
+        $offRows.Count -eq 2 -and (@($offRows | ForEach-Object { $_.block }) -join ',') -ceq '64,1024' -and @($offRows | Where-Object { $_.host.RunFxWhenStopped -or $_.feed.Channels -cne 'left' }).Count -eq 0)
+    $raw = ConvertFrom-HarnessJson ([IO.File]::ReadAllText($cfgFile))
+    $msRaw = @($raw['scenarios'] | Where-Object { $_['id'] -ceq 'monitor-states' })[0]
+    $msRaw.Remove('settleSamples'); $msRaw['feed'] = [ordered]@{}; $msRaw['states'][0].Remove('samples'); $msRaw['sr'] = 44100
+    $res = Test-HarnessConfigData -Raw $raw -Kinds $cfgExt.Kinds
+    $d = $res.Config ? @($res.Config.Scenarios | Where-Object id -ceq 'monitor-states')[0] : $null
+    & $add "configuration: a window defaults to 2 seconds at the scenario rate; an empty feed is the test signal with different channels; no settle time unless given ($(@($res.Problems) -join ' | '))" $false (
+        @($res.Problems).Count -eq 0 -and $d.states[0].Samples -eq 88200 -and $d.feed.Channels -ceq 'different' -and $null -eq $d.settleSamples)
+    $msRaw.Remove('feed')
+    $res = Test-HarnessConfigData -Raw $raw -Kinds $cfgExt.Kinds
+    & $add 'configuration: a transport scenario without a feed has none (its tested track gets no input)' $false (@($res.Problems).Count -eq 0 -and $null -eq @($res.Config.Scenarios | Where-Object id -ceq 'monitor-states')[0].feed)
+    $chainLayout = $conf.Layouts['chain']
+    $withItems = New-HarnessProjectText -Layout $chainLayout -SourceWav 'S.wav' -RenderDir 'D' -RenderName 'N' -NoFx
+    $noItems = New-HarnessProjectText -Layout $chainLayout -SourceWav 'S.wav' -RenderDir 'D' -RenderName 'N' -NoFx -NoItems
+    & $add 'project: the transport kind gets its tracks without items (an item would make REAPER run an unarmed track while playing)' $true ($withItems -cmatch '<ITEM' -and $noItems -cnotmatch '<ITEM')
+    # Run FX when stopped in the private ini, and read back
+    & $add 'Run FX when stopped: bit 0 of runallonstop set or cleared, the other bits kept; no readable value counts as REAPER''s default 1' $false (
+        (Get-HarnessRunAllOnStop '6' $true) -eq 7 -and (Get-HarnessRunAllOnStop '7' $false) -eq 6 -and (Get-HarnessRunAllOnStop $null $true) -eq 1 -and (Get-HarnessRunAllOnStop '' $false) -eq 0 -and (Get-HarnessRunAllOnStop 'x' $true) -eq 1)
+    $rb = { param($Reads, $Asked) @(Test-HarnessHostReadback -Facts @{ dev_bsize = '512'; dev_srate = '48000'; cfg_workrender = '1'; cfg_runallonstop = $Reads } -Block 512 -Sr 48000 -AnticipativeFx $true -RunFxWhenStopped $Asked) }
+    & $add 'readback: Run FX when stopped reading as asked is no problem' $false ((& $rb '1' $true).Count -eq 0 -and (& $rb '6' $false).Count -eq 0)
+    & $add 'readback: Run FX when stopped reading the other way is a problem' $true (((& $rb '0' $true) -join '') -ceq 'Run FX when stopped reads off, expected on' -and ((& $rb '3' $false) -join '') -ceq 'Run FX when stopped reads on, expected off')
+    & $add 'readback: a runallonstop that cannot be read is a problem' $true (((& $rb 'unavailable' $true) -join '') -ceq "runallonstop reads 'unavailable'")
+    $notAsked = Test-HarnessHostReadback -Facts @{ dev_bsize = '512'; dev_srate = '48000'; cfg_workrender = '1' } -Block 512 -Sr 48000 -AnticipativeFx $true
+    & $add 'readback: when not asked for, runallonstop is not looked at' $false (@($notAsked).Count -eq 0)
+    # Feed files of the configuration
+    $feedDir = Join-Path $Tmp 'feed cfg'
+    $null = New-Item -ItemType Directory -Path (Join-Path $feedDir 'feeds')
+    $wav = { param([string]$WavName, [int]$WavRate, [int]$Channels, [int]$Frames) [HarnessWav]::Write((Join-Path $feedDir "feeds/$WavName"), $WavRate, $Channels, 'float32', $false, [double[]](, 0.25 * ($Frames * $Channels))) }
+    $frameFile = { param([string]$WavName, [double[]]$Frame) [HarnessWav]::Write((Join-Path $feedDir "feeds/$WavName"), 48000, $Frame.Count, 'float32', $false, [double[]](1..480 | ForEach-Object { $Frame })) }
+    & $frameFile 'zero.wav' @(0.0, 0.0); & $frameFile 'mono-zero.wav' @(, 0.0); & $frameFile 'left-zero.wav' @(0.0, 0.25); & $frameFile 'right-zero.wav' @(0.25, 0.0); & $frameFile 'left-nan.wav' @([double]::NaN, 0.25); & $frameFile 'left-inf.wav' @([double]::PositiveInfinity, 0.25)
+    & $wav 'stereo.wav' 48000 2 480; & $wav 'mono.wav' 48000 1 480; & $wav 'slow.wav' 44100 2 480; & $wav 'three.wav' 48000 3 480; & $wav 'empty.wav' 48000 2 0
+    [IO.File]::WriteAllText((Join-Path $feedDir 'feeds/text.wav'), 'not a wav file')
+    [IO.File]::WriteAllText((Join-Path $Tmp 'outside.wav'), 'x')
+    $feedOf = { param([string]$RelPath, [string]$Channels = 'different') [pscustomobject]@{ id = 'fs'; kind = 'transport'; sr = 48000; feed = [pscustomobject]@{ Wav = $RelPath; Channels = $Channels; File = ''; Sha256 = ''; FileChannels = 2 } } }
+    $feedConf = { param([object[]]$List) [pscustomobject]@{ ConfigDir = $feedDir; Scenarios = $List; Negative = @() } }
+    $stereo = & $feedOf 'feeds/stereo.wav'; $mono = & $feedOf 'feeds/mono.wav' 'left'; $signal = & $feedOf ''
+    # A refusal leaves the fields empty, and the case below goes red
+    try { Read-HarnessFeeds -Config (& $feedConf @($stereo, $mono, $signal, [pscustomobject]@{ id = 'r'; kind = 'render' })) } catch { $null = $_ }
+    & $add 'feeds: a stereo and a mono file at the rate are read: path, hash prefix and channel count filled in; a feed without a file and other kinds are left alone' $false (
+        $stereo.feed.File -clike '*stereo.wav' -and (Test-Path -LiteralPath $stereo.feed.File) -and $stereo.feed.Sha256 -cmatch '^[0-9a-f]{12}$' -and $stereo.feed.FileChannels -eq 2 -and $mono.feed.FileChannels -eq 1 -and $signal.feed.File -ceq '')
+    $feedBad = @(
+        @{ L = 'a file at another rate (nothing is resampled)'; R = 'feeds/slow.wav'; C = 'different'; W = '*is at 44100 Hz and the scenario runs at 48000 Hz: nothing is resampled*' }
+        @{ L = 'a mono file for different channels'; R = 'feeds/mono.wav'; C = 'different'; W = '*has one channel: channels "different" needs two*' }
+        @{ L = 'a file of 3 channels'; R = 'feeds/three.wav'; C = 'same'; W = '*has 3 channels: 1 or 2 are accepted*' }
+        @{ L = 'a file without samples'; R = 'feeds/empty.wav'; C = 'different'; W = '*holds no samples*' }
+        @{ L = 'a file of nothing but zeros'; R = 'feeds/zero.wav'; C = 'same'; W = '*feeds/zero.wav has a peak of 0 on channel 1: a silent feed proves nothing*' }
+        @{ L = 'a mono file of nothing but zeros'; R = 'feeds/mono-zero.wav'; C = 'left'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a silent first channel for left only'; R = 'feeds/left-zero.wav'; C = 'left'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a silent first channel for different channels'; R = 'feeds/left-zero.wav'; C = 'different'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a silent second channel for different channels'; R = 'feeds/right-zero.wav'; C = 'different'; W = '*has a peak of 0 on channel 2*' }
+        @{ L = 'a first channel of nothing but NaN (no finite peak)'; R = 'feeds/left-nan.wav'; C = 'same'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a first channel of nothing but infinities (no finite peak)'; R = 'feeds/left-inf.wav'; C = 'same'; W = '*has a peak of 0 on channel 1*' }
+        @{ L = 'a file that is not a WAV'; R = 'feeds/text.wav'; C = 'different'; W = '*feeds/text.wav cannot be read*' }
+        @{ L = 'a file that is not there'; R = 'feeds/none.wav'; C = 'different'; W = '*feed file not found: feeds/none.wav*' }
+        @{ L = 'a path that leaves the directory of the configuration'; R = '../outside.wav'; C = 'different'; W = '*leaves the directory of the configuration file*' }
+        @{ L = 'an absolute path'; R = 'D:\feeds\x.wav'; C = 'different'; W = '*must be relative to the configuration file*' }
+    )
+    foreach ($c in $feedBad) {
+        & $add "feeds: $($c.L) is a usage error before REAPER starts" $true (Test-Usage { Read-HarnessFeeds -Config (& $feedConf @(& $feedOf $c.R $c.C)) } "USAGE: feeds: 1 problem(s): fs: $($c.W)")
+    }
+    & $add 'feeds: a silent second channel is fine where only the first is played' $false ($(try { Read-HarnessFeeds -Config (& $feedConf @((& $feedOf 'feeds/right-zero.wav' 'left'), (& $feedOf 'feeds/right-zero.wav' 'same'))); $true } catch { $false }))
+    & $add 'feeds: every problem is listed at once' $true (Test-Usage { Read-HarnessFeeds -Config (& $feedConf @((& $feedOf 'feeds/slow.wav'), (& $feedOf 'feeds/none.wav'))) } 'USAGE: feeds: 2 problem(s): *resampled*; *not found*')
+    # The built-in negative case: what REAPER does with Run FX when stopped off and an armed, fed track
+    $probeNeg = @(Get-HarnessBuiltinNegatives -Transport)[-1]
+    $negLine = {
+        param($RowOne, $RowTwo)
+        @((Test-HarnessTransportState -State $probeNeg.states[0] -Row $RowOne), (Test-HarnessTransportState -State $probeNeg.states[1] -Row $RowTwo) | ForEach-Object { $_.Line }) -join ' | '
+    }
+    $long = @{ clock = 94; clock_samples = 48128 }
+    $unarmedIdle = & $row ($long + $idle + @{ arm = 0; monitor = 0; monitoring = 0 })
+    $unarmedRan = & $row ($long + @{ blocks = 94; samples = 48128; silent = 94; signal = 0; left = 0; right = 0; arm = 0; monitor = 0; monitoring = 0 })
+    $armedFed = & $row ($long + @{ blocks = 94; samples = 48128; signal = 94; left = 94; right = 94 })
+    $armedQuiet = & $row ($long + @{ blocks = 94; samples = 48128; silent = 94; signal = 0; left = 0; right = 0 })
+    & $add 'built-in transport negative: only with the transport switch, last, and with its own id' $false (
+        'neg-transport-probe' -cnotin @(Get-HarnessBuiltinNegatives | ForEach-Object { $_.id }) -and $probeNeg.id -ceq 'neg-transport-probe' -and $probeNeg.kind -ceq 'transport' -and -not $probeNeg.host.RunFxWhenStopped -and $null -ne $probeNeg.feed)
+    & $add "built-in transport negative: the unarmed chain not called and the armed one fed match its reason ($(& $negLine $unarmedIdle $armedFed))" $false ((& $negLine $unarmedIdle $armedFed) -cmatch $probeNeg.expectDetail)
+    & $add 'built-in transport negative: an unarmed chain that ran (the setting not applied) does not match' $true ((& $negLine $unarmedRan $armedFed) -cnotmatch $probeNeg.expectDetail)
+    & $add 'built-in transport negative: an armed track that got no feed does not match' $true ((& $negLine $unarmedIdle $armedQuiet) -cnotmatch $probeNeg.expectDetail)
+    $noTransport = ConvertFrom-HarnessJson ([IO.File]::ReadAllText($cfgFile))
+    $noTransport['scenarios'] = @($noTransport['scenarios'] | Where-Object { $_['kind'] -cne 'transport' })
+    $noTransport['negative'] = @($noTransport['negative'] | Where-Object { $_['kind'] -cne 'transport' })
+    $pickedNo = Select-HarnessScenarios -Config (Test-HarnessConfigData -Raw $noTransport -Kinds $cfgExt.Kinds).Config
+    & $add 'selection: a configuration without a transport scenario does not get the built-in transport negative' $true ('neg-transport-probe' -cnotin @($pickedNo.Negative | ForEach-Object { $_.id }) -and @($pickedNo.Negative).Count -eq 11)
+    # The licence reminder retry, with the guarded launch replaced by a list of outcomes
+    $queue = [Collections.Generic.Queue[object]]::new()
+    $calls = @{ N = 0 }
+    $fakeLaunch = { $calls.N++; $queue.Dequeue() }.GetNewClosure() # the named arguments of the call land in $args
+    $swap = { param([scriptblock]$Replacement) & (@(Get-Module Scenarios)[0]) { param($b) $was = ${function:Invoke-HarnessLaunchOnce}; Set-Item function:script:Invoke-HarnessLaunchOnce $b; $was } $Replacement }
+    $res = { param([string]$Status, [string]$Modal = '', [bool]$Still = $false) [pscustomobject]@{ Status = $Status; Modal = $Modal; StillRunning = $Still } }
+    $retry = {
+        param([object[]]$Results, [string[]]$Outputs = @())
+        $queue.Clear(); foreach ($x in $Results) { $queue.Enqueue($x) }; $calls.N = 0
+        $ctx = [pscustomobject]@{ Retries = [Collections.Generic.List[object]]::new() }
+        $run = Invoke-HarnessLaunch -Ctx $ctx -HostArgs @{} -Label 'step-x' -Outputs $Outputs
+        [pscustomobject]@{ Run = $run; Calls = $calls.N; Retries = @($ctx.Retries) }
+    }
+    $was = & $swap $fakeLaunch
+    try {
+        $leftOver = Join-Path $Tmp 'retry-a.wav'; Set-Content -LiteralPath $leftOver -Value 'left by the first launch'
+        $a = & $retry @((& $res Modal license-nag), (& $res Exited)) @($leftOver, (Join-Path $Tmp 'retry-none.wav'))
+        & $add 'retry: a launch ended by the licence reminder is started once more, after its outputs are deleted, and the retry is listed' $false (
+            $a.Run.Status -ceq 'Exited' -and $a.Calls -eq 2 -and $a.Retries.Count -eq 1 -and $a.Retries[0].Label -ceq 'step-x' -and $a.Retries[0].Reason -ceq 'license-nag' -and -not (Test-Path -LiteralPath $leftOver))
+        $b = & $retry @((& $res Modal license-nag), (& $res Modal license-nag))
+        & $add 'retry: only once: a second reminder ends the launch as stuck (Modal license-nag)' $true ($b.Run.Status -ceq 'Modal' -and $b.Run.Modal -ceq 'license-nag' -and $b.Calls -eq 2 -and $b.Retries.Count -eq 1)
+        $c = & $retry @((& $res Modal license-nag $true), (& $res Exited))
+        & $add 'retry: never after a process that could not be ended' $true ($c.Calls -eq 1 -and $c.Retries.Count -eq 0 -and $c.Run.StillRunning)
+        foreach ($other in @((& $res Modal unknown-dialog), (& $res Modal reaper-error), (& $res Timeout), (& $res Killed), (& $res LockBusy), (& $res SkipMarker), (& $res Exited))) {
+            $o = & $retry @($other, (& $res Exited))
+            & $add "retry: a launch that ended $($other.Status)$($other.Modal ? " ($($other.Modal))" : '') is not started again" $true ($o.Calls -eq 1 -and $o.Retries.Count -eq 0 -and $o.Run.Status -ceq $other.Status)
+        }
+        $locked = Join-Path $Tmp 'retry-locked.wav'; Set-Content -LiteralPath $locked -Value 'x'
+        $hold = [IO.File]::Open($locked, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try { $e = & $retry @((& $res Modal license-nag), (& $res Exited)) @($locked) } finally { $hold.Dispose() }
+        & $add 'retry: an output of the first launch that cannot be deleted means no retry (it would be read as the second one''s)' $true ($e.Calls -eq 1 -and $e.Retries.Count -eq 0 -and $e.Run.Status -ceq 'Modal')
+    } finally { $null = & $swap $was }
+    $cases
+}
+
 # ---------------------------------------------------------------- wiring
 function Get-WiringCases([string]$RepoRoot) {
     $cases = New-CaseList
@@ -1676,9 +1997,23 @@ function Get-WiringCases([string]$RepoRoot) {
         (& $at $suite 'Read-HarnessStates')[0] -lt (& $at $suite 'Get-HarnessPreflight')[0] -and (& $at $suite 'Get-HarnessPreflight')[0] -lt (& $at $suite 'Assert-HarnessStateIdentity')[0] -and
         (& $at $suite 'Assert-HarnessStateIdentity')[0] -lt (& $at $suite 'Install-HarnessPlugins')[0] -and (& $at $suite 'Assert-HarnessStateIdentity')[0] -lt (& $at $suite 'Install-HarnessJsfx')[0])
     & $add 'wiring: Invoke-HarnessSuite lists the default resource directory before and after every round' $false (@(& $at $suite 'Get-HarnessDefaultCfgSnapshot').Count -eq 2 -and 'Compare-HarnessDefaultCfgSnapshot' -in $suite.Name)
-    $launch = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessLaunch'
+    $launch = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessLaunchOnce'
     & $add 'wiring: every launch takes the GUI locks before starting REAPER and checks the skip marker again while holding them' $false (
         (& $at $launch 'Enter-HarnessLocks')[0] -lt (& $at $launch 'Invoke-HarnessHost')[0] -and @(& $at $launch 'Get-HarnessSkipMarkerHit').Count -eq 2 -and (& $at $launch 'Get-HarnessSkipMarkerHit')[1] -lt (& $at $launch 'Invoke-HarnessHost')[0])
+    # The retry of a launch goes through all of that again: it calls the guarded launch, never the host or the locks itself,
+    # and no other code calls the guarded launch or the host
+    $retry = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessLaunch'
+    $hostCallers = @(foreach ($m in (Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1')) {
+            $tree = [System.Management.Automation.Language.Parser]::ParseFile($m.FullName, [ref]$null, [ref]$null)
+            foreach ($c in $tree.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -in 'Invoke-HarnessHost', 'Invoke-HarnessLaunchOnce' }, $true)) {
+                $fn = $c.Parent
+                while ($fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
+                "$($c.GetCommandName())<-$($fn ? $fn.Name : 'top')"
+            }
+        })
+    & $add "wiring: a retried launch starts REAPER only through the guarded launch, at most twice; nothing else calls it or the host ($($hostCallers -join ', '))" $false (
+        @(& $at $retry 'Invoke-HarnessLaunchOnce').Count -eq 2 -and 'Invoke-HarnessHost' -notin $retry.Name -and 'Enter-HarnessLocks' -notin $retry.Name -and
+        (@($hostCallers | Sort-Object) -join ',') -ceq 'Invoke-HarnessHost<-Invoke-HarnessLaunchOnce,Invoke-HarnessLaunchOnce<-Invoke-HarnessLaunch,Invoke-HarnessLaunchOnce<-Invoke-HarnessLaunch')
     # The learn project and the check of what REAPER saved must agree on the track names, so both get the same list
     $learnAst = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Learn.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-HarnessLearn' }, $true)
     $namesArg = {
@@ -1699,6 +2034,57 @@ function Get-WiringCases([string]$RepoRoot) {
     $driverText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'lua/driver.lua'))
     & $add 'wiring: with warmup 0 the driver writes the warm-up mark before the first cycle' $true ($driverText -cmatch '(?s)if job\.warmup == 0 then[^\n]*\n\s*touch\(job\.warmMark\).*?for i = 1, job\.cycles do')
     & $add 'wiring: with warm-up cycles the driver writes the mark after the last of them' $true ($driverText -cmatch '(?s)for i = 1, job\.cycles do.*?if i == job\.warmup then\s*touch\(job\.warmMark\)')
+    # The transport step may toggle arming, monitoring and the transport, and must never record
+    $actions = @([regex]::Matches($driverText, 'Main_OnCommand\w*\s*\(\s*(\w+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    & $add "driver: the only actions it calls are File: Quit (40004) and File: New project (40023) ($($actions -join ', '))" $true (($actions -join ',') -ceq '40004,40023')
+    & $add 'driver: no record call of any kind, and no action looked up by name' $true ($driverText -cnotmatch 'OnRecord|CSurf_|Main_OnCommandEx|NamedCommandLookup|Record\w*Button')
+    $transportStep = $driverText.Substring([Math]::Max(0, $driverText.IndexOf('function steps.transport()')))
+    $recModes = @([regex]::Matches($driverText, '"I_RECMODE",\s*(-?\d+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    & $add "driver: the transport step disables recording on its tracks (record mode 2 only: $($recModes -join ', ')), sets the record path before it arms anything, and every wait checks the record bit" $true (
+        $transportStep.StartsWith('function steps.transport()', [StringComparison]::Ordinal) -and ($recModes -join ',') -ceq '2' -and
+        $transportStep.IndexOf('"RECORD_PATH", job.recordDir, true') -gt 0 -and $transportStep.IndexOf('"RECORD_PATH", job.recordDir, true') -lt $transportStep.IndexOf('"I_RECARM"') -and
+        $transportStep -cmatch '(?s)local function waitSamples\(n\).*?while [^\n]*\n\s*noRecord\(\)' -and $transportStep -cmatch 'GetPlayState\(\) & 4 ~= 0')
+    $pathStop = $transportStep.IndexOf('if not pathOk then error(')
+    & $add 'driver: a record path that does not read back is reported and stops the step before anything is armed or the transport is touched' $true (
+        $transportStep -cmatch 'local pathOk = setOk and path == job\.recordDir\r?\n\s*put\("record_path", pathOk and "ok" or "failed"\)' -and
+        $pathStop -gt $transportStep.IndexOf('put("record_path"') -and $pathStop -lt $transportStep.IndexOf('"I_RECARM"') -and $pathStop -lt $transportStep.IndexOf('OnPlayButton') -and
+        $pathStop -lt $transportStep.IndexOf('InsertTrackAtIndex'))
+    # The tool JSFX and the driver agree on the shared memory and on the feed file the harness installs
+    $probeText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'jsfx/harness-block-probe.jsfx'))
+    $feedText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'jsfx/harness-feed.jsfx'))
+    $pluginsText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'src/Plugins.psm1'))
+    & $add 'tool JSFX: the probe, the feed and the driver share gmem ReaperHarness, 16 values a slot (clock 0, tested track 1, feed 2)' $false (
+        $probeText -cmatch '(?m)^options:gmem=ReaperHarness\r?$' -and $feedText -cmatch '(?m)^options:gmem=ReaperHarness\r?$' -and $probeText -cmatch 'base = floor\(slider1 \+ 0\.5\) \* 16;' -and $feedText -cmatch 'base = floor\(slider1 \+ 0\.5\) \* 16;' -and
+        $transportStep -cmatch 'gmem_attach\("ReaperHarness"\)' -and $transportStep -cmatch 'local CLOCK, TESTED, FEED = 0, 16, 32')
+    $transportCalls = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessTransportScenario'
+    & $add 'wiring: the transport scenario gives the Lua step the time Get-HarnessTransportTimeout works out' $true (
+        'Get-HarnessTransportTimeout' -in $transportCalls.Name -and ([IO.File]::ReadAllText((Join-Path $RepoRoot 'src/Scenarios.psm1'))) -cmatch 'Step transport -Job \$Job -TimeoutSec \(Get-HarnessTransportTimeout ')
+    & $add 'driver: every state reports the blocks and frames the feed played in its window' $true (
+        $transportStep -cmatch 'f0 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and $transportStep -cmatch 'f1 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and
+        $transportStep -cmatch 'put\(p \.\. "fed", int\(f1\[0\] - f0\[0\]\)\)' -and $transportStep -cmatch 'put\(p \.\. "fed_samples", int\(f1\[1\] - f0\[1\]\)\)')
+    & $add 'tool JSFX: the feed starts its file over as often as a block needs (a file can be shorter than a block), and a read that yields less than a frame ends that' $true (
+        $feedText -cmatch '(?s)more = nch;\s*while \(frames < samplesblock && more >= nch\) \(\s*file_rewind\(h\);\s*file_riff\(h, nch, fsr\);\s*more = file_mem\(')
+    # A generation around the counts: the driver takes them only when no write was under way (the block itself cannot run here)
+    $genStep = 'gen \+= 1;\s*gmem\[base \+ 10\] = gen;\s*'
+    & $add 'tool JSFX: the block probe writes all its counts inside a generation (slot value 10, odd meanwhile)' $true (
+        $probeText -cmatch "(?s)i === n \? \(\s*$($genStep)gmem\[base \+ 0\] \+= 1;.*gmem\[base \+ 2\] \+= 1;\s*\);\s*$($genStep)\);\s*`$" -and $probeText -cmatch '(?m)^gen = 0;\r?$')
+    & $add 'tool JSFX: the feed writes its blocks and frames inside a generation (slot value 10, odd meanwhile)' $true (
+        $feedText -cmatch "$($genStep)gmem\[base \+ 0\] \+= 1;\s*gmem\[base \+ 1\] \+= frames;\s*$genStep" -and $feedText -cmatch '(?m)^gen = 0;\r?$')
+    & $add 'driver: a reading counts only with an even generation, the same before and after, and the tries are bounded' $true (
+        $transportStep -cmatch 'local SNAP_TRIES = \d{1,4} ' -and
+        $transportStep -cmatch '(?s)local function snap\(base\)\s*for _ = 1, SNAP_TRIES do\s*local g = reaper\.gmem_read\(base \+ 10\)\s*if g % 2 == 0 then\s*local v = \{\}\s*for i = 0, 15 do v\[i\] = reaper\.gmem_read\(base \+ i\) end\s*if reaper\.gmem_read\(base \+ 10\) == g then return v end\s*end\s*end\s*end')
+    & $add 'driver: a state without a clean reading of all three slots, before and after, reports none of its counts' $true (
+        $transportStep -cmatch '(?s)if c0 and t0 and f0 and c1 and t1 and f1 then\s*put\(p \.\. "clock", .*?put\(p \.\. "fed_samples", [^\n]*\n\s*end\s*put\(p \.\. "playstate"')
+    $probeSampleAt = $probeText.IndexOf('@sample')
+    $probeBlockAt = $probeText.IndexOf('@block')
+    & $add 'tool JSFX: the block probe counts a block when its last sample has gone through, together with its silent and signal counts' $true (
+        $probeBlockAt -gt 0 -and $probeSampleAt -gt $probeBlockAt -and $probeText.Substring($probeBlockAt, $probeSampleAt - $probeBlockAt) -cnotmatch 'gmem\[base \+ [0-6]\]' -and
+        $probeText.Substring($probeSampleAt) -cmatch 'i === n \? \(\s*gen \+= 1;\s*gmem\[base \+ 10\] = gen;\s*gmem\[base \+ 0\] \+= 1;\s*gmem\[base \+ 1\] \+= n;\s*lsig \|\| rsig \? \(')
+    & $add 'tool JSFX: the file the feed opens is the one the harness installs (Data\reaper-harness\feed.wav of the private directory)' $false (
+        $feedText -cmatch 'file_open\("reaper-harness/feed\.wav"\)' -and $pluginsText -cmatch "Get-HarnessPrivateSubdir 'Data\\reaper-harness'\) 'feed\.wav'")
+    & $add 'wiring: Invoke-HarnessSuite reads the feed files with the states, before the preflight and before installing anything' $false (
+        'Read-HarnessFeeds' -in $suite.Name -and 'Install-HarnessToolJsfx' -in $suite.Name -and (& $at $suite 'Read-HarnessFeeds')[0] -gt (& $at $suite 'Read-HarnessStates')[0] -and (& $at $suite 'Read-HarnessFeeds')[0] -lt (& $at $suite 'Get-HarnessPreflight')[0] -and
+        (& $at $suite 'Install-HarnessToolJsfx')[0] -gt (& $at $suite 'Assert-HarnessStateIdentity')[0])
     # Below 7.4 the real path resolution meets members that do not exist; both entry points say so up front
     foreach ($script in 'run.ps1', 'doctor.ps1') {
         $wanted = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot $script), [ref]$null, [ref]$null)).ScriptRequirements.RequiredPSVersion
@@ -1787,7 +2173,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {
