@@ -1896,7 +1896,8 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     $feedOf = { param([string]$RelPath, [string]$Channels = 'different') [pscustomobject]@{ id = 'fs'; kind = 'transport'; sr = 48000; feed = [pscustomobject]@{ Wav = $RelPath; Channels = $Channels; File = ''; Sha256 = ''; FileChannels = 2 } } }
     $feedConf = { param([object[]]$List) [pscustomobject]@{ ConfigDir = $feedDir; Scenarios = $List; Negative = @() } }
     $stereo = & $feedOf 'feeds/stereo.wav'; $mono = & $feedOf 'feeds/mono.wav' 'left'; $signal = & $feedOf ''
-    Read-HarnessFeeds -Config (& $feedConf @($stereo, $mono, $signal, [pscustomobject]@{ id = 'r'; kind = 'render' }))
+    # A refusal leaves the fields empty, and the case below goes red
+    try { Read-HarnessFeeds -Config (& $feedConf @($stereo, $mono, $signal, [pscustomobject]@{ id = 'r'; kind = 'render' })) } catch { $null = $_ }
     & $add 'feeds: a stereo and a mono file at the rate are read: path, hash prefix and channel count filled in; a feed without a file and other kinds are left alone' $false (
         $stereo.feed.File -clike '*stereo.wav' -and (Test-Path -LiteralPath $stereo.feed.File) -and $stereo.feed.Sha256 -cmatch '^[0-9a-f]{12}$' -and $stereo.feed.FileChannels -eq 2 -and $mono.feed.FileChannels -eq 1 -and $signal.feed.File -ceq '')
     $feedBad = @(
