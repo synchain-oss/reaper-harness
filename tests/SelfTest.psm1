@@ -2057,13 +2057,24 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add 'driver: every state reports the blocks and frames the feed played in its window' $true (
         $transportStep -cmatch 'f0 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and $transportStep -cmatch 'f1 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and
         $transportStep -cmatch 'put\(p \.\. "fed", int\(f1\[0\] - f0\[0\]\)\)' -and $transportStep -cmatch 'put\(p \.\. "fed_samples", int\(f1\[1\] - f0\[1\]\)\)')
-    & $add 'tool JSFX: the feed starts its file over as often as a block needs (a file can be shorter than a block), and a read that yields nothing ends that' $true (
-        $feedText -cmatch '(?s)while \(frames < samplesblock && more > 0\) \(\s*file_rewind\(h\);\s*file_riff\(h, nch, fsr\);\s*more = file_mem\(')
+    & $add 'tool JSFX: the feed starts its file over as often as a block needs (a file can be shorter than a block), and a read that yields less than a frame ends that' $true (
+        $feedText -cmatch '(?s)more = nch;\s*while \(frames < samplesblock && more >= nch\) \(\s*file_rewind\(h\);\s*file_riff\(h, nch, fsr\);\s*more = file_mem\(')
+    # A generation around the counts: the driver takes them only when no write was under way (the block itself cannot run here)
+    $genStep = 'gen \+= 1;\s*gmem\[base \+ 10\] = gen;\s*'
+    & $add 'tool JSFX: the block probe writes all its counts inside a generation (slot value 10, odd meanwhile)' $true (
+        $probeText -cmatch "(?s)i === n \? \(\s*$($genStep)gmem\[base \+ 0\] \+= 1;.*gmem\[base \+ 2\] \+= 1;\s*\);\s*$($genStep)\);\s*`$" -and $probeText -cmatch '(?m)^gen = 0;\r?$')
+    & $add 'tool JSFX: the feed writes its blocks and frames inside a generation (slot value 10, odd meanwhile)' $true (
+        $feedText -cmatch "$($genStep)gmem\[base \+ 0\] \+= 1;\s*gmem\[base \+ 1\] \+= frames;\s*$genStep" -and $feedText -cmatch '(?m)^gen = 0;\r?$')
+    & $add 'driver: a reading counts only with an even generation, the same before and after, and the tries are bounded' $true (
+        $transportStep -cmatch 'local SNAP_TRIES = \d{1,4} ' -and
+        $transportStep -cmatch '(?s)local function snap\(base\)\s*for _ = 1, SNAP_TRIES do\s*local g = reaper\.gmem_read\(base \+ 10\)\s*if g % 2 == 0 then\s*local v = \{\}\s*for i = 0, 15 do v\[i\] = reaper\.gmem_read\(base \+ i\) end\s*if reaper\.gmem_read\(base \+ 10\) == g then return v end\s*end\s*end\s*end')
+    & $add 'driver: a state without a clean reading of all three slots, before and after, reports none of its counts' $true (
+        $transportStep -cmatch '(?s)if c0 and t0 and f0 and c1 and t1 and f1 then\s*put\(p \.\. "clock", .*?put\(p \.\. "fed_samples", [^\n]*\n\s*end\s*put\(p \.\. "playstate"')
     $probeSampleAt = $probeText.IndexOf('@sample')
     $probeBlockAt = $probeText.IndexOf('@block')
     & $add 'tool JSFX: the block probe counts a block when its last sample has gone through, together with its silent and signal counts' $true (
         $probeBlockAt -gt 0 -and $probeSampleAt -gt $probeBlockAt -and $probeText.Substring($probeBlockAt, $probeSampleAt - $probeBlockAt) -cnotmatch 'gmem\[base \+ [0-6]\]' -and
-        $probeText.Substring($probeSampleAt) -cmatch 'i === n \? \(\s*gmem\[base \+ 0\] \+= 1;\s*gmem\[base \+ 1\] \+= n;\s*lsig \|\| rsig \? \(')
+        $probeText.Substring($probeSampleAt) -cmatch 'i === n \? \(\s*gen \+= 1;\s*gmem\[base \+ 10\] = gen;\s*gmem\[base \+ 0\] \+= 1;\s*gmem\[base \+ 1\] \+= n;\s*lsig \|\| rsig \? \(')
     & $add 'tool JSFX: the file the feed opens is the one the harness installs (Data\reaper-harness\feed.wav of the private directory)' $false (
         $feedText -cmatch 'file_open\("reaper-harness/feed\.wav"\)' -and $pluginsText -cmatch "Get-HarnessPrivateSubdir 'Data\\reaper-harness'\) 'feed\.wav'")
     & $add 'wiring: Invoke-HarnessSuite reads the feed files with the states, before the preflight and before installing anything' $false (

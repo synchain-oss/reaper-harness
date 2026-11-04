@@ -414,7 +414,10 @@ signal; `left`, `right`: blocks with signal on that side; `same`: blocks with si
 whose numbers describe another state than the one asked for is INCOMPLETE (`; no evidence: ...`): the device ran
 less than the window, or the transport, the arm or the monitoring mode did not read back as asked. So is an armed
 state of a scenario with a feed in whose window the feed played no block: its chain would be silent for the wrong
-reason. The row is INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is not first in
+reason. So is a state of which the driver got no clean reading (`<name>: not observed`): the tool JSFX write their
+counts one at a time on the audio thread, so the driver takes them only when a generation value around them shows no
+write under way, and after a bounded number of tries it reports nothing rather than half-written numbers. The row is
+INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is not first in
 the chain, the record path could not be set, the feed could not open its file, the feed never ran although a state
 arms the track, or not every state was observed; it is FAIL, whatever
 the states say, when any file appeared in the record directory. Facts: `track`, `runFxWhenStopped`,

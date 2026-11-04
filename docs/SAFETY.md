@@ -248,7 +248,7 @@ above is a pure function and is tested everywhere.
 - A `transport` state is judged on device samples, counted on an armed track of the tool's own, never on wall-clock
   time. A state whose numbers describe another state than the one asked for (the transport, the arm or the monitoring
   mode did not read back as asked, or the device ran less than the window) is `INCOMPLETE`, and so is an armed state
-  whose feed played nothing in its window, and a row whose block probes or feed are not the tool's own copies (by
+  whose feed played nothing in its window, a state of which the driver got no clean reading, and a row whose block probes or feed are not the tool's own copies (by
   `fx_ident`), whose probe is not first in the chain, or whose feed could not open its file or never ran although a
   state arms the track.
 - With no plugin binaries expected, the proof of which binaries were loaded is `Unseen`, not proven. A configuration

@@ -290,7 +290,7 @@ function Invoke-HarnessLuaStep {
     $full = @{ step = $Step; result = $resultFile; extensions = @($Ctx.LuaExtensions) }
     foreach ($k in $Job.get_Keys()) { $full[$k] = $Job[$k] }
     Write-HarnessText -Path $jobFile -Text (ConvertTo-HarnessLuaTable $full)
-    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -Outputs (@($resultFile) + @($Watch.get_Values())) -HostArgs @{
+    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -Outputs (@($resultFile) + @($Watch.get_Values()) + @($Job['saveAs'] | Where-Object { $_ })) -HostArgs @{
         ReaperArgs = @($Ctx.Driver); Environment = @{ REAPER_HARNESS_JOB = $jobFile }; WatchFiles = $Watch
         TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
     }

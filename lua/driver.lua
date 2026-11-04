@@ -246,11 +246,14 @@ end
 -- After the readback a clock track goes at the end (armed, recording disabled, no input, monitoring off, no master
 -- send) with a block probe in gmem slot 0; a block probe goes first in the chain of the tested track (slot 1) and the
 -- feed into its input chain (slot 2). Settling and windows are counted in clock samples, not in wall-clock time.
+-- They write their counts one at a time on the audio thread, with value 10 of the slot, a generation, odd meanwhile: a
+-- reading counts only if that was even and the same before and after it, so no half-written block is taken as evidence.
 -- This step never records: no record action is called anywhere in this file, every wait checks the transport for the
 -- record bit, both tracks have recording disabled and the record path is the work directory.
 -- Reported per state n: st<n>_settled, st<n>_clock and _clock_samples (device blocks and samples of the window),
 -- _blocks, _samples, _silent, _signal, _left, _right, _equal (the tested chain), _fed and _fed_samples (blocks and
--- frames the feed played), _playstate, _arm, _monitor and _monitoring (read back at the end of the window).
+-- frames the feed played), _playstate, _arm, _monitor and _monitoring (read back at the end of the window). A state
+-- without a clean reading has no _clock up to _fed_samples, which makes it a state that was not observed.
 function steps.transport()
     openAndWait(job.project)
     put("dev_bsize", device("BSIZE"))
@@ -317,10 +320,16 @@ function steps.transport()
         noRecord()
         return reaper.gmem_read(CLOCK + 1) - start
     end
+    local SNAP_TRIES = 1000 -- bounded: this spins on the main thread
     local function snap(base)
-        local v = {}
-        for i = 0, 15 do v[i] = reaper.gmem_read(base + i) end
-        return v
+        for _ = 1, SNAP_TRIES do
+            local g = reaper.gmem_read(base + 10)
+            if g % 2 == 0 then
+                local v = {}
+                for i = 0, 15 do v[i] = reaper.gmem_read(base + i) end
+                if reaper.gmem_read(base + 10) == g then return v end
+            end
+        end
     end
     local function transport(want)
         local ps = reaper.GetPlayState()
@@ -344,11 +353,13 @@ function steps.transport()
         local c0, t0, f0 = snap(CLOCK), snap(TESTED), snap(FEED)
         waitSamples(st.samples)
         local c1, t1, f1 = snap(CLOCK), snap(TESTED), snap(FEED)
-        put(p .. "clock", int(c1[0] - c0[0]))
-        put(p .. "clock_samples", int(c1[1] - c0[1]))
-        for i, key in ipairs({ "blocks", "samples", "silent", "signal", "left", "right", "equal" }) do put(p .. key, int(t1[i - 1] - t0[i - 1])) end
-        put(p .. "fed", int(f1[0] - f0[0]))
-        put(p .. "fed_samples", int(f1[1] - f0[1]))
+        if c0 and t0 and f0 and c1 and t1 and f1 then
+            put(p .. "clock", int(c1[0] - c0[0]))
+            put(p .. "clock_samples", int(c1[1] - c0[1]))
+            for i, key in ipairs({ "blocks", "samples", "silent", "signal", "left", "right", "equal" }) do put(p .. key, int(t1[i - 1] - t0[i - 1])) end
+            put(p .. "fed", int(f1[0] - f0[0]))
+            put(p .. "fed_samples", int(f1[1] - f0[1]))
+        end
         put(p .. "playstate", reaper.GetPlayState())
         put(p .. "arm", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECARM")))
         put(p .. "monitor", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECMON")))

@@ -8,7 +8,8 @@ desc: reaper-harness block probe
 // the slot being the parameter below; the Lua driver reads them:
 //   0 blocks   1 samples   2 silent blocks (every sample of both channels exactly 0)   3 blocks with signal
 //   4 blocks with signal on the left   5 ... on the right   6 blocks with signal whose left and right are equal sample
-//   for sample   7 the play state seen last   8 the block size seen last   9 the sample rate
+//   for sample   7 the play state seen last   8 the block size seen last   9 the sample rate   10 the generation of
+//   counts 0 to 6: odd while they are being written, so that the driver on the main thread can take them together
 // A block is counted once all of its samples went through, so it is either silent or has signal, never half of each,
 // and all its counts move together. A call without samples is no block.
 // ext_nodenorm keeps REAPER from adding its anti-denormal noise to the input, and the comparisons are exact (=== and
@@ -31,6 +32,7 @@ i = 0;
 lsig = 0;
 rsig = 0;
 diff = 0;
+gen = 0;
 
 @slider
 base = floor(slider1 + 0.5) * 16;
@@ -51,6 +53,8 @@ spl1 !== 0 ? rsig = 1;
 spl0 !== spl1 ? diff = 1;
 i += 1;
 i === n ? (
+  gen += 1;
+  gmem[base + 10] = gen;
   gmem[base + 0] += 1;
   gmem[base + 1] += n;
   lsig || rsig ? (
@@ -61,4 +65,6 @@ i === n ? (
   ) : (
     gmem[base + 2] += 1;
   );
+  gen += 1;
+  gmem[base + 10] = gen;
 );

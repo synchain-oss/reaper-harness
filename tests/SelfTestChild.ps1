@@ -760,6 +760,33 @@ finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $pl
 $deadRow = @($deadRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
 Write-Case 'end to end: a feed that never ran although a state arms the track makes the row INCOMPLETE' $true (
     $deadRun.verdict -ceq 'INCOMPLETE' -and $null -ne $deadRow -and $deadRow.status -ceq 'INCOMPLETE' -and $deadRow.detail -ceq 'the feed never ran although a state arms the track')
+# A state without a clean reading of its counts: that state is not observed, the others are judged
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; Unread = 'playing-auto' }
+try { $unreadRun = Invoke-HarnessSuite @e2e -Only '^monitor-states$' -NoNegative -SelfTestHooks $hooks }
+finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$unreadRow = @($unreadRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+Write-Case 'end to end: a state without a clean reading of its counts is not observed: that state and the row are INCOMPLETE, the others are judged' $true (
+    $unreadRun.verdict -ceq 'INCOMPLETE' -and $null -ne $unreadRow -and $unreadRow.status -ceq 'INCOMPLETE' -and $unreadRow.detail -clike '*playing-auto: not observed*' -and
+    @($unreadRow.facts.states | Where-Object { $_.name -ceq 'playing-auto' })[0].status -ceq 'INCOMPLETE' -and @($unreadRow.facts.states | Where-Object { $_.name -ceq 'stopped-armed-on' })[0].status -ceq 'PASS')
+# The licence reminder ends a launch after it saved its copy, and the launch started once more cannot save: the copy of
+# the first one must not prove the states
+$nagSpec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs }
+$realOnce = & (Get-Module Scenarios) { ${function:Invoke-HarnessLaunchOnce} }
+$nagFirst = {
+    param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
+    $run = & $realOnce -Ctx $RunCtx -HostArgs $HostArgs -Label $Label
+    if ($Label -ceq 'device' -and -not $nagSpec['SaveFails']) { $nagSpec['SaveFails'] = $true; $run.Status = 'Modal'; $run.Modal = 'license-nag' }
+    $run
+}.GetNewClosure()
+$setOnce = { param($b) & (Get-Module Scenarios) { param($s) Set-Item function:script:Invoke-HarnessLaunchOnce $s } $b }
+Set-FakeReaper $nagSpec
+& $setOnce $nagFirst
+try { $nagRun = Invoke-HarnessSuite @e2e -Only '^states-device$' -NoNegative -SelfTestHooks $hooks }
+finally { & $setOnce $realOnce; Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$nagRow = @($nagRun.runs[0].scenarios | Where-Object { $_.id -ceq 'states-device' })[0]
+Write-Case 'end to end: a copy saved before the licence reminder ended the launch does not count for the launch started once more' $true (
+    $nagRun.verdict -ceq 'INCOMPLETE' -and $null -ne $nagRow -and $nagRow.status -ceq 'INCOMPLETE' -and $nagRow.detail -ceq 'the copy that proves the states was not saved' -and
+    @($nagRun.runs[0].retries).Count -eq 1)
 Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
     $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
 

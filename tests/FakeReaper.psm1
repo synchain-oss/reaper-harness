@@ -356,6 +356,7 @@ function Invoke-FakeLearn($job, $report) {
 # only then does the chain get the feed (Data\reaper-harness\feed.wav of the configuration directory, when the job has
 # a feed and the file is there), which plays in every armed state. A window of n samples is n / block blocks, rounded
 # up, on the clock as well. Spec.FeedIdle = a state name: the feed plays nothing in that state; '*': it never runs.
+# Spec.Unread = a state name: no clean reading of that state's counts, so it reports none of them, like the driver.
 function Invoke-FakeTransport($job, $report) {
     $sr = [int](Get-FakeIniValue 'dummy_srate')
     $block = [int](Get-FakeIniValue 'dummy_blocksize')
@@ -398,6 +399,7 @@ function Invoke-FakeTransport($job, $report) {
             settled = $blocks * $block; clock = $blocks; clock_samples = $blocks * $block; blocks = $b; samples = $b * $block; silent = $b - $sig; signal = $sig
             left = $sig; right = ($mode -eq 0) ? 0 : $sig; equal = $same; fed = $fedBlocks; fed_samples = $fedBlocks * $block; playstate = @{ stop = 0; play = 1; pause = 2 }[$t]; arm = $arm; monitor = $mon; monitoring = [int]$monitoring
         }
+        if ($script:Spec['Unread'] -ceq [string]$st['name']) { foreach ($k in 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'fed', 'fed_samples') { $values.Remove($k) } }
         foreach ($e in $values.GetEnumerator()) { $report.Add("st${n}_$($e.Key)=$($e.Value)") }
     }
     $report.Add("states_done=$n")
@@ -419,7 +421,11 @@ function Invoke-FakeStep([string]$JobFile) {
         'device' {
             foreach ($kv in @("dev_bsize=$(Get-FakeIniValue 'dummy_blocksize')", "dev_srate=$(Get-FakeIniValue 'dummy_srate')", 'dev_mode=dummy', 'project_srate=0', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$(Get-FakeIniValue 'runallonstop' '1')")) { $report.Add($kv) }
             Add-FakeTracks $report '' $job['project'] $job['reads']
-            if ($job.Contains('saveAs')) { Copy-Item -LiteralPath $job['project'] -Destination $job['saveAs']; $report.Add('saved=true') }
+            # Like the driver, saved says the file is there, whoever wrote it. Spec.SaveFails: this launch cannot save.
+            if ($job.Contains('saveAs')) {
+                if (-not $script:Spec['SaveFails']) { Copy-Item -LiteralPath $job['project'] -Destination $job['saveAs'] }
+                $report.Add("saved=$((Test-Path -LiteralPath $job['saveAs']) ? 'true' : 'false')")
+            }
         }
         'savereopen' {
             Add-FakeTracks $report 'before_' $job['project'] $job['reads']
