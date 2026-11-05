@@ -776,6 +776,97 @@ $unreadRow = @($unreadRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor
 Write-Case 'end to end: a state without a clean reading of its counts is not observed: that state and the row are INCOMPLETE, the others are judged' $true (
     $unreadRun.verdict -ceq 'INCOMPLETE' -and $null -ne $unreadRow -and $unreadRow.status -ceq 'INCOMPLETE' -and $unreadRow.detail -clike '*playing-auto: not observed*' -and
     @($unreadRow.facts.states | Where-Object { $_.name -ceq 'playing-auto' })[0].status -ceq 'INCOMPLETE' -and @($unreadRow.facts.states | Where-Object { $_.name -ceq 'stopped-armed-on' })[0].status -ceq 'PASS')
+# A plugin that reports its own counts, and a window opened and closed while a state runs: the variable reaches the
+# REAPER of the step and nothing else, the readings are judged by how much the fields grew in the state's window
+$reportChange = {
+    param($c)
+    & $noExt $c
+    $c.plugins.gain.report = @{ env = 'FIXTURE_REPORT_JSON'; fields = @('blocks', 'opens'); pid = 'pid'; periodMs = 100 }
+    $one = @($c.scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+    $one.states[1].windows = @{ plugin = 'gain'; count = 3 }
+    $one.states[1].expect.report = [ordered]@{ gain = [ordered]@{ opens = @{ delta = 10 }; blocks = @{ delta = @{ min = 1 } } } }
+    $one.host = @{ informOfflineState = $false }
+    $c.scenarios = @($one); $c.negative = @()
+}
+$reportCfg = & $writeVariant $reportChange
+$reportCfg.ReaperExe = $pwshExe; $reportCfg.ResultDir = $e2e.ResultDir
+$envSeen = [Collections.Generic.List[string]]::new()
+$reportRun = {
+    param([hashtable]$SpecPlus = @{})
+    $spec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; EnvName = 'FIXTURE_REPORT_JSON'; EnvSeen = $envSeen }
+    foreach ($k in $SpecPlus.get_Keys()) { $spec[$k] = $SpecPlus[$k] }
+    $envSeen.Clear()
+    Set-FakeReaper $spec
+    try { $run = Invoke-HarnessSuite @reportCfg -NoNegative -SelfTestHooks $hooks }
+    finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+    [pscustomobject]@{ Run = $run; Row = @($run.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]; Env = @($envSeen) }
+}
+# A row or a fact that is missing makes the case false, not the child stop: a condition that looks into a result runs here
+$holds = { param([scriptblock]$Condition) try { [bool](& $Condition) } catch { $false } }
+$stateOf = { param($ResultRow) try { @($ResultRow.facts.states | Where-Object { $_.name -ceq 'stopped-armed-on' })[0] } catch { $null } }
+$rp = & $reportRun
+$armedState = & $stateOf $rp.Row
+$stepEnv = @($rp.Env | Where-Object { $_ })
+Write-Case "end to end: a reporting plugin with its window opened 3 times: PASS, the state's facts hold the window counts and every field's start, end and growth ($($rp.Row.detail))" $false (& $holds {
+        $rp.Run.verdict -ceq 'PASS' -and $rp.Row.status -ceq 'PASS' -and $armedState.status -ceq 'PASS' -and $armedState.win_open -eq 3 -and $armedState.win_closed -eq 3 -and
+        $armedState.report.gain.opens.delta -eq 10 -and $armedState.report.gain.blocks.end -eq 22 -and $rp.Row.detail -clike '*stopped-armed-on: * windows=3/3 of 3 report gain.opens=22 (+10) gain.blocks=22 (+10)*' })
+Write-Case "end to end: the report variable is set for the transport step's REAPER only, to a file in the work directory, and never in the harness's own process ($($rp.Env.Count) launches)" $true (
+    $stepEnv.Count -eq 1 -and $stepEnv[0] -clike '*\monitor-states.report-gain.json' -and $rp.Env.Count -gt 1 -and [string]::IsNullOrEmpty($env:FIXTURE_REPORT_JSON))
+$reportBad = @(
+    @{ L = 'a plugin that writes no report'; X = @{ ReportMode = 'none' }; S = 'INCOMPLETE'; W = '*no evidence: the report of gain is no evidence: the plugin wrote no report (FIXTURE_REPORT_JSON)*' }
+    @{ L = 'a report written by another process'; X = @{ ReportMode = 'otherpid' }; S = 'INCOMPLETE'; W = '*no evidence: the report of gain is no evidence: it was written by process *, not by the REAPER of this step (*)*' }
+    @{ L = 'a report that is not JSON'; X = @{ ReportMode = 'text' }; S = 'INCOMPLETE'; W = '*the report of gain is no evidence: it is not JSON*' }
+    @{ L = 'a report field that is a string'; X = @{ ReportMode = 'string' }; S = 'INCOMPLETE'; W = '*the report of gain is no evidence: its field blocks is not a number*' }
+    @{ L = 'a report too large to copy'; X = @{ ReportMode = 'toolarge' }; S = 'INCOMPLETE'; W = '*the report of gain is no evidence: its report is larger than 65536 bytes*' }
+    @{ L = 'no fresh report in time'; X = @{ ReportMode = 'stale' }; S = 'INCOMPLETE'; W = '*the report of gain is no evidence: no fresh report could be read in time*' }
+    @{ L = 'a field that grew by less than expected'; X = @{ ReportDelta = @{ opens = 9 } }; S = 'FAIL'; W = '*failed: gain.opens grew by 9, expected 10*' }
+    @{ L = 'a window that opened one time fewer'; X = @{ WindowsFail = 1 }; S = 'FAIL'; W = '*failed: the window of gain opened 2 of 3 times; the window of gain closed 2 of 3 times*' }
+)
+foreach ($c in $reportBad) {
+    $got = & $reportRun $c.X
+    $gotState = & $stateOf $got.Row
+    Write-Case "end to end: $($c.L) makes the state and the row $($c.S), never PASS ($($got.Row.detail))" $true (
+        & $holds { $got.Run.verdict -ceq $c.S -and $got.Row.status -ceq $c.S -and $gotState.status -ceq $c.S -and $got.Row.detail -clike $c.W })
+}
+$rb = & $reportRun @{ VstFullStateReads = '49989' }
+Write-Case "end to end: a preference that does not read back makes the transport row FAIL ($($rb.Row.detail))" $true ($rb.Run.verdict -ceq 'FAIL' -and $rb.Row.status -ceq 'FAIL' -and $rb.Row.detail -clike '*Inform plug-ins of offline rendering state reads on, expected off*')
+# A render judged by what the plugin reports: the driver renders between two readings, the audio is compared as ever
+$reportRenderCfg = & $writeVariant {
+    param($c)
+    & $noExt $c
+    $c.plugins.gain.report = @{ env = 'FIXTURE_REPORT_JSON'; fields = @('blocks', 'opens'); pid = 'pid'; periodMs = 100 }
+    $c.scenarios = @(@{ id = 'chain-report'; kind = 'render'; layout = 'chain'; compare = 'repeat'; host = @{ runFxWhenStopped = $false; informOfflineState = $false }; report = [ordered]@{ gain = [ordered]@{ blocks = @{ delta = 10 }; opens = @{ value = @{ min = 1 } } } } }); $c.negative = @()
+}
+$reportRenderCfg.ReaperExe = $pwshExe; $reportRenderCfg.ResultDir = $e2e.ResultDir
+$reportRenderRun = {
+    param([hashtable]$SpecPlus = @{})
+    $spec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; EnvName = 'FIXTURE_REPORT_JSON'; EnvSeen = $envSeen }
+    foreach ($k in $SpecPlus.get_Keys()) { $spec[$k] = $SpecPlus[$k] }
+    $envSeen.Clear()
+    Set-FakeReaper $spec
+    try { $run = Invoke-HarnessSuite @reportRenderCfg -NoNegative -SelfTestHooks $hooks }
+    finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+    [pscustomobject]@{ Run = $run; Row = @($run.runs[0].scenarios | Where-Object { $_.id -ceq 'chain-report' })[0]; Env = @($envSeen) }
+}
+$rr = & $reportRenderRun
+$rrEnv = @($rr.Env | Where-Object { $_ })
+Write-Case "end to end: a render judged by a report: PASS, the audio compared and the growth over the render recorded ($($rr.Row.detail))" $false (
+    & $holds { $rr.Run.verdict -ceq 'PASS' -and $rr.Row.status -ceq 'PASS' -and $rr.Row.detail -clike 'identical=yes *| report gain.blocks=11 (+10) gain.opens=11 (+10)' -and $rr.Row.facts.report.gain.blocks.delta -eq 10 -and $rr.Row.facts.report.gain.opens.end -eq 11 })
+Write-Case 'end to end: the variable is set for the REAPER of the judged render only: the first render of the comparison goes without it' $true (
+    $rrEnv.Count -eq 1 -and $rrEnv[0] -clike '*\chain-report.report-gain.json' -and $rr.Env.Count -gt 1)
+Write-Case 'end to end: the offline-state preference a scenario asks for is in the private ini when REAPER starts' $false ((Get-HarnessIniValue -Section REAPER -Key vstfullstate) -ceq '49733')
+$renderBad = @(
+    @{ L = 'a field that grew by another amount'; X = @{ ReportDelta = @{ blocks = 9 } }; S = 'FAIL'; W = '*| report *; failed: gain.blocks grew by 9, expected 10' }
+    @{ L = 'a plugin still being run before the render'; X = @{ ReportMode = 'busy' }; S = 'INCOMPLETE'; W = '*no evidence: the report of gain is no evidence: its report kept changing where it had to stay the same: the plugin was still being run' }
+    @{ L = 'a plugin that writes no report'; X = @{ ReportMode = 'none' }; S = 'INCOMPLETE'; W = '*no evidence: the report of gain is no evidence: the plugin wrote no report (FIXTURE_REPORT_JSON)' }
+    @{ L = 'a report written by another process'; X = @{ ReportMode = 'otherpid' }; S = 'INCOMPLETE'; W = '*no evidence: the report of gain is no evidence: it was written by process *, not by the REAPER of this step (*)' }
+    @{ L = 'a preference that does not read back'; X = @{ VstFullStateReads = '49989' }; S = 'FAIL'; W = '*; failed: Inform plug-ins of offline rendering state reads on, expected off' }
+    @{ L = 'a render that wrote no file'; X = @{ RenderFails = $true }; S = 'INCOMPLETE'; W = 'the render produced no file' }
+)
+foreach ($c in $renderBad) {
+    $got = & $reportRenderRun $c.X
+    Write-Case "end to end: $($c.L) makes the judged render $($c.S), never PASS ($($got.Row.detail))" $true ($got.Run.verdict -ceq $c.S -and $got.Row.status -ceq $c.S -and $got.Row.detail -clike $c.W)
+}
 # The licence reminder ends a launch after it saved its copy, and the launch started once more cannot save: the copy of
 # the first one must not prove the states
 $nagSpec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs }
@@ -795,6 +886,34 @@ $nagRow = @($nagRun.runs[0].scenarios | Where-Object { $_.id -ceq 'states-device
 Write-Case 'end to end: a copy saved before the licence reminder ended the launch does not count for the launch started once more' $true (
     $nagRun.verdict -ceq 'INCOMPLETE' -and $null -ne $nagRow -and $nagRow.status -ceq 'INCOMPLETE' -and $nagRow.detail -ceq 'the copy that proves the states was not saved' -and
     @($nagRun.runs[0].retries).Count -eq 1)
+# A report of the launch the licence reminder ended is not there for the launch started once more, and an old file at
+# the path of a report is gone before the REAPER of the step starts
+$reportCfg = & $writeVariant $reportChange
+$reportCfg.ReaperExe = $pwshExe; $reportCfg.ResultDir = $e2e.ResultDir
+$nagged = @{ Done = $false }
+$nagTransport = {
+    param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
+    $run = & $realOnce -Ctx $RunCtx -HostArgs $HostArgs -Label $Label
+    if ($Label -ceq 'transport' -and -not $nagged.Done) { $nagged.Done = $true; $run.Status = 'Modal'; $run.Modal = 'license-nag' }
+    $run
+}.GetNewClosure()
+$atStart = [Collections.Generic.List[bool]]::new()
+& $setOnce $nagTransport
+try { $nagReport = & $reportRun @{ FileAtStart = $atStart } } finally { & $setOnce $realOnce }
+Write-Case "end to end: the report of a launch the licence reminder ended is deleted before the launch started once more ($($atStart -join ','))" $true (
+    ($atStart -join ',') -ceq 'False,False' -and @($nagReport.Run.runs[0].retries).Count -eq 1)
+$realPlan = & (Get-Module Scenarios) { ${function:Get-HarnessReportPlan} }
+$oldFile = {
+    param([Alias('Plugins')]$PluginTable, $Layout, $Work, $Name)
+    $plan = & $realPlan -Plugins $PluginTable -Layout $Layout -Work $Work -Name $Name
+    foreach ($row in $plan) { [IO.File]::WriteAllText($row.Path, '{"blocks":1}') }
+    , $plan
+}.GetNewClosure()
+$setPlan = { param($b) & (Get-Module Scenarios) { param($s) Set-Item function:script:Get-HarnessReportPlan $s } $b }
+& $setPlan $oldFile
+$atStart.Clear()
+try { $null = & $reportRun @{ FileAtStart = $atStart } } finally { & $setPlan $realPlan }
+Write-Case "end to end: an old file at the path of a report is gone before the REAPER of the step starts ($($atStart -join ','))" $true (($atStart -join ',') -ceq 'False')
 Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
     $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
 

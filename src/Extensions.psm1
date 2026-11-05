@@ -23,9 +23,9 @@ Import-Module (Join-Path $PSScriptRoot 'Config.psm1') -ErrorAction Stop
 
 $script:NamePattern = '^[a-z][a-z0-9-]{0,39}$'
 $script:TakenKinds = 'render', 'device', 'savereopen', 'instances', 'transport', 'hang', 'guard'
-$script:TakenSteps = 'learn', 'device', 'savereopen', 'instances', 'transport', 'hang'
+$script:TakenSteps = 'learn', 'device', 'savereopen', 'instances', 'transport', 'render', 'hang'
 $script:Loaded = @{}
-$script:OwnModules ='Config', 'Extensions', 'Guard', 'Host', 'Json', 'Learn', 'Locks', 'Plugins', 'Rpp', 'Scenarios', 'States', 'Suite', 'Transport', 'Wav', 'SelfTest', 'TempDir'
+$script:OwnModules ='Config', 'Extensions', 'Guard', 'Host', 'Json', 'Learn', 'Locks', 'Plugins', 'Report', 'Rpp', 'Scenarios', 'States', 'Suite', 'Transport', 'Wav', 'SelfTest', 'TempDir'
 
 # Relative is a path from the configuration file; the result is the real full path of an existing file inside
 # ConfigDir. Absolute paths, drive-relative paths and anything that resolves outside are refused. What names the

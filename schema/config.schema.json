@@ -247,6 +247,97 @@
         }
       ]
     },
+    "report": {
+      "type": "object",
+      "properties": {
+        "env": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+          "description": "environment variable that tells the plugin the path of its report file; set for the REAPER the harness starts only (names Windows, a runtime, REAPER or WebView2 reads are refused: docs/SAFETY.md)"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+          },
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "description": "the numeric fields of the report to record and judge"
+        },
+        "pid": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+          "description": "the field holding the id of the process that wrote the file: it must be the REAPER of that step"
+        },
+        "periodMs": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 10000,
+          "description": "how often at most the plugin writes the file, default 500"
+        }
+      },
+      "required": ["env", "fields"],
+      "additionalProperties": false,
+      "description": "the plugin writes counts of its own to a small JSON file"
+    },
+    "reportBound": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": -1000000000000000,
+          "maximum": 1000000000000000
+        },
+        {
+          "type": "object",
+          "properties": {
+            "min": {
+              "type": "number",
+              "minimum": -1000000000000000,
+              "maximum": 1000000000000000
+            },
+            "max": {
+              "type": "number",
+              "minimum": -1000000000000000,
+              "maximum": 1000000000000000
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "reportCriterion": {
+      "type": "object",
+      "properties": {
+        "delta": {
+          "$ref": "#/$defs/reportBound"
+        },
+        "value": {
+          "$ref": "#/$defs/reportBound"
+        }
+      },
+      "additionalProperties": false,
+      "description": "delta: how much the field grew over the stretch; value: what it reads at its end"
+    },
+    "reportExpect": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]{0,39}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "propertyNames": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+        },
+        "additionalProperties": {
+          "$ref": "#/$defs/reportCriterion"
+        },
+        "minProperties": 1
+      },
+      "minProperties": 1,
+      "description": "plugin id -> field -> criterion"
+    },
     "plugin": {
       "type": "object",
       "properties": {
@@ -285,6 +376,9 @@
           },
           "minProperties": 1,
           "description": "named plugin states taken from a project or a file"
+        },
+        "report": {
+          "$ref": "#/$defs/report"
         }
       },
       "additionalProperties": false
@@ -558,6 +652,10 @@
         "runFxWhenStopped": {
           "type": "boolean",
           "description": "REAPER's \"Run FX when stopped\" (default true, as REAPER ships); off, the FX of a track that is not armed and has no media are not run while stopped, nor (measured on REAPER 7.82) while playing"
+        },
+        "informOfflineState": {
+          "type": "boolean",
+          "description": "REAPER's \"Inform plug-ins of offline rendering state\" (default true, as REAPER ships; measured on REAPER 7.82); off, a plugin is not told that a render is one"
         }
       },
       "additionalProperties": false
@@ -582,6 +680,9 @@
         "monitoring": {
           "type": "boolean",
           "description": "REAPER reports input monitoring in effect on the tested track (B_RECMON_IN_EFFECT)"
+        },
+        "report": {
+          "$ref": "#/$defs/reportExpect"
         }
       },
       "additionalProperties": false
@@ -611,6 +712,30 @@
           "minimum": 64,
           "maximum": 115200000,
           "description": "length of the observation window in device samples, default 2 x sr"
+        },
+        "windows": {
+          "type": "object",
+          "properties": {
+            "plugin": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,39}$",
+              "description": "a plugin on the tested track (once)"
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "open and close its floating window this many times during the window"
+            },
+            "maxBlockDiff": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "description": "the most the tested chain's blocks may differ from the device's in the window, default 4"
+            }
+          },
+          "required": ["plugin", "count"],
+          "additionalProperties": false
         },
         "expect": {
           "$ref": "#/$defs/transportExpect"
@@ -912,6 +1037,9 @@
                 },
                 "minItems": 1,
                 "description": "tracks rendered as stems of their own, next to the master"
+              },
+              "report": {
+                "$ref": "#/$defs/reportExpect"
               },
               "host": {
                 "$ref": "#/$defs/host"
@@ -1367,6 +1495,9 @@
                 },
                 "minItems": 1,
                 "description": "tracks rendered as stems of their own, next to the master"
+              },
+              "report": {
+                "$ref": "#/$defs/reportExpect"
               },
               "host": {
                 "$ref": "#/$defs/host"

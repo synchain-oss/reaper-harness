@@ -14,6 +14,7 @@
 --               the runner can sample handle and memory counts there
 --   transport   open a project, read it back like device, then take the tested track through a list of transport, arm
 --               and monitoring states and count, per state, the blocks its FX chain is run with and what they carry
+--   render      open a project, read the plugin reports once the plugins have stopped, render it, read them again
 --   hang        never finishes (watchdog negative cases)
 -- Extension steps: job.extensions lists Lua files; each returns a table of step name -> function(h), where h gives
 -- the job and the helpers below. A step name that is already taken is an error (the runner checks the names in the
@@ -70,6 +71,58 @@ end
 local function config(name)
     local ok, v = reaper.get_config_var_string(name)
     return ok and v or "unavailable"
+end
+
+-- Plugin reports (src/Report.psm1): job.reports lists { path = the file the plugin writes, copy = prefix of the copies,
+-- period = its write period in seconds }. readReports(k) takes reading k of every one: it reads the file now, then
+-- after each turn of the message loop again, and takes the first content that differs (a write after this moment:
+-- "changed"), or the same content once the loop has run four write periods ("quiet": a change before this moment would
+-- have been written by then). The plugin's timer runs on this thread, so a turn counts at most 100 ms: a stalled main
+-- thread stalls the timer too. 30 s of wall-clock time is only the limit ("stale"). With settled, a change does not end
+-- the reading: only four quiet write periods do, so the plugin was not run in that time ("busy" when it never was
+-- quiet). The copy goes to <copy><k>.json; the result says rep<j>_<k>=changed | quiet | missing | toolarge | stale | busy.
+local REPORT_MAX = 65536
+local function readCapped(path)
+    local f = io.open(path, "rb")
+    if not f then return nil, "missing" end
+    local t = f:read(REPORT_MAX + 1) or ""
+    f:close()
+    if #t > REPORT_MAX then return nil, "toolarge" end
+    return t, "ok"
+end
+
+local function readReports(k, settled)
+    local reps = job.reports or {}
+    local base, got, left, since, moved = {}, {}, #reps, {}, {}
+    for j, r in ipairs(reps) do base[j] = { readCapped(r.path) }; since[j] = 0 end
+    local loop, last = 0, reaper.time_precise()
+    local deadline = last + 30
+    while left > 0 and last < deadline do
+        coroutine.yield()
+        local now = reaper.time_precise()
+        loop = loop + math.min(now - last, 0.1)
+        last = now
+        for j, r in ipairs(reps) do
+            if not got[j] then
+                local t, s = readCapped(r.path)
+                if t ~= base[j][1] or s ~= base[j][2] then
+                    if settled then base[j], since[j], moved[j] = { t, s }, loop, true else got[j] = { t, s, "changed" } end
+                elseif loop - since[j] >= 4 * r.period then got[j] = { t, s, "quiet" } end
+                if got[j] then left = left - 1 end
+            end
+        end
+    end
+    for j, r in ipairs(reps) do
+        local g, status = got[j], moved[j] and "busy" or "stale"
+        if g and g[2] ~= "ok" then status = g[2]
+        elseif g then
+            local f = assert(io.open(r.copy .. k .. ".json", "wb"))
+            f:write(g[1])
+            f:close()
+            status = g[3]
+        end
+        put("rep" .. j .. "_" .. k, status)
+    end
 end
 
 local function findParam(track, fx, name)
@@ -182,6 +235,7 @@ function steps.device()
     put("project_srate", reaper.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false))
     put("cfg_workrender", config("workrender"))
     put("cfg_runallonstop", config("runallonstop"))
+    put("cfg_vstfullstate", config("vstfullstate"))
     putTracks("", job.reads)
     if job.saveAs then
         reaper.Main_SaveProjectEx(0, job.saveAs, 0)
@@ -253,7 +307,9 @@ end
 -- Reported per state n: st<n>_settled, st<n>_clock and _clock_samples (device blocks and samples of the window),
 -- _blocks, _samples, _silent, _signal, _left, _right, _equal (the tested chain), _fed and _fed_samples (blocks and
 -- frames the feed played), _playstate, _arm, _monitor and _monitoring (read back at the end of the window). A state
--- without a clean reading has no _clock up to _fed_samples, which makes it a state that was not observed.
+-- without a clean reading has no _clock up to _fed_samples, which makes it a state that was not observed. A state with
+-- windows (fx, count) opens and closes that FX's floating window count times in its window: _win_open, _win_closed.
+-- With job.reports, reading 2n-1 of every plugin report is taken after the settle time and 2n after the window.
 function steps.transport()
     openAndWait(job.project)
     put("dev_bsize", device("BSIZE"))
@@ -261,6 +317,7 @@ function steps.transport()
     put("dev_mode", device("MODE"))
     put("cfg_workrender", config("workrender"))
     put("cfg_runallonstop", config("runallonstop"))
+    put("cfg_vstfullstate", config("vstfullstate"))
     local after = config("runafterstop")
     put("cfg_runafterstop", after)
     putTracks("", job.reads)
@@ -344,6 +401,35 @@ function steps.transport()
             if ps & 2 == 0 then reaper.OnPauseButton() end
         end
     end
+    -- Yields until done() is true; false after 10 s of wall-clock time (a limit only)
+    local function until10(done)
+        local limit = reaper.time_precise() + 10
+        while not done() do
+            noRecord()
+            if reaper.time_precise() > limit then return false end
+            coroutine.yield()
+        end
+        return true
+    end
+    -- Opens and closes the floating window of FX w.fx of the tested track w.count times; each step is checked with
+    -- TrackFX_GetFloatingWindow, and the editor gets ten turns of the message loop in between (a web view, for one,
+    -- builds itself asynchronously).
+    local function windows(w)
+        local opened, closed = 0, 0
+        local function shown() return reaper.TrackFX_GetFloatingWindow(tested, w.fx) ~= nil end
+        for _ = 1, w.count do
+            reaper.TrackFX_Show(tested, w.fx, 3)
+            if until10(shown) then
+                opened = opened + 1
+                for _ = 1, 10 do coroutine.yield() end
+                reaper.TrackFX_Show(tested, w.fx, 2)
+                if until10(function() return not shown() end) then closed = closed + 1 end
+            end
+            coroutine.yield()
+        end
+        reaper.TrackFX_Show(tested, w.fx, 2)
+        return opened, closed
+    end
     local settle = job.settle or int(((tonumber(after) or 4000) + 500) * job.sr / 1000)
     put("settle", settle)
     local done = 0
@@ -353,8 +439,16 @@ function steps.transport()
         transport(st.transport)
         local p = "st" .. n .. "_"
         put(p .. "settled", int(waitSamples(settle)))
+        readReports(2 * n - 1)
         local c0, t0, f0 = snap(CLOCK), snap(TESTED), snap(FEED)
-        waitSamples(st.samples)
+        local w0 = reaper.gmem_read(CLOCK + 1)
+        if st.windows then
+            local o, c = windows(st.windows)
+            put(p .. "win_open", o)
+            put(p .. "win_closed", c)
+        end
+        local ran = reaper.gmem_read(CLOCK + 1) - w0
+        if ran < st.samples then waitSamples(st.samples - ran) end
         local c1, t1, f1 = snap(CLOCK), snap(TESTED), snap(FEED)
         if c0 and t0 and f0 and c1 and t1 and f1 then
             put(p .. "clock", int(c1[0] - c0[0]))
@@ -367,6 +461,7 @@ function steps.transport()
         put(p .. "arm", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECARM")))
         put(p .. "monitor", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECMON")))
         put(p .. "monitoring", int(reaper.GetMediaTrackInfo_Value(tested, "B_RECMON_IN_EFFECT")))
+        readReports(2 * n)
         done = n
     end
     reaper.OnStopButton()
@@ -376,6 +471,24 @@ function steps.transport()
     put("feed_handle", int(reaper.gmem_read(FEED + 11)))
     put("feed_channels", int(reaper.gmem_read(FEED + 12)))
     put("feed_rate", int(reaper.gmem_read(FEED + 13)))
+end
+
+-- render (a render scenario that judges plugin reports): opens the project, waits out run FX after stopping, takes
+-- reading 1 once every report has stayed the same for four write periods (the plugin was not run in that time), renders
+-- with the project's own settings (File: Render project, using the most recent render settings, auto-close render
+-- dialog: 42230; measured on REAPER 7.82, the call returns when the file is written and no deferred script runs while it
+-- renders) and takes reading 2. With Run FX when stopped off nothing else runs the plugin in between (docs/CONFIG.md).
+function steps.render()
+    openAndWait(job.project)
+    put("dev_bsize", device("BSIZE"))
+    put("dev_srate", device("SRATE"))
+    put("cfg_workrender", config("workrender"))
+    put("cfg_runallonstop", config("runallonstop"))
+    put("cfg_vstfullstate", config("vstfullstate"))
+    wait(((tonumber(config("runafterstop")) or 4000) + 500) / 1000)
+    readReports(1, true)
+    reaper.Main_OnCommand(42230, 0)
+    readReports(2)
 end
 
 function steps.hang()

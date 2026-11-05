@@ -151,7 +151,8 @@ the launch's `Why` say so.
 ## Putting a probe back
 
 A typical product-specific check needs a plugin to report something about itself (a self-test result, a latency it
-measured, a state it reached). A pattern that fits the harness: the plugin exposes it as a read-only parameter or a
+measured, a state it reached). When that is a number in a test build, the [report](CONFIG.md#reports) of a plugin does
+it without an extension. Otherwise a pattern that fits the harness: the plugin exposes it as a read-only parameter or a
 named config value; a Lua step reads it with `TrackFX_GetNamedConfigParm` or `TrackFX_GetFormattedParamValue` and
 `h.put`s it; a kind's `Run` builds a project with `NewRun`, runs the step with `LuaStep` and judges `Result`. Give
 such a kind a negative case in the configuration (for example a layout where the probe must report failure) so a

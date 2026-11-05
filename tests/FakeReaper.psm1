@@ -13,6 +13,8 @@
 # nothing. The PDC JSFX reports "Delay (samples)" as PDC and, being compensated, leaves the timing alone; with
 # "Report delay as PDC" off it delays the audio instead.
 #   Set-FakeReaper -Spec @{ Pwsh; CfgDir; Plugins (REAPER name -> @{ Bundle; Cid }); Seen (a list) }
+#       EnvName, EnvSeen (a list): the value of that variable in the environment of every launch ('' when unset)
+#       FileAtStart (a list): whether the file that variable names was there when a launch started; the launch writes it
 #       JSFX are found by their add name ("JS:<path under Effects>") in the configuration directory's Effects
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
 #   ConvertFrom-FakeLua <text>                        reads a job file written by ConvertTo-HarnessLuaTable
@@ -350,6 +352,36 @@ function Invoke-FakeLearn($job, $report) {
     $report.Add('saved=true')
 }
 
+# Plugin reports, as the driver copies them (job.reports: path, copy, period, and for the stand-in fields and pid): every
+# declared field grows by Spec.ReportDelta[field] (default 10) in each state's window and by 1 between windows; the pid
+# field is the stand-in process (written once it is started). Spec.ReportMode: none (the plugin writes nothing), otherpid
+# (another process wrote it), text (not JSON), string (the first field is a string), toolarge, stale, busy.
+$script:PendingCopies = [Collections.Generic.List[object]]::new()
+$script:ReportValue = @{}
+function Write-FakeReports($job, $report, [int]$Reading) {
+    $mode = [string]$script:Spec['ReportMode']
+    $reps = @($job['reports'])
+    for ($j = 0; $j -lt $reps.Count; $j++) {
+        $r = $reps[$j]
+        $status = @{ none = 'missing'; toolarge = 'toolarge'; stale = 'stale'; busy = 'busy' }[$mode]
+        if ($status) { $report.Add("rep$($j + 1)_$Reading=$status"); continue }
+        $doc = [ordered]@{}
+        foreach ($f in @($r['fields'])) {
+            $key = "$j/$f"
+            $step = ($Reading % 2) ? 1 : ($script:Spec['ReportDelta'] -and $script:Spec['ReportDelta'].Contains($f) ? $script:Spec['ReportDelta'][$f] : 10)
+            $script:ReportValue[$key] = (($Reading -eq 1) ? 0 : $script:ReportValue[$key]) + $step
+            $doc[$f] = $script:ReportValue[$key]
+        }
+        if ($mode -ceq 'string') { $first = @($r['fields'])[0]; $doc[$first] = "$($doc[$first])" }
+        $body = ($mode -ceq 'text') ? 'not json' : ($doc | ConvertTo-Json -Compress)
+        if ($r['pid'] -and $mode -cne 'text') { $body = $body.Substring(0, $body.Length - 1) + ",`"$($r['pid'])`":__PID__}" }
+        $file = "$($r['copy'])$Reading.json"
+        [IO.File]::WriteAllText($file, $body)
+        $script:PendingCopies.Add([pscustomobject]@{ File = $file; Shift = ($mode -ceq 'otherpid') ? 1 : 0 })
+        $report.Add("rep$($j + 1)_$Reading=$(($Reading % 2) ? 'quiet' : 'changed')")
+    }
+}
+
 # The transport step, as REAPER 7.82 was measured to behave (docs/CONFIG.md): the chain of the tested track is run when
 # the track is armed, or when "Run FX when stopped" (bit 0 of runallonstop in the private ini) is on and the transport
 # is not paused; input monitoring is in effect when the track is armed and monitoring is on, or auto while not playing;
@@ -366,7 +398,7 @@ function Invoke-FakeTransport($job, $report) {
         $null = New-Item -ItemType Directory -Force -Path $job['recordDir']
         [IO.File]::WriteAllText((Join-Path $job['recordDir'] 'take.wav'), 'recorded')
     }
-    foreach ($kv in @("dev_bsize=$block", "dev_srate=$sr", 'dev_mode=dummy', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$ras", 'cfg_runafterstop=4000')) { $report.Add($kv) }
+    foreach ($kv in @("dev_bsize=$block", "dev_srate=$sr", 'dev_mode=dummy', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$ras", "cfg_vstfullstate=$($script:Spec['VstFullStateReads'] ?? (Get-FakeIniValue 'vstfullstate' '49989'))", 'cfg_runafterstop=4000')) { $report.Add($kv) }
     Add-FakeTracks $report '' $job['project'] $job['reads']
     # Spec.RecordPathFails: the record path does not read back, and like the driver the step stops before it arms anything
     if ($script:Spec['RecordPathFails']) { $report.Add('record_path=failed'); $report.Add('error=the record path of the project could not be set to the work directory; nothing was armed'); return }
@@ -403,6 +435,10 @@ function Invoke-FakeTransport($job, $report) {
         }
         if ($script:Spec['Unread'] -ceq [string]$st['name']) { foreach ($k in 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'fed', 'fed_samples') { $values.Remove($k) } }
         foreach ($e in $values.GetEnumerator()) { $report.Add("st${n}_$($e.Key)=$($e.Value)") }
+        # Windows open and close every time, but Spec.WindowsFail times fewer
+        if ($st.Contains('windows')) { foreach ($w in 'win_open', 'win_closed') { $report.Add("st${n}_$w=$([int]$st['windows']['count'] - [int]($script:Spec['WindowsFail'] ?? 0))") } }
+        Write-FakeReports $job $report (2 * $n - 1)
+        Write-FakeReports $job $report (2 * $n)
     }
     $report.Add("states_done=$n")
     $handle = (-not $armed -or $script:Spec['FeedIdle'] -ceq '*') ? -2 : (($nch -gt 0) ? 1 : -1)
@@ -421,7 +457,7 @@ function Invoke-FakeStep([string]$JobFile) {
             Invoke-FakeLearn $job $report
         }
         'device' {
-            foreach ($kv in @("dev_bsize=$(Get-FakeIniValue 'dummy_blocksize')", "dev_srate=$(Get-FakeIniValue 'dummy_srate')", 'dev_mode=dummy', 'project_srate=0', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$(Get-FakeIniValue 'runallonstop' '1')")) { $report.Add($kv) }
+            foreach ($kv in @("dev_bsize=$(Get-FakeIniValue 'dummy_blocksize')", "dev_srate=$(Get-FakeIniValue 'dummy_srate')", 'dev_mode=dummy', 'project_srate=0', "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$(Get-FakeIniValue 'runallonstop' '1')", "cfg_vstfullstate=$(Get-FakeIniValue 'vstfullstate' '49989')")) { $report.Add($kv) }
             Add-FakeTracks $report '' $job['project'] $job['reads']
             # Like the driver, saved says the file is there, whoever wrote it. Spec.SaveFails: this launch cannot save.
             if ($job.Contains('saveAs')) {
@@ -442,6 +478,12 @@ function Invoke-FakeStep([string]$JobFile) {
             foreach ($mark in $job['warmMark'], $job['loopMark']) { [IO.File]::WriteAllText($mark, '1') }
         }
         'transport' { Invoke-FakeTransport $job $report }
+        'render' {
+            foreach ($kv in @("dev_bsize=$(Get-FakeIniValue 'dummy_blocksize')", "dev_srate=$(Get-FakeIniValue 'dummy_srate')", "cfg_workrender=$(Get-FakeIniValue 'workrender' '17')", "cfg_runallonstop=$(Get-FakeIniValue 'runallonstop' '1')", "cfg_vstfullstate=$($script:Spec['VstFullStateReads'] ?? (Get-FakeIniValue 'vstfullstate' '49989'))")) { $report.Add($kv) }
+            Write-FakeReports $job $report 1
+            if (-not $script:Spec['RenderFails']) { Invoke-FakeRender $job['project'] }
+            Write-FakeReports $job $report 2
+        }
         'hang' { return 'hang' }
         default { $report.Add("error=no such step: $($job['step'])") }
     }
@@ -452,6 +494,11 @@ function Invoke-FakeStep([string]$JobFile) {
 function Invoke-FakeLaunch($psi) {
     $given = @($psi.ArgumentList)
     $script:Spec.Seen.Add($given -join ' ')
+    if ($script:Spec['EnvName']) {
+        $told = [string]$psi.Environment[$script:Spec.EnvName]
+        $script:Spec.EnvSeen.Add($told)
+        if ($told -and $script:Spec.ContainsKey('FileAtStart')) { $script:Spec.FileAtStart.Add((Test-Path -LiteralPath $told)); [IO.File]::WriteAllText($told, '{}') }
+    }
     $behave = 'quick'
     $renderAt = [array]::IndexOf($given, '-renderproject')
     if ($renderAt -ge 0) { Invoke-FakeRender $given[$renderAt + 1] }
@@ -459,7 +506,10 @@ function Invoke-FakeLaunch($psi) {
     $psi.FileName = $script:Spec.Pwsh
     $psi.ArgumentList.Clear()
     foreach ($part in '-NoProfile', '-NonInteractive', '-Command', @{ quick = 'exit 0'; linger = 'Start-Sleep -Milliseconds 1500'; hang = 'Start-Sleep -Seconds 60' }[$behave]) { $psi.ArgumentList.Add($part) }
-    [Diagnostics.Process]::Start($psi)
+    $proc = [Diagnostics.Process]::Start($psi)
+    foreach ($c in $script:PendingCopies) { [IO.File]::WriteAllText($c.File, [IO.File]::ReadAllText($c.File).Replace('__PID__', "$($proc.Id + $c.Shift)")) }
+    $script:PendingCopies.Clear()
+    $proc
 }
 
 Export-ModuleMember -Function Set-FakeReaper, Get-FakeReaperLauncher, Get-FakeModuleSampler, ConvertFrom-FakeLua, Get-FakeMix

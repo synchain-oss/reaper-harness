@@ -130,8 +130,9 @@ old stays as it was and no notification comes; without it the notification shows
 
 The `transport` kind arms a track and turns its input monitoring on. It never records:
 
-- the driver calls no record action: the only actions in `lua/driver.lua` are File: New project and File: Quit, and
-  it has no call that records or looks an action up by name (the self-test reads the driver's text for both);
+- the driver calls no record action: the only actions in `lua/driver.lua` are File: New project, File: Quit and, in
+  its render step, the render with the project's own settings, and it has no call that records or looks an action up
+  by name (the self-test reads the driver's text for both);
 - recording is disabled (record mode "disabled") on both tracks it arms, the tested one and its own clock track, and
   their input is none: what the tested track gets comes from the feed JSFX in its input FX chain;
 - the project's record path is set to a directory in the work directory before anything is armed, and read back; a
@@ -142,6 +143,29 @@ The `transport` kind arms a track and turns its input monitoring on. It never re
 - at the end the transport is stopped and both tracks are disarmed.
 
 On REAPER 7.82 with the Dummy device (which has no inputs) the record bit was never seen in these runs.
+
+## Plugin reports and windows
+
+[Reports](CONFIG.md#reports) let a test build of a plugin hand the harness a file, and `windows` opens the plugin's
+editor. What keeps that contained:
+
+- the report variable is set in the environment of the REAPER that one driver step starts, and nowhere else: not in the
+  harness's own process, not for any other launch. The self-test checks both;
+- a configuration cannot use it to change anything else: names Windows, the .NET and PowerShell runtimes, REAPER, a
+  plugin format or WebView2 read (`APPDATA`, `USERPROFILE`, `TEMP`, `PATH`, anything starting `REAPER_`, `WEBVIEW2_`,
+  `DOTNET_`, `COR_`, `VST3_` and the like) are refused before REAPER starts, like the two-character names and lower case;
+- the path is a new file in the work directory for every step, deleted before the start;
+- the file is what a plugin wrote, so it is read as untrusted: at most 64 KiB, strict JSON, only the declared numeric
+  fields. Nothing else in it reaches a result or a log;
+- a file with a `pid` field that is not the REAPER of this step, a missing file and a stale one are no evidence
+  (INCOMPLETE), never a PASS.
+
+Opening an editor runs the plugin's own GUI code, in REAPER's process, under your account. The tool does not know what
+it writes: a plugin with a web view, for one, keeps a cache in its user data. To keep a run off that data, start the
+tool with `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` pointed at a scratch profile, and `WEBVIEW2_USER_DATA_FOLDER` at
+a directory of it. That is yours to do: the tool never sets them, and then its before-and-after check of the default
+REAPER resource directory looks at the scratch profile, not at the real one, so run the check on the real one yourself. The configuration directory comes from
+`-CfgDir` either way.
 
 ## Outcomes never lie in your favour
 
