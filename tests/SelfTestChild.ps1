@@ -838,12 +838,13 @@ Write-Case "end to end: INCOMPLETE and FAIL rounds with a reporting plugin leave
 $rb = & $reportRun @{ VstFullStateReads = '49989' }
 Write-Case "end to end: a preference that does not read back makes the transport row FAIL ($($rb.Row.detail))" $true ($rb.Run.verdict -ceq 'FAIL' -and $rb.Row.status -ceq 'FAIL' -and $rb.Row.detail -clike '*Inform plug-ins of offline rendering state reads on, expected off*')
 # A render judged by what the plugin reports: the driver renders between two readings, the audio is compared as ever
-$reportRenderCfg = & $writeVariant {
+$reportRenderChange = {
     param($c)
     & $noExt $c
     $c.plugins.gain.report = @{ env = 'FIXTURE_REPORT_JSON'; fields = @('blocks', 'opens'); pid = 'pid'; periodMs = 100 }
     $c.scenarios = @(@{ id = 'chain-report'; kind = 'render'; layout = 'chain'; compare = 'repeat'; host = @{ runFxWhenStopped = $false; informOfflineState = $false }; report = [ordered]@{ gain = [ordered]@{ blocks = @{ delta = 10 }; opens = @{ value = @{ min = 1 } } } } }); $c.negative = @()
 }
+$reportRenderCfg = & $writeVariant $reportRenderChange
 $reportRenderCfg.ReaperExe = $pwshExe; $reportRenderCfg.ResultDir = $e2e.ResultDir
 $reportRenderRun = {
     param([hashtable]$SpecPlus = @{})
@@ -929,10 +930,6 @@ $atStart.Clear(); $copiesAtStart.Clear()
 try { $null = & $reportRun @{ FileAtStart = $atStart; CopiesAtStart = $copiesAtStart } } finally { & $setPlan $realPlan }
 Write-Case "end to end: an old file at the path of a report is gone before the REAPER of the step starts ($($atStart -join ','))" $true (($atStart -join ',') -ceq 'False')
 Write-Case "end to end: an old copy of a report is gone before the REAPER of the step starts ($($copiesAtStart -join ','))" $true (($copiesAtStart -join ',') -ceq '0')
-& $setPlan $oldFile
-$copiesAtStart.Clear()
-try { $null = & $reportRenderRun @{ CopiesAtStart = $copiesAtStart } } finally { & $setPlan $realPlan }
-Write-Case "end to end: an old copy of a report is gone before the REAPER of a judged render starts ($($copiesAtStart -join ','))" $true (($copiesAtStart -join ',') -ceq '0')
 # A launch that ends badly after the driver copied the reports: INCOMPLETE, and the copies are gone all the same
 $timedOut = {
     param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
@@ -944,6 +941,13 @@ $timedOut = {
 try { $late = & $reportRun } finally { & $setOnce $realOnce }
 Write-Case "end to end: a transport launch that ends badly after the driver copied the reports is INCOMPLETE and leaves no copy ($($late.Row.detail); $(& $copiesLeft) left)" $true (
     & $holds { $late.Row.status -ceq 'INCOMPLETE' -and $late.Row.detail -clike 'timed out after *' -and (& $copiesLeft) -eq 0 })
+# The same for a judged render: its configuration file was written over by the transport one above, so it is written again
+$reportRenderCfg = & $writeVariant $reportRenderChange
+$reportRenderCfg.ReaperExe = $pwshExe; $reportRenderCfg.ResultDir = $e2e.ResultDir
+& $setPlan $oldFile
+$copiesAtStart.Clear()
+try { $null = & $reportRenderRun @{ CopiesAtStart = $copiesAtStart } } finally { & $setPlan $realPlan }
+Write-Case "end to end: an old copy of a report is gone before the REAPER of a judged render starts ($($copiesAtStart -join ','))" $true (($copiesAtStart -join ',') -ceq '0')
 Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
     $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
 
