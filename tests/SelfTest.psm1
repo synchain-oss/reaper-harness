@@ -2271,11 +2271,14 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add 'driver: a report is read with a cap of 64 KiB, the same as the module''s' $true ($driverText -cmatch 'REPORT_MAX = 65536\b' -and $driverText -cmatch 'f:read\(REPORT_MAX \+ 1\)' -and ([IO.File]::ReadAllText((Join-Path $RepoRoot 'src/Report.psm1'))) -cmatch 'MaxBytes = 65536\b')
     & $add 'driver: no record call of any kind, and no action looked up by name' $true ($driverText -cnotmatch 'OnRecord|CSurf_|Main_OnCommandEx|NamedCommandLookup|Record\w*Button')
     $transportStep = $driverText.Substring([Math]::Max(0, $driverText.IndexOf('function steps.transport()')))
+    # The body of waitSamples alone (it ends at the first "end" of its own indentation): a later wait that checks the
+    # record bit must not stand in for it
+    $waitBody = [regex]::Match($transportStep, '(?s)\n( *)local function waitSamples\(n\)\r?\n.*?\r?\n\1end\r?\n').Value
     $recModes = @([regex]::Matches($driverText, '"I_RECMODE",\s*(-?\d+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
     & $add "driver: the transport step disables recording on its tracks (record mode 2 only: $($recModes -join ', ')), sets the record path before it arms anything, and every wait checks the record bit" $true (
         $transportStep.StartsWith('function steps.transport()', [StringComparison]::Ordinal) -and ($recModes -join ',') -ceq '2' -and
         $transportStep.IndexOf('"RECORD_PATH", job.recordDir, true') -gt 0 -and $transportStep.IndexOf('"RECORD_PATH", job.recordDir, true') -lt $transportStep.IndexOf('"I_RECARM"') -and
-        $transportStep -cmatch '(?s)local function waitSamples\(n\).*?while [^\n]*\n\s*noRecord\(\)' -and $transportStep -cmatch 'GetPlayState\(\) & 4 ~= 0')
+        $waitBody -cmatch 'while [^\n]*\n\s*noRecord\(\)' -and $transportStep -cmatch 'GetPlayState\(\) & 4 ~= 0')
     $pathStop = $transportStep.IndexOf('if not pathOk then error(')
     & $add 'driver: a record path that does not read back is reported and stops the step before anything is armed or the transport is touched' $true (
         $transportStep -cmatch 'local pathOk = setOk and path == job\.recordDir\r?\n\s*put\("record_path", pathOk and "ok" or "failed"\)' -and
