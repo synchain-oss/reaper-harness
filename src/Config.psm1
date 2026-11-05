@@ -22,7 +22,8 @@ Import-Module (Join-Path $PSScriptRoot 'Guard.psm1') -ErrorAction Stop
 function Stop-Usage([string]$Reason) { throw [System.InvalidOperationException]::new("USAGE: $Reason") }
 
 # ---- spec constructors (a small subset of JSON Schema, as data) ----
-function SObj([System.Collections.Specialized.OrderedDictionary]$Props, [string[]]$Required = @(), [string]$Doc = '') { @{ t = 'object'; props = $Props; req = $Required; doc = $Doc } }
+# MinKeys: for the schema only, where the validator refuses an empty object with a message of its own
+function SObj([System.Collections.Specialized.OrderedDictionary]$Props, [string[]]$Required = @(), [string]$Doc = '', [int]$MinKeys = 0) { @{ t = 'object'; props = $Props; req = $Required; doc = $Doc; minKeys = $MinKeys } }
 function SMap([string]$Key, $Value, [int]$Min = 0, [string]$Doc = '') { @{ t = 'map'; key = $Key; value = $Value; min = $Min; doc = $Doc } }
 function SArr($Items, [int]$Min = 0, [switch]$Unique, [string]$Doc = '', [int]$Max = 0) { @{ t = 'array'; items = $Items; min = $Min; max = $Max; unique = [bool]$Unique; doc = $Doc } }
 function SStr([string]$Pattern = '', [string[]]$Enum = @(), [string]$Doc = '') { @{ t = 'string'; pattern = $Pattern; enum = $Enum; doc = $Doc } }
@@ -68,8 +69,8 @@ function New-HarnessSpec {
             pid      = (SStr $script:FieldPattern -Doc 'the field holding the id of the process that wrote the file: it must be the REAPER of that step')
             periodMs = (SInt 10 10000 -Doc 'how often at most the plugin writes the file, default 500')
         }) @('env', 'fields') -Doc 'the plugin writes counts of its own to a small JSON file'
-    $defs.reportBound = SAny @((SNum -1e15 1e15), (SObj ([ordered]@{ min = (SNum -1e15 1e15); max = (SNum -1e15 1e15) }))) 'a number (exactly that) or { min, max }'
-    $defs.reportCriterion = SObj ([ordered]@{ delta = (SRef reportBound); value = (SRef reportBound) }) -Doc 'delta: how much the field grew over the stretch; value: what it reads at its end'
+    $defs.reportBound = SAny @((SNum -1e15 1e15), (SObj ([ordered]@{ min = (SNum -1e15 1e15); max = (SNum -1e15 1e15) }) -MinKeys 1)) 'a number (exactly that) or { min, max }'
+    $defs.reportCriterion = SObj ([ordered]@{ delta = (SRef reportBound); value = (SRef reportBound) }) -MinKeys 1 -Doc 'delta: how much the field grew over the stretch; value: what it reads at its end'
     $defs.reportExpect = SMap $script:IdPattern (SMap $script:FieldPattern (SRef reportCriterion) -Min 1) -Min 1 -Doc 'plugin id -> field -> criterion'
     $defs.plugin = SObj ([ordered]@{
             bundle    = (SStr '^[^\\/:*?"<>|\u0000-\u001f]{1,120}\.vst3$' -Doc 'VST3 bundle directory name, looked up in -PluginDir')
@@ -122,7 +123,7 @@ function New-HarnessSpec {
             channels   = (SStr -Enum 'left', 'same', 'different' -Doc 'left: signal on the left only; same: left and right equal sample for sample; different: both carry signal and differ')
             monitoring = (SBool -Doc 'REAPER reports input monitoring in effect on the tested track (B_RECMON_IN_EFFECT)')
             report     = (SRef reportExpect)
-        })
+        }) -MinKeys 1
     $defs.transportState = SObj ([ordered]@{
             name      = (SStr $script:StatePattern)
             transport = (SStr -Enum 'stop', 'play', 'pause')
@@ -338,6 +339,7 @@ function ConvertTo-SchemaNode($Spec) {
             foreach ($k in $Spec.props.get_Keys()) { $Props[$k] = ConvertTo-SchemaNode $Spec.props[$k] }
             $n.properties = $Props
             if ($Spec.req.Count) { $n.required = @($Spec.req) }
+            if ($Spec.minKeys) { $n.minProperties = $Spec.minKeys }
             $n.additionalProperties = $false
         }
         'map' {

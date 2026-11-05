@@ -11,6 +11,8 @@
 #   Get-HarnessReportEnvironment its variables; ConvertTo-HarnessReportJob what the driver gets of it (pure)
 #   Read-HarnessReportCopy       one copy, checked: a JSON object, the declared fields numbers, the pid this launch's
 #   Read-HarnessReportReading    reading k of every report of a plan, from the driver's facts and the copies
+#   Get-HarnessReportCopies      every copy the driver may write for a step (deleted before it starts and before a retry)
+#   Read-HarnessReportReadings   readings 1 to n, after which every copy is deleted, whatever the outcome
 #   Test-HarnessReportCriteria   criteria against two readings (pure)
 # Counts are whatever the plugin writes: the harness only knows they are numbers. A plugin that writes per-process totals
 # has to be the only instance of its kind in the project, which the configuration enforces for every plugin it judges.
@@ -95,6 +97,17 @@ function Read-HarnessReportReading {
     $out
 }
 
+# Every copy the driver may write when it takes Count readings of the plan's reports (lua/driver.lua: Copy + k + '.json').
+function Get-HarnessReportCopies([object[]]$Plan = @(), [int]$Count = 0) { , @(foreach ($r in $Plan) { for ($n = 1; $n -le $Count; $n++) { "$($r.Copy)$n.json" } }) }
+
+# Readings 1 to Count (Read-HarnessReportReading; element k - 1 is reading k). Then every copy is deleted, read or not,
+# whatever the step's outcome: a copy is the plugin's own text, and only the declared fields may reach a result.
+function Read-HarnessReportReadings {
+    param([Parameter(Mandatory)][hashtable]$Facts, [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Plan, [Parameter(Mandatory)][int]$Count, [int]$ProcessId = 0)
+    try { , @(if ($Plan.Count) { for ($n = 1; $n -le $Count; $n++) { Read-HarnessReportReading -Facts $Facts -Plan $Plan -K $n -ProcessId $ProcessId } }) }
+    finally { foreach ($f in (Get-HarnessReportCopies $Plan $Count)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } } }
+}
+
 function Format-HarnessReportNumber([double]$v) { $v.ToString(([Math]::Floor($v) -eq $v) ? '0' : 'R', [Globalization.CultureInfo]::InvariantCulture) }
 
 function Test-HarnessReportBound($Bound, [double]$v) { ($null -ne $Bound.Exact) ? ($v -eq $Bound.Exact) : (($null -eq $Bound.Min -or $v -ge $Bound.Min) -and ($null -eq $Bound.Max -or $v -le $Bound.Max)) }
@@ -139,4 +152,5 @@ function Test-HarnessReportCriteria {
     [pscustomobject]@{ Gaps = $gaps.ToArray(); Problems = $bad.ToArray(); Text = ($seen -join ' '); Facts = $seenFacts }
 }
 
-Export-ModuleMember -Function Get-HarnessReportPlan, Get-HarnessReportEnvironment, ConvertTo-HarnessReportJob, Read-HarnessReportCopy, Read-HarnessReportReading, Test-HarnessReportCriteria
+Export-ModuleMember -Function Get-HarnessReportPlan, Get-HarnessReportEnvironment, ConvertTo-HarnessReportJob, Read-HarnessReportCopy, Read-HarnessReportReading, Get-HarnessReportCopies, Read-HarnessReportReadings,
+    Test-HarnessReportCriteria

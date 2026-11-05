@@ -160,15 +160,17 @@ function Test-HarnessTransportState {
     if ($r.arm -ne [int]$State.Arm) { $gap.Add("arm reads $($r.arm), expected $([int]$State.Arm)") }
     if ($r.monitor -ne $script:MonitorCode[$State.Monitor]) { $gap.Add("monitoring mode reads $($r.monitor), expected $($script:MonitorCode[$State.Monitor])") }
     if ($HasFeed -and $State.Arm -and $r.fed_samples -eq 0) { $gap.Add('the feed played no block in the window although the track is armed') }
-    $w = $State.Windows
+    # A state of an older caller or an extension may have neither of the keys this module added later
+    $w = $State.PSObject.Properties['Windows'] ? $State.Windows : $null
+    $criteria = $State.PSObject.Properties['Report'] ? $State.Report : $null
     if ($w) {
         $line += " windows=$($r.win_open)/$($r.win_closed) of $($w.Count)"
         if ($null -eq $r.win_open -or $null -eq $r.win_closed) { $gap.Add('the driver reported no window counts') }
     }
     # Readings: @{ Start; End } of the reports (Read-HarnessReportReading), $null without reports
-    $rep = $Readings ? (Test-HarnessReportCriteria -Criteria $State.Report -Start $Readings.Start -End $Readings.End) : $null
+    $rep = $Readings ? (Test-HarnessReportCriteria -Criteria ($criteria ?? @{}) -Start $Readings.Start -End $Readings.End) : $null
     if ($rep -and $rep.Text) { $line += " report $($rep.Text)" }
-    if ($State.Report.get_Count() -and -not $rep) { $gap.Add('no report was read') }
+    if ($criteria -and $criteria.get_Count() -and -not $rep) { $gap.Add('no report was read') }
     if ($rep) { foreach ($g in $rep.Gaps) { $gap.Add($g) } }
     if ($gap.Count) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Line = "$line; no evidence: $($gap -join '; ')"; Problems = $gap.ToArray() } }
     $x = $State.Expect

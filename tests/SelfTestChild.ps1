@@ -812,6 +812,10 @@ Write-Case "end to end: a reporting plugin with its window opened 3 times: PASS,
         $armedState.report.gain.opens.delta -eq 10 -and $armedState.report.gain.blocks.end -eq 22 -and $rp.Row.detail -clike '*stopped-armed-on: * windows=3/3 of 3 report gain.opens=22 (+10) gain.blocks=22 (+10)*' })
 Write-Case "end to end: the report variable is set for the transport step's REAPER only, to a file in the work directory, and never in the harness's own process ($($rp.Env.Count) launches)" $true (
     $stepEnv.Count -eq 1 -and $stepEnv[0] -clike '*\monitor-states.report-gain.json' -and $rp.Env.Count -gt 1 -and [string]::IsNullOrEmpty($env:FIXTURE_REPORT_JSON))
+# The driver's copies of a report are the plugin's own text: none may be left in the results, whatever the outcome
+$copiesLeft = { @(Get-ChildItem -LiteralPath (Join-Path $e2e.ResultDir 'work') -Recurse -File -Filter '*.report-*.copy-*.json' -ErrorAction SilentlyContinue).Count }
+Write-Case "end to end: a green round with a reporting plugin leaves no copy of a report in the results ($(& $copiesLeft) left)" $true ($rp.Run.verdict -ceq 'PASS' -and (& $copiesLeft) -eq 0)
+$leftAfter = [Collections.Generic.List[string]]::new()
 $reportBad = @(
     @{ L = 'a plugin that writes no report'; X = @{ ReportMode = 'none' }; S = 'INCOMPLETE'; W = '*no evidence: the report of gain is no evidence: the plugin wrote no report (FIXTURE_REPORT_JSON)*' }
     @{ L = 'a report written by another process'; X = @{ ReportMode = 'otherpid' }; S = 'INCOMPLETE'; W = '*no evidence: the report of gain is no evidence: it was written by process *, not by the REAPER of this step (*)*' }
@@ -827,7 +831,10 @@ foreach ($c in $reportBad) {
     $gotState = & $stateOf $got.Row
     Write-Case "end to end: $($c.L) makes the state and the row $($c.S), never PASS ($($got.Row.detail))" $true (
         & $holds { $got.Run.verdict -ceq $c.S -and $got.Row.status -ceq $c.S -and $gotState.status -ceq $c.S -and $got.Row.detail -clike $c.W })
+    $leftAfter.Add("$($c.S) $($c.L)=$(& $copiesLeft)")
 }
+Write-Case "end to end: INCOMPLETE and FAIL rounds with a reporting plugin leave no copy of a report in the results either ($($leftAfter -join ', '))" $true (
+    $leftAfter.Count -eq $reportBad.Count -and @($leftAfter | Where-Object { $_ -cnotlike '*=0' }).Count -eq 0)
 $rb = & $reportRun @{ VstFullStateReads = '49989' }
 Write-Case "end to end: a preference that does not read back makes the transport row FAIL ($($rb.Row.detail))" $true ($rb.Run.verdict -ceq 'FAIL' -and $rb.Row.status -ceq 'FAIL' -and $rb.Row.detail -clike '*Inform plug-ins of offline rendering state reads on, expected off*')
 # A render judged by what the plugin reports: the driver renders between two readings, the audio is compared as ever
@@ -849,6 +856,7 @@ $reportRenderRun = {
     [pscustomobject]@{ Run = $run; Row = @($run.runs[0].scenarios | Where-Object { $_.id -ceq 'chain-report' })[0]; Env = @($envSeen) }
 }
 $rr = & $reportRenderRun
+$leftAfter.Clear(); $leftAfter.Add("PASS=$(& $copiesLeft)")
 $rrEnv = @($rr.Env | Where-Object { $_ })
 Write-Case "end to end: a render judged by a report: PASS, the audio compared and the growth over the render recorded ($($rr.Row.detail))" $false (
     & $holds { $rr.Run.verdict -ceq 'PASS' -and $rr.Row.status -ceq 'PASS' -and $rr.Row.detail -clike 'identical=yes *| report gain.blocks=11 (+10) gain.opens=11 (+10)' -and $rr.Row.facts.report.gain.blocks.delta -eq 10 -and $rr.Row.facts.report.gain.opens.end -eq 11 })
@@ -866,7 +874,10 @@ $renderBad = @(
 foreach ($c in $renderBad) {
     $got = & $reportRenderRun $c.X
     Write-Case "end to end: $($c.L) makes the judged render $($c.S), never PASS ($($got.Row.detail))" $true ($got.Run.verdict -ceq $c.S -and $got.Row.status -ceq $c.S -and $got.Row.detail -clike $c.W)
+    $leftAfter.Add("$($c.S) $($c.L)=$(& $copiesLeft)")
 }
+Write-Case "end to end: a judged render leaves no copy of a report in the results, whatever its outcome ($($leftAfter -join ', '))" $true (
+    $rr.Run.verdict -ceq 'PASS' -and $leftAfter.Count -eq $renderBad.Count + 1 -and @($leftAfter | Where-Object { $_ -cnotlike '*=0' }).Count -eq 0)
 # The licence reminder ends a launch after it saved its copy, and the launch started once more cannot save: the copy of
 # the first one must not prove the states
 $nagSpec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs }
@@ -898,22 +909,41 @@ $nagTransport = {
     $run
 }.GetNewClosure()
 $atStart = [Collections.Generic.List[bool]]::new()
+$copiesAtStart = [Collections.Generic.List[int]]::new()
 & $setOnce $nagTransport
-try { $nagReport = & $reportRun @{ FileAtStart = $atStart } } finally { & $setOnce $realOnce }
+try { $nagReport = & $reportRun @{ FileAtStart = $atStart; CopiesAtStart = $copiesAtStart } } finally { & $setOnce $realOnce }
 Write-Case "end to end: the report of a launch the licence reminder ended is deleted before the launch started once more ($($atStart -join ','))" $true (
     ($atStart -join ',') -ceq 'False,False' -and @($nagReport.Run.runs[0].retries).Count -eq 1)
+Write-Case "end to end: the copies the driver made in a launch the licence reminder ended are deleted before the launch started once more ($($copiesAtStart -join ','))" $true (
+    ($copiesAtStart -join ',') -ceq '0,0' -and @($nagReport.Run.runs[0].retries).Count -eq 1)
 $realPlan = & (Get-Module Scenarios) { ${function:Get-HarnessReportPlan} }
 $oldFile = {
     param([Alias('Plugins')]$PluginTable, $Layout, $Work, $Name)
     $plan = & $realPlan -Plugins $PluginTable -Layout $Layout -Work $Work -Name $Name
-    foreach ($row in $plan) { [IO.File]::WriteAllText($row.Path, '{"blocks":1}') }
+    foreach ($row in $plan) { [IO.File]::WriteAllText($row.Path, '{"blocks":1}'); [IO.File]::WriteAllText("$($row.Copy)1.json", '{"blocks":1}') }
     , $plan
 }.GetNewClosure()
 $setPlan = { param($b) & (Get-Module Scenarios) { param($s) Set-Item function:script:Get-HarnessReportPlan $s } $b }
 & $setPlan $oldFile
-$atStart.Clear()
-try { $null = & $reportRun @{ FileAtStart = $atStart } } finally { & $setPlan $realPlan }
+$atStart.Clear(); $copiesAtStart.Clear()
+try { $null = & $reportRun @{ FileAtStart = $atStart; CopiesAtStart = $copiesAtStart } } finally { & $setPlan $realPlan }
 Write-Case "end to end: an old file at the path of a report is gone before the REAPER of the step starts ($($atStart -join ','))" $true (($atStart -join ',') -ceq 'False')
+Write-Case "end to end: an old copy of a report is gone before the REAPER of the step starts ($($copiesAtStart -join ','))" $true (($copiesAtStart -join ',') -ceq '0')
+& $setPlan $oldFile
+$copiesAtStart.Clear()
+try { $null = & $reportRenderRun @{ CopiesAtStart = $copiesAtStart } } finally { & $setPlan $realPlan }
+Write-Case "end to end: an old copy of a report is gone before the REAPER of a judged render starts ($($copiesAtStart -join ','))" $true (($copiesAtStart -join ',') -ceq '0')
+# A launch that ends badly after the driver copied the reports: INCOMPLETE, and the copies are gone all the same
+$timedOut = {
+    param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
+    $run = & $realOnce -Ctx $RunCtx -HostArgs $HostArgs -Label $Label
+    if ($Label -ceq 'transport') { $run.Status = 'Timeout' }
+    $run
+}.GetNewClosure()
+& $setOnce $timedOut
+try { $late = & $reportRun } finally { & $setOnce $realOnce }
+Write-Case "end to end: a transport launch that ends badly after the driver copied the reports is INCOMPLETE and leaves no copy ($($late.Row.detail); $(& $copiesLeft) left)" $true (
+    & $holds { $late.Row.status -ceq 'INCOMPLETE' -and $late.Row.detail -clike 'timed out after *' -and (& $copiesLeft) -eq 0 })
 Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
     $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
 

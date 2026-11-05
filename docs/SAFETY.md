@@ -138,7 +138,8 @@ The `transport` kind arms a track and turns its input monitoring on. It never re
 - the project's record path is set to a directory in the work directory before anything is armed, and read back; a
   path that does not read back stops the step there, before anything is armed or the transport is touched, and the row
   is INCOMPLETE;
-- every wait checks the transport for the record bit; seen, the transport is stopped and the row is INCOMPLETE;
+- every wait checks the transport for the record bit, the readings of plugin reports and the turns given to an open
+  editor included; seen, the transport is stopped and the row is INCOMPLETE;
 - any file in that record directory after the launch makes the row FAIL, whatever its states say;
 - at the end the transport is stopped and both tracks are disarmed.
 
@@ -151,12 +152,14 @@ editor. What keeps that contained:
 
 - the report variable is set in the environment of the REAPER that one driver step starts, and nowhere else: not in the
   harness's own process, not for any other launch. The self-test checks both;
-- a configuration cannot use it to change anything else: names Windows, the .NET and PowerShell runtimes, REAPER, a
-  plugin format or WebView2 read (`APPDATA`, `USERPROFILE`, `TEMP`, `PATH`, anything starting `REAPER_`, `WEBVIEW2_`,
-  `DOTNET_`, `COR_`, `VST3_` and the like) are refused before REAPER starts, like the two-character names and lower case;
+- a configuration cannot use it to change anything else: names Windows, the .NET and PowerShell runtimes, REAPER and
+  what it loads (ReaScript's Python and Lua, Qt in a plugin), a plugin format or WebView2 read (`APPDATA`,
+  `USERPROFILE`, `HOME`, `TEMP`, `TMPDIR`, `PATH`, anything starting `REAPER_`, `WEBVIEW2_`, `DOTNET_`, `COR_`, `VST3_`,
+  `PYTHON`, `LUA_`, `QT_` and the like) are refused before REAPER starts, like the two-character names and lower case;
 - the path is a new file in the work directory for every step, deleted before the start;
 - the file is what a plugin wrote, so it is read as untrusted: at most 64 KiB, strict JSON, only the declared numeric
-  fields. Nothing else in it reaches a result or a log;
+  fields. Nothing else in it reaches a result or a log. The driver's copies of it are deleted before the step starts,
+  before a retry and once they are read, whatever the outcome, so none is left in the results directory;
 - a file with a `pid` field that is not the REAPER of this step, a missing file and a stale one are no evidence
   (INCOMPLETE), never a PASS.
 

@@ -517,14 +517,16 @@ plugin decides what to count. Audio is never in it.
 
 | key | |
 |---|---|
-| `env` | required: the variable that gets the file's path, `[A-Z][A-Z0-9_]{2,63}`. A name Windows, a runtime, REAPER, a plugin format or WebView2 reads is refused ([SAFETY.md](SAFETY.md#plugin-reports-and-windows)); so is one that another plugin of the configuration uses |
+| `env` | required: the variable that gets the file's path, `[A-Z][A-Z0-9_]{2,63}`. A name Windows, a runtime, REAPER or what it loads, a plugin format or WebView2 reads is refused ([SAFETY.md](SAFETY.md#plugin-reports-and-windows)); so is one that another plugin of the configuration uses |
 | `fields` | required, 1 … 32 distinct names: the numeric fields to take from the file. Nothing else in it is read or recorded |
 | `pid` | the field that holds the id of the process that wrote the file: it must be the REAPER of this step, or the file is no evidence |
 | `periodMs` | how often the plugin writes while something changes, 10 … 10000, default 500 |
 
 What the plugin has to do: read the variable; when it is set, write a flat JSON object to that path at most every
-`periodMs` while the counts change, from a thread that runs while the host's message loop runs, by writing a temporary
-file in the same directory and renaming it over the target, so that no reader sees half a file. The directory exists.
+`periodMs` while the counts change, from a thread that runs while the host's message loop runs. It should replace the
+file atomically: write a temporary file in the same directory and rename it over the target (`MoveFileEx` with
+`MOVEFILE_REPLACE_EXISTING`), so that no reader sees half a file. A turn in which a file that was there is missing is
+skipped as a replacement in progress; a file that is not there at all is no evidence. The directory exists.
 Counts are its own business; if they are totals of the whole process, the plugin must be alone in the project, and the
 harness requires that of every judged plugin: used exactly once in the layout.
 

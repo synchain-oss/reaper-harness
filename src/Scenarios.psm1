@@ -295,21 +295,22 @@ function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Lab
 
 # Runs one driver step. Job: extra fields for the job file. Watch: label -> mark file (process counters are sampled
 # when it appears). ReportEnv: environment variable -> report file of a plugin (Report.psm1), set for this REAPER only;
-# the files are deleted before the start, like the result. Outputs: further files the step writes, for the retry after a
-# licence reminder. Result: the key=value lines as a hashtable.
+# the files are deleted before the start, like the result. Copies: the copies of those files the driver may write
+# (Get-HarnessReportCopies), deleted before the start and before a retry; the caller deletes them once read. Outputs:
+# further files the step writes, for the retry after a licence reminder. Result: the key=value lines as a hashtable.
 function Invoke-HarnessLuaStep {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Step, [hashtable]$Job = @{}, [hashtable]$Watch = @{},
-          [double]$TimeoutSec = 0, [double]$KillAfterSec = 0, [hashtable]$ReportEnv = @{}, [string[]]$Outputs = @())
+          [double]$TimeoutSec = 0, [double]$KillAfterSec = 0, [hashtable]$ReportEnv = @{}, [string[]]$Copies = @(), [string[]]$Outputs = @())
     $jobFile = Join-Path $Ctx.Work "$Name.job.lua"
     $resultFile = Join-Path $Ctx.Work "$Name.result"
     $environment = @{ REAPER_HARNESS_JOB = $jobFile }
     foreach ($k in $ReportEnv.get_Keys()) { if ($environment.ContainsKey($k)) { throw "the report variable $k is taken" }; $environment[$k] = $ReportEnv[$k] }
-    foreach ($f in @($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values())) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
+    foreach ($f in @($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
     $Ctx.Files.Add($jobFile); $Ctx.Files.Add($resultFile); foreach ($f in @($Watch.get_Values()) + @($ReportEnv.get_Values())) { $Ctx.Files.Add($f) }
     $full = @{ step = $Step; result = $resultFile; extensions = @($Ctx.LuaExtensions) }
     foreach ($k in $Job.get_Keys()) { $full[$k] = $Job[$k] }
     Write-HarnessText -Path $jobFile -Text (ConvertTo-HarnessLuaTable $full)
-    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -Outputs (@($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + @($Job['saveAs'] | Where-Object { $_ }) + $Outputs) -HostArgs @{
+    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -Outputs (@($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies + @($Job['saveAs'] | Where-Object { $_ }) + $Outputs) -HostArgs @{
         ReaperArgs = @($Ctx.Driver); Environment = $environment; WatchFiles = $Watch
         TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
     }
@@ -487,14 +488,13 @@ function Get-HarnessOutcomeStatus([string[]]$StatusList) { foreach ($x in 'FAIL'
 function Invoke-HarnessReportRender($Ctx, $s, $r, $Layout) {
     $plan = Get-HarnessReportPlan -Plugins $Ctx.Config.Plugins -Layout $Layout -Work $Ctx.Work -Name $s.id
     $stemWavs = @($r.Stems.get_Values())
-    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step render -Job @{ project = $r.Project; wav = $r.Wav; reports = (ConvertTo-HarnessReportJob $plan) } -ReportEnv (Get-HarnessReportEnvironment $plan) -Outputs (@($r.Wav) + $stemWavs) `
-        -TimeoutSec ([double]$Ctx.Limits.renderTimeoutSec + [double]$Ctx.Limits.luaTimeoutSec + 60)
+    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step render -Job @{ project = $r.Project; wav = $r.Wav; reports = (ConvertTo-HarnessReportJob $plan) } -ReportEnv (Get-HarnessReportEnvironment $plan) `
+        -Copies (Get-HarnessReportCopies $plan 2) -Outputs (@($r.Wav) + $stemWavs) -TimeoutSec ([double]$Ctx.Limits.renderTimeoutSec + [double]$Ctx.Limits.luaTimeoutSec + 60)
+    $taken = Read-HarnessReportReadings -Facts $lua.Result -Plan $plan -Count 2 -ProcessId $lua.Run.Pid
     $why = $lua.Why
     if (-not $why) { $why = Get-HarnessRenderGap $r.Wav $stemWavs }
     if ($why) { return [pscustomobject]@{ Why = $why; Outcome = $null; Facts = $null } }
-    $start = Read-HarnessReportReading -Facts $lua.Result -Plan $plan -K 1 -ProcessId $lua.Run.Pid
-    $last = Read-HarnessReportReading -Facts $lua.Result -Plan $plan -K 2 -ProcessId $lua.Run.Pid
-    $rep = Test-HarnessReportCriteria -Criteria $s.report -Start $start -End $last
+    $rep = Test-HarnessReportCriteria -Criteria $s.report -Start $taken[0] -End $taken[1]
     $bad = [Collections.Generic.List[string]]::new()
     foreach ($p in (Test-HarnessHostReadback -Facts $lua.Result -Block $s.block -Sr $s.sr -AnticipativeFx ([bool]$s.host.AnticipativeFx) -RunFxWhenStopped ([bool]$s.host.RunFxWhenStopped) -InformOfflineState ([bool]$s.host.InformOfflineState))) { $bad.Add($p) }
     foreach ($p in $rep.Problems) { $bad.Add($p) }
@@ -668,7 +668,8 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
     $plan = Get-HarnessReportPlan -Plugins $Ctx.Config.Plugins -Layout $Layout -Work $Ctx.Work -Name $s.id
     $Job.reports = ConvertTo-HarnessReportJob $plan
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step transport -Job $Job -TimeoutSec (Get-HarnessTransportTimeout -Scenario $s -LuaTimeoutSec ([double]$Ctx.Limits.luaTimeoutSec) -Reports:([bool]$plan.Count)) `
-        -ReportEnv (Get-HarnessReportEnvironment $plan)
+        -ReportEnv (Get-HarnessReportEnvironment $plan) -Copies (Get-HarnessReportCopies $plan (2 * $s.states.Count))
+    $taken = Read-HarnessReportReadings -Facts $lua.Result -Plan $plan -Count (2 * $s.states.Count) -ProcessId $lua.Run.Pid
     $recorded = @(Get-ChildItem -LiteralPath $recordDir -Recurse -File -Force -ErrorAction SilentlyContinue)
     if ($recorded.Count) { return New-HarnessOutcome FAIL "$($recorded.Count) file(s) appeared in the record directory of the project: something was recorded" }
     if ($lua.Why) { return New-HarnessOutcome INCOMPLETE $lua.Why }
@@ -685,7 +686,7 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
         $st = $s.states[$i]
         $row = Read-HarnessTransportRow $f ($i + 1)
         # Readings 2i+1 and 2i+2 of the reports were taken right before and after the state's window
-        $readings = $plan.Count ? @{ Start = (Read-HarnessReportReading -Facts $f -Plan $plan -K (2 * $i + 1) -ProcessId $lua.Run.Pid); End = (Read-HarnessReportReading -Facts $f -Plan $plan -K (2 * $i + 2) -ProcessId $lua.Run.Pid) } : $null
+        $readings = $plan.Count ? @{ Start = $taken[2 * $i]; End = $taken[2 * $i + 1] } : $null
         $j = Test-HarnessTransportState -State $st -Row $row -HasFeed:($null -ne $s.feed) -Readings $readings
         $one = [ordered]@{ name = $st.Name; transport = $st.Transport; arm = $st.Arm; monitor = $st.Monitor; windowSamples = $st.Samples; status = $j.Status; problems = @($j.Problems) }
         if ($row) { foreach ($p in $row.PSObject.Properties) { if ($null -ne $p.Value) { $one[$p.Name] = $p.Value } } }

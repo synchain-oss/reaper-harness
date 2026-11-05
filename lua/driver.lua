@@ -80,7 +80,9 @@ end
 -- have been written by then). The plugin's timer runs on this thread, so a turn counts at most 100 ms: a stalled main
 -- thread stalls the timer too. 30 s of wall-clock time is only the limit ("stale"). With settled, a change does not end
 -- the reading: only four quiet write periods do, so the plugin was not run in that time ("busy" when it never was
--- quiet). The copy goes to <copy><k>.json; the result says rep<j>_<k>=changed | quiet | missing | toolarge | stale | busy.
+-- quiet). A turn where a file that was there is missing is skipped in both ways: the plugin is replacing it (docs/CONFIG.md
+-- asks for a rename over it). check, when given, runs after every turn (the transport step's record check).
+-- The copy goes to <copy><k>.json; the result says rep<j>_<k>=changed | quiet | missing | toolarge | stale | busy.
 local REPORT_MAX = 65536
 local function readCapped(path)
     local f = io.open(path, "rb")
@@ -91,7 +93,7 @@ local function readCapped(path)
     return t, "ok"
 end
 
-local function readReports(k, settled)
+local function readReports(k, settled, check)
     local reps = job.reports or {}
     local base, got, left, since, moved = {}, {}, #reps, {}, {}
     for j, r in ipairs(reps) do base[j] = { readCapped(r.path) }; since[j] = 0 end
@@ -99,13 +101,16 @@ local function readReports(k, settled)
     local deadline = last + 30
     while left > 0 and last < deadline do
         coroutine.yield()
+        if check then check() end
         local now = reaper.time_precise()
         loop = loop + math.min(now - last, 0.1)
         last = now
         for j, r in ipairs(reps) do
             if not got[j] then
                 local t, s = readCapped(r.path)
-                if t ~= base[j][1] or s ~= base[j][2] then
+                if s == "missing" and base[j][2] == "ok" then
+                    -- being replaced: neither a change nor quiet, read it again next turn
+                elseif t ~= base[j][1] or s ~= base[j][2] then
                     if settled then base[j], since[j], moved[j] = { t, s }, loop, true else got[j] = { t, s, "changed" } end
                 elseif loop - since[j] >= 4 * r.period then got[j] = { t, s, "quiet" } end
                 if got[j] then left = left - 1 end
@@ -421,11 +426,12 @@ function steps.transport()
             reaper.TrackFX_Show(tested, w.fx, 3)
             if until10(shown) then
                 opened = opened + 1
-                for _ = 1, 10 do coroutine.yield() end
+                for _ = 1, 10 do coroutine.yield() noRecord() end
                 reaper.TrackFX_Show(tested, w.fx, 2)
                 if until10(function() return not shown() end) then closed = closed + 1 end
             end
             coroutine.yield()
+            noRecord()
         end
         reaper.TrackFX_Show(tested, w.fx, 2)
         return opened, closed
@@ -439,7 +445,7 @@ function steps.transport()
         transport(st.transport)
         local p = "st" .. n .. "_"
         put(p .. "settled", int(waitSamples(settle)))
-        readReports(2 * n - 1)
+        readReports(2 * n - 1, false, noRecord)
         local c0, t0, f0 = snap(CLOCK), snap(TESTED), snap(FEED)
         local w0 = reaper.gmem_read(CLOCK + 1)
         if st.windows then
@@ -461,7 +467,7 @@ function steps.transport()
         put(p .. "arm", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECARM")))
         put(p .. "monitor", int(reaper.GetMediaTrackInfo_Value(tested, "I_RECMON")))
         put(p .. "monitoring", int(reaper.GetMediaTrackInfo_Value(tested, "B_RECMON_IN_EFFECT")))
-        readReports(2 * n)
+        readReports(2 * n, false, noRecord)
         done = n
     end
     reaper.OnStopButton()
@@ -478,6 +484,7 @@ end
 -- with the project's own settings (File: Render project, using the most recent render settings, auto-close render
 -- dialog: 42230; measured on REAPER 7.82, the call returns when the file is written and no deferred script runs while it
 -- renders) and takes reading 2. With Run FX when stopped off nothing else runs the plugin in between (docs/CONFIG.md).
+-- Its waits do not look for the record bit: this step arms no track and never starts the transport.
 function steps.render()
     openAndWait(job.project)
     put("dev_bsize", device("BSIZE"))

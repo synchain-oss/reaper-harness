@@ -303,6 +303,7 @@
               "maximum": 1000000000000000
             }
           },
+          "minProperties": 1,
           "additionalProperties": false
         }
       ]
@@ -317,6 +318,7 @@
           "$ref": "#/$defs/reportBound"
         }
       },
+      "minProperties": 1,
       "additionalProperties": false,
       "description": "delta: how much the field grew over the stretch; value: what it reads at its end"
     },
@@ -685,6 +687,7 @@
           "$ref": "#/$defs/reportExpect"
         }
       },
+      "minProperties": 1,
       "additionalProperties": false
     },
     "transportState": {

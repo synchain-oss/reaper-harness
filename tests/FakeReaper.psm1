@@ -15,6 +15,7 @@
 #   Set-FakeReaper -Spec @{ Pwsh; CfgDir; Plugins (REAPER name -> @{ Bundle; Cid }); Seen (a list) }
 #       EnvName, EnvSeen (a list): the value of that variable in the environment of every launch ('' when unset)
 #       FileAtStart (a list): whether the file that variable names was there when a launch started; the launch writes it
+#       CopiesAtStart (a list): how many copies of the step's reports were there when a driver step started
 #       JSFX are found by their add name ("JS:<path under Effects>") in the configuration directory's Effects
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
 #   ConvertFrom-FakeLua <text>                        reads a job file written by ConvertTo-HarnessLuaTable
@@ -449,6 +450,9 @@ function Invoke-FakeTransport($job, $report) {
 # hang.
 function Invoke-FakeStep([string]$JobFile) {
     $job = ConvertFrom-FakeLua ([IO.File]::ReadAllText($JobFile))
+    if ($script:Spec.ContainsKey('CopiesAtStart') -and $job.Contains('reports')) {
+        $script:Spec.CopiesAtStart.Add(@(foreach ($r in @($job['reports'])) { Get-ChildItem -LiteralPath (Split-Path $r['copy']) -Filter "$(Split-Path $r['copy'] -Leaf)*.json" -File }).Count)
+    }
     $report = [Collections.Generic.List[string]]::new()
     $behave = 'quick'
     switch ($job['step']) {
