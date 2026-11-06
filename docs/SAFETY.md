@@ -159,7 +159,10 @@ editor. What keeps that contained:
 - the path is a new file in the work directory for every step, deleted before the start;
 - the file is what a plugin wrote, so it is read as untrusted: at most 64 KiB, strict JSON, only the declared numeric
   fields. Nothing else in it reaches a result or a log. The driver's copies of it are deleted before the step starts,
-  before a retry and once they are read, whatever the outcome, so none is left in the results directory;
+  before a retry and once they are read, whatever the outcome, so none is left in the results directory. The file
+  itself is a work file like the projects that hold the plugin's state: deleted when the round is green, kept under
+  `work/` when it is not, so that the plugin's author can see what was written. Keep those work files out of
+  repositories ([INTEGRATING.md](INTEGRATING.md));
 - a file with a `pid` field that is not the REAPER of this step, a missing file and a stale one are no evidence
   (INCOMPLETE), never a PASS.
 
