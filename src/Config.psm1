@@ -17,11 +17,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Json.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Guard.psm1') -ErrorAction Stop
 
 function Stop-Usage([string]$Reason) { throw [System.InvalidOperationException]::new("USAGE: $Reason") }
 
 # ---- spec constructors (a small subset of JSON Schema, as data) ----
-function SObj([System.Collections.Specialized.OrderedDictionary]$Props, [string[]]$Required = @(), [string]$Doc = '') { @{ t = 'object'; props = $Props; req = $Required; doc = $Doc } }
+# MinKeys: for the schema only, where the validator refuses an empty object with a message of its own
+function SObj([System.Collections.Specialized.OrderedDictionary]$Props, [string[]]$Required = @(), [string]$Doc = '', [int]$MinKeys = 0) { @{ t = 'object'; props = $Props; req = $Required; doc = $Doc; minKeys = $MinKeys } }
 function SMap([string]$Key, $Value, [int]$Min = 0, [string]$Doc = '') { @{ t = 'map'; key = $Key; value = $Value; min = $Min; doc = $Doc } }
 function SArr($Items, [int]$Min = 0, [switch]$Unique, [string]$Doc = '', [int]$Max = 0) { @{ t = 'array'; items = $Items; min = $Min; max = $Max; unique = [bool]$Unique; doc = $Doc } }
 function SStr([string]$Pattern = '', [string[]]$Enum = @(), [string]$Doc = '') { @{ t = 'string'; pattern = $Pattern; enum = $Enum; doc = $Doc } }
@@ -36,6 +38,7 @@ $script:ScenarioIdPattern = '^[a-z0-9][a-z0-9-]{0,59}$'
 $script:StatePattern = '^[a-z0-9][a-z0-9-]{0,39}$'
 $script:TrackNamePattern = '^[^"\u0000-\u001f]{1,64}$'
 $script:ChannelPattern = '^(L|R|[1-9][0-9]?)$'
+$script:FieldPattern = '^[A-Za-z_][A-Za-z0-9_]{0,63}$'
 # Stem files are named after their track: plain ASCII without characters Windows refuses, not ending in a space or a dot
 # (a name of one character included, so "." is no stem name)
 $script:StemNamePattern = '^(?:[A-Za-z0-9()+_-]|[A-Za-z0-9()+_.-][A-Za-z0-9 ()+_.-]*[A-Za-z0-9()+_-])$'
@@ -59,12 +62,23 @@ function New-HarnessSpec {
         (SObj ([ordered]@{ template = $relPath; track = (SStr $script:TrackNamePattern -Doc 'name of the track in the template project'); fx = (SInt 1 1000 -Doc 'which FX of that track, counted from 1') }) @('template', 'track', 'fx'))
         (SObj ([ordered]@{ stateFile = $relPath }) @('stateFile'))
     ) '{ template, track, fx } or { stateFile }'
+    $field = SStr $script:FieldPattern
+    $defs.report = SObj ([ordered]@{
+            env      = (SStr '^[A-Z][A-Z0-9_]{2,63}$' -Doc 'environment variable that tells the plugin the path of its report file; set for the REAPER the harness starts only (names Windows, a runtime, REAPER or WebView2 reads are refused: docs/SAFETY.md)')
+            fields   = (SArr $field -Min 1 -Max 32 -Unique -Doc 'the numeric fields of the report to record and judge')
+            pid      = (SStr $script:FieldPattern -Doc 'the field holding the id of the process that wrote the file: it must be the REAPER of that step')
+            periodMs = (SInt 10 10000 -Doc 'how often at most the plugin writes the file, default 500')
+        }) @('env', 'fields') -Doc 'the plugin writes counts of its own to a small JSON file'
+    $defs.reportBound = SAny @((SNum -1e15 1e15), (SObj ([ordered]@{ min = (SNum -1e15 1e15); max = (SNum -1e15 1e15) }) -MinKeys 1)) 'a number (exactly that) or { min, max }'
+    $defs.reportCriterion = SObj ([ordered]@{ delta = (SRef reportBound); value = (SRef reportBound) }) -MinKeys 1 -Doc 'delta: how much the field grew over the stretch; value: what it reads at its end'
+    $defs.reportExpect = SMap $script:IdPattern (SMap $script:FieldPattern (SRef reportCriterion) -Min 1) -Min 1 -Doc 'plugin id -> field -> criterion'
     $defs.plugin = SObj ([ordered]@{
             bundle    = (SStr '^[^\\/:*?"<>|\u0000-\u001f]{1,120}\.vst3$' -Doc 'VST3 bundle directory name, looked up in -PluginDir')
             jsfx      = (SStr -Enum $script:JsfxNames -Doc 'a JSFX shipped with the tool, instead of a bundle')
             expectPdc = (SInt 0 1000000)
             params    = $params
             states    = (SMap $script:StatePattern (SRef stateSource) -Min 1 -Doc 'named plugin states taken from a project or a file')
+            report    = (SRef report)
         })
     $defs.fx = SObj ([ordered]@{
             plugin = (SStr $script:IdPattern -Doc 'id from plugins')
@@ -100,6 +114,7 @@ function New-HarnessSpec {
     $defs.host = SObj ([ordered]@{
             anticipativeFx   = (SBool -Doc 'REAPER''s anticipative FX processing (default true, as REAPER ships)')
             runFxWhenStopped = (SBool -Doc 'REAPER''s "Run FX when stopped" (default true, as REAPER ships); off, the FX of a track that is not armed and has no media are not run while stopped, nor (measured on REAPER 7.82) while playing')
+            informOfflineState = (SBool -Doc 'REAPER''s "Inform plug-ins of offline rendering state" (default true, as REAPER ships; measured on REAPER 7.82); off, a plugin is not told that a render is one')
         })
     # The transport kind: a sequence of transport, arm and monitoring states, each observed for a number of device samples
     $defs.transportExpect = SObj ([ordered]@{
@@ -107,13 +122,19 @@ function New-HarnessSpec {
             input      = (SStr -Enum 'silent', 'signal' -Doc 'silent: every block the chain gets is all zeros; signal: none is')
             channels   = (SStr -Enum 'left', 'same', 'different' -Doc 'left: signal on the left only; same: left and right equal sample for sample; different: both carry signal and differ')
             monitoring = (SBool -Doc 'REAPER reports input monitoring in effect on the tested track (B_RECMON_IN_EFFECT)')
-        })
+            report     = (SRef reportExpect)
+        }) -MinKeys 1
     $defs.transportState = SObj ([ordered]@{
             name      = (SStr $script:StatePattern)
             transport = (SStr -Enum 'stop', 'play', 'pause')
             arm       = (SBool -Doc 'the tested track is armed (it never records: the harness never starts a recording)')
             monitor   = (SStr -Enum 'off', 'on', 'auto' -Doc 'input monitoring of the tested track: off, on, or auto (REAPER''s tape style: only while not playing)')
             samples   = (SInt 64 115200000 -Doc 'length of the observation window in device samples, default 2 x sr')
+            windows   = (SObj ([ordered]@{
+                        plugin       = (SStr $script:IdPattern -Doc 'a plugin on the tested track (once)')
+                        count        = (SInt 1 1000 -Doc 'open and close its floating window this many times during the window')
+                        maxBlockDiff = (SInt 0 1000000 -Doc 'the most the tested chain''s blocks may differ from the device''s in the window, default 4')
+                    }) @('plugin', 'count'))
             expect    = (SRef transportExpect)
         }) @('name', 'transport', 'arm', 'monitor')
     $defs.feed = SObj ([ordered]@{
@@ -143,6 +164,7 @@ function New-HarnessSpec {
     }
     foreach ($e in $criteria.GetEnumerator()) { $renderProps[$e.Key] = $e.Value }
     $renderProps.stems = SArr (SRef stem) -Min 1 -Doc 'tracks rendered as stems of their own, next to the master'
+    $renderProps.report = SRef reportExpect
     $renderProps.host = SRef host
     $renderProps.matrix = SRef matrix
     $p = & $common 'render'; foreach ($e in $renderProps.GetEnumerator()) { $p[$e.Key] = $e.Value }
@@ -317,6 +339,7 @@ function ConvertTo-SchemaNode($Spec) {
             foreach ($k in $Spec.props.get_Keys()) { $Props[$k] = ConvertTo-SchemaNode $Spec.props[$k] }
             $n.properties = $Props
             if ($Spec.req.Count) { $n.required = @($Spec.req) }
+            if ($Spec.minKeys) { $n.minProperties = $Spec.minKeys }
             $n.additionalProperties = $false
         }
         'map' {
@@ -405,7 +428,7 @@ function Get-HarnessBuiltinNegatives {
     # monitored the probe sees the feed, so expecting silence must fail as "signal in". A probe that sees nothing fails
     # the second state as "not called" instead: the reason does not match, and the case is not verified.
     $expect = { param($c, $i) [pscustomobject]@{ Called = $c; Input = $i; Channels = $null; Monitoring = $null } }
-    $state = { param($n, $a, $m, $x) [pscustomobject]@{ Name = $n; Transport = 'stop'; Arm = $a; Monitor = $m; Samples = 48000; Expect = $x } }
+    $state = { param($n, $a, $m, $x) [pscustomobject]@{ Name = $n; Transport = 'stop'; Arm = $a; Monitor = $m; Samples = 48000; Windows = $null; Report = [ordered]@{}; Expect = $x } }
     @(
         (& $render @{ id = 'neg-offset-1-sample'; kind = 'render'; negative = $true; builtin = $true; layout = $dry; mode = 'offline'; sr = 48000; block = 512; mono = $false; bypass = @(); compare = [pscustomobject]@{ Kind = 'dry' }
                 mutate = [pscustomobject]@{ sourceOffsetSamples = 1; trackVolume = 1.0 }; expect = 'FAIL'; expectDetail = '^identical=no lag=1 ' })
@@ -419,7 +442,7 @@ function Get-HarnessBuiltinNegatives {
     )
     if ($Transport) {
         & $make @{ id = 'neg-transport-probe'; kind = 'transport'; negative = $true; builtin = $true; layout = $dry; track = 'Dry'; sr = 48000; block = 512; settleSamples = $null
-            host = [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $false }
+            host = [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $false; InformOfflineState = $true }
             feed = [pscustomobject]@{ Wav = ''; Channels = 'different'; File = ''; Sha256 = ''; FileChannels = 2 }
             states = @((& $state 'stopped-unarmed' $false 'off' (& $expect $true $null)), (& $state 'stopped-armed' $true 'on' (& $expect $null 'silent')))
             expect = 'FAIL'; expectDetail = '^stopped-unarmed: blocks=0/[1-9][0-9]* [^|]*; failed: not called \(0 blocks while the device ran [1-9][0-9]*\) \| stopped-armed: blocks=[1-9][0-9]*/[1-9][0-9]* [^|]*; failed: signal in [1-9][0-9]* of [1-9][0-9]* blocks$' }
@@ -430,10 +453,10 @@ function Get-HarnessBuiltinNegatives {
 function New-CriteriaDefaults { [ordered]@{ maxDiffDb = $null; lag = 0; peakMaxDb = $null; notSilent = $false; rmsDb = $null; energyRatioDb = $null; rmsChangeDb = $null } }
 function New-RenderDefaults {
     $d = New-CriteriaDefaults
-    $d.stems = @(); $d.host = (New-HostDefaults); $d.mutate = $null
+    $d.stems = @(); $d.report = [ordered]@{}; $d.host = (New-HostDefaults); $d.mutate = $null
     $d
 }
-function New-HostDefaults { [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $true } }
+function New-HostDefaults { [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $true; InformOfflineState = $true } }
 
 # ---- normalisation and cross-reference checks ----
 function ConvertTo-Bypass($Value, [string]$Path, $LayoutPlugins, $Problems, $AllPlugins) {
@@ -462,6 +485,7 @@ function ConvertTo-ParamTable($Raw) {
 # The plugins: id -> @{ Id; Kind (vst3 | jsfx); Bundle; Jsfx; ExpectPdc; Params; States (name -> source) }.
 function ConvertTo-Plugins($Raw, $Problems) {
     $Plugins = [ordered]@{}
+    $envs = @{}
     foreach ($k in $Raw.get_Keys()) {
         $r = $Raw[$k]
         $hasBundle = $r.Contains('bundle'); $hasJs = $r.Contains('jsfx')
@@ -477,12 +501,55 @@ function ConvertTo-Plugins($Raw, $Problems) {
                 }
             }
         }
+        $rep = Get-Or $r 'report' $null
+        $report = $null
+        if ($null -ne $rep) {
+            $report = [pscustomobject]@{ Env = [string]$rep['env']; Fields = @($rep['fields'] | ForEach-Object { [string]$_ }); PidField = [string](Get-Or $rep 'pid' ''); PeriodMs = [int](Get-Or $rep 'periodMs' 500) }
+            $why = Test-HarnessReportEnvName $report.Env
+            if ($why) { $Problems.Add("config.plugins.$k.report.env: $why") }
+            if ($envs.ContainsKey($report.Env)) { $Problems.Add("config.plugins.$k.report.env: '$($report.Env)' is the report variable of $($envs[$report.Env]) too") }
+            $envs[$report.Env] = $k
+        }
         $Plugins[$k] = [pscustomobject]@{
             Id = $k; Kind = ($hasJs ? 'jsfx' : 'vst3'); Bundle = [string](Get-Or $r 'bundle' ''); Jsfx = [string](Get-Or $r 'jsfx' ''); ExpectPdc = [int](Get-Or $r 'expectPdc' 0)
-            Params = (ConvertTo-ParamTable (Get-Or $r 'params' $null)); States = $States
+            Params = (ConvertTo-ParamTable (Get-Or $r 'params' $null)); States = $States; Report = $report
         }
     }
     $Plugins
+}
+
+# Report criteria (plugin -> field -> { delta, value }) of a transport state or a render: plugin -> field -> @{ Delta;
+# Value }, each $null or a bound @{ Exact; Min; Max }. The plugin must declare a report with that field and be used
+# exactly once in the layout UsedIn (a report may hold the totals of every instance in the process).
+function ConvertTo-ReportCriteria($Raw, [string]$Path, $PluginTable, $UsedIn, $Problems) {
+    $out = [ordered]@{}
+    if ($null -eq $Raw) { return $out }
+    foreach ($pluginId in $Raw.get_Keys()) {
+        $rep = $PluginTable.Contains($pluginId) ? $PluginTable[$pluginId].Report : $null
+        if ($null -eq $rep) { $Problems.Add("$Path.${pluginId}: plugin '$pluginId' $($PluginTable.Contains($pluginId) ? 'declares no report' : 'is not defined in plugins')"); continue }
+        $uses = $UsedIn ? @($UsedIn.Tracks | ForEach-Object { $_.Fx } | Where-Object { $_.Plugin -ceq $pluginId }).Count : 1
+        if ($uses -ne 1) { $Problems.Add("$Path.${pluginId}: the layout uses '$pluginId' $uses times; a judged report needs exactly one instance") }
+        $out[$pluginId] = [ordered]@{}
+        foreach ($f in $Raw[$pluginId].get_Keys()) {
+            $p = "$Path.$pluginId.$f"
+            if ($f -cnotin $rep.Fields) { $Problems.Add("${p}: '$f' is not one of the report's fields") }
+            $c = $Raw[$pluginId][$f]
+            if ($c.get_Count() -eq 0) { $Problems.Add("${p}: needs delta or value") }
+            $bounds = @{}
+            foreach ($b in 'delta', 'value') {
+                $v = Get-Or $c $b $null
+                if ($null -eq $v) { $bounds[$b] = $null; continue }
+                if ($v -is [System.Collections.IDictionary]) {
+                    $lo = Get-Or $v 'min' $null; $hi = Get-Or $v 'max' $null
+                    if ($null -eq $lo -and $null -eq $hi) { $Problems.Add("$p.${b}: needs min or max") }
+                    if ($null -ne $lo -and $null -ne $hi -and [double]$lo -gt [double]$hi) { $Problems.Add("$p.${b}: min is above max") }
+                    $bounds[$b] = [pscustomobject]@{ Exact = $null; Min = (($null -ne $lo) ? [double]$lo : $null); Max = (($null -ne $hi) ? [double]$hi : $null) }
+                } else { $bounds[$b] = [pscustomobject]@{ Exact = [double]$v; Min = $null; Max = $null } }
+            }
+            $out[$pluginId][$f] = [pscustomobject]@{ Delta = $bounds['delta']; Value = $bounds['value'] }
+        }
+    }
+    $out
 }
 
 # A track's own signal: $null when it has none (the top-level signal is used), otherwise the top-level signal with
@@ -647,6 +714,7 @@ function ConvertTo-Host($Raw) {
     $h = New-HostDefaults
     if ($null -ne $Raw -and $Raw.Contains('anticipativeFx')) { $h.AnticipativeFx = [bool]$Raw['anticipativeFx'] }
     if ($null -ne $Raw -and $Raw.Contains('runFxWhenStopped')) { $h.RunFxWhenStopped = [bool]$Raw['runFxWhenStopped'] }
+    if ($null -ne $Raw -and $Raw.Contains('informOfflineState')) { $h.InformOfflineState = [bool]$Raw['informOfflineState'] }
     $h
 }
 
@@ -725,6 +793,8 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
                 $si++
             }
             $o.stems = $stems.ToArray()
+            $o.report = ConvertTo-ReportCriteria (Get-Or $Raw 'report' $null) "$Path.report" $PluginTable $layout $Problems
+            if ($o.report.get_Count() -and $o.host.RunFxWhenStopped) { $Problems.Add("$Path.report: judging a render by a report needs host.runFxWhenStopped false: with it on, the plugin also runs in real time before and after the render") }
             $o.mutate = $null
         }
         'device' { }
@@ -753,17 +823,19 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
             $f = Get-Or $Raw 'feed' $null
             # File, Sha256 and FileChannels are filled in by Read-HarnessFeeds (Transport.psm1), which reads the file
             $o.feed = ($null -eq $f) ? $null : [pscustomobject]@{ Wav = [string](Get-Or $f 'wav' ''); Channels = [string](Get-Or $f 'channels' 'different'); File = ''; Sha256 = ''; FileChannels = 2 }
-            $o.states = ConvertTo-TransportStates @($Raw['states']) $Path $o.sr $o.block $Problems
+            $o.states = ConvertTo-TransportStates @($Raw['states']) $Path $o.sr $o.block $Problems -PluginTable $PluginTable -UsedIn $layout -TestedTrack $o.track
         }
     }
     [pscustomobject]$o
 }
 
 # The states of a transport scenario: names unique, at least one with an expectation (a scenario that judges nothing
-# would be an empty PASS), no expectation that contradicts itself, every window at least 4 blocks long.
-function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int]$DeviceBlock, $Problems) {
+# would be an empty PASS), no expectation that contradicts itself, every window at least 4 blocks long. Windows: a plugin
+# that is on the tested track (TestedTrack of the layout UsedIn) exactly once; Fx is its index in that track's FX.
+function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int]$DeviceBlock, $Problems, $PluginTable = @{}, $UsedIn = $null, [string]$TestedTrack = '') {
     $seen = @{}
     $judged = 0
+    $trackFx = @($UsedIn ? @($UsedIn.Tracks | Where-Object { $_.Name -ceq $TestedTrack } | Select-Object -First 1 | ForEach-Object { $_.Fx }) : @())
     $out = for ($i = 0; $i -lt $Raw.Count; $i++) {
         $r = $Raw[$i]
         $p = "$Path.states[$i]"
@@ -772,18 +844,27 @@ function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int
         $seen[$stateName] = $true
         $samples = [int](Get-Or $r 'samples' (2 * $Sr))
         if ($samples -lt 4 * $DeviceBlock) { $Problems.Add("$p.samples: $samples samples are less than 4 blocks of $DeviceBlock") }
+        $w = Get-Or $r 'windows' $null
+        $win = $null
+        if ($null -ne $w) {
+            $judged++
+            $at = @(for ($k = 0; $k -lt $trackFx.Count; $k++) { if ($trackFx[$k].Plugin -ceq $w['plugin']) { $k } })
+            if ($UsedIn -and $at.Count -ne 1) { $Problems.Add("$p.windows.plugin: '$($w['plugin'])' is on the tested track $($at.Count) times; its window needs exactly one") }
+            $win = [pscustomobject]@{ Plugin = [string]$w['plugin']; Count = [int]$w['count']; MaxBlockDiff = [int](Get-Or $w 'maxBlockDiff' 4); Fx = ($at.Count ? $at[0] : -1) }
+        }
         $e = Get-Or $r 'expect' $null
         $x = $null
         if ($null -ne $e) {
             $judged++
-            if ($e.get_Count() -eq 0) { $Problems.Add("$p.expect: needs at least one of called, input, channels, monitoring") }
+            if ($e.get_Count() -eq 0) { $Problems.Add("$p.expect: needs at least one of called, input, channels, monitoring, report") }
             $x = [pscustomobject]@{ Called = (Get-Or $e 'called' $null); Input = (Get-Or $e 'input' $null); Channels = (Get-Or $e 'channels' $null); Monitoring = (Get-Or $e 'monitoring' $null) }
             if ($false -eq $x.Called -and ($null -ne $x.Input -or $null -ne $x.Channels)) { $Problems.Add("$p.expect: called false leaves no input to judge: drop input and channels, or expect called true") }
             if ('silent' -ceq $x.Input -and $null -ne $x.Channels) { $Problems.Add("$p.expect: channels describe a signal, and input silent says there is none") }
         }
-        [pscustomobject]@{ Name = $stateName; Transport = [string]$r['transport']; Arm = [bool]$r['arm']; Monitor = [string]$r['monitor']; Samples = $samples; Expect = $x }
+        $crit = ConvertTo-ReportCriteria (Get-Or $e 'report' $null) "$p.expect.report" $PluginTable $UsedIn $Problems
+        [pscustomobject]@{ Name = $stateName; Transport = [string]$r['transport']; Arm = [bool]$r['arm']; Monitor = [string]$r['monitor']; Samples = $samples; Windows = $win; Report = $crit; Expect = $x }
     }
-    if ($Raw.Count -and $judged -eq 0) { $Problems.Add("$Path.states: no state has an expect: the scenario would judge nothing") }
+    if ($Raw.Count -and $judged -eq 0) { $Problems.Add("$Path.states: no state has an expect or windows: the scenario would judge nothing") }
     , @($out)
 }
 

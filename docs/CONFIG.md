@@ -52,6 +52,7 @@ A plugin has exactly one of `bundle` and `jsfx`.
 - `expectPdc`: the latency in samples the plugin must report (default 0). Checked by `device` and `savereopen`.
 - `params`: parameter values every FX of this plugin gets (an FX's own `params` go on top), see [layouts](#layouts).
 - `states`: named plugin states, see [states](#states). VST3 plugins only.
+- `report`: counts the plugin writes about itself to a small file, see [reports](#reports).
 
 ### states
 
@@ -219,7 +220,7 @@ Every scenario has `id` and `kind`. The built-in kinds are `render`, `device`, `
 2048 are fine) and `mode` (default `offline`) set the dummy audio device and the render speed: `offline` renders at
 full speed; `1x` is REAPER's 1x offline render, at real-time speed but still an offline render; `online` is an online
 render, in real time. Whether a plugin is told that it runs offline depends on REAPER's preference to inform plugins
-of the offline rendering state; the tool does not set it, and its default on REAPER 7.82 has not been measured.
+of the offline rendering state, which the tool sets per scenario (`informOfflineState`, see [host](#host)).
 
 ### host
 
@@ -236,6 +237,26 @@ is the default. `device` reads `workrender` back from the running REAPER and che
 ships): bit 0 of `runallonstop` in `[REAPER]` of the private `reaper.ini`, the other bits kept; without the key
 REAPER uses 1. Off, the FX of a track that is not armed and has no media are not run while the transport is stopped,
 nor, measured on REAPER 7.82, while it plays (see `transport`). `device` and `transport` read it back and check bit 0.
+
+`"host": { "informOfflineState": true | false }` turns REAPER's "Inform plug-ins of offline rendering state" (in the
+VST compatibility part of its VST preferences) on or off (default on, as REAPER ships): bit 8 (value 256) of
+`vstfullstate` in `[REAPER]` of the private `reaper.ini`, the other bits kept. `device`, `transport` and a
+[render judged by a report](#reports) read it back and check bit 8; a render without a report has no driver to read it.
+
+Measured on REAPER 7.82 (x64, Dummy Audio 48 kHz / 512 samples, the private configuration directory, a plugin that
+counts the blocks it gets, and whether the host called them non-realtime, in a report). Which key: the label is in
+the REAPER binary among the VST compatibility options, and of the 16 low bits of `vstfullstate`, each flipped on its
+own for one render, only clearing bit 8 changed anything the plugin saw: the render's 301 blocks came as realtime
+blocks and no extra prepare came with them (with it set they come as non-realtime blocks, with a prepare before and
+after). Bits 14 and 15 did not stick: REAPER read them back set. Without the key REAPER reads 49989, which has bit 8
+on, so on is the default. What the plugin is told, with a 3 s render:
+
+| preference | `offline` render | `1x` render | `online` render | transport playing or stopped |
+|---|---|---|---|---|
+| on | non-realtime (301 blocks) | non-realtime (300 blocks) | realtime (302 blocks) | realtime |
+| off | realtime (301 blocks) | realtime (300 blocks) | realtime (301 blocks) | realtime |
+
+Every one of these renders was bit-identical to the same render without the plugin, whose audio passes through.
 
 ### matrix
 
@@ -254,6 +275,7 @@ Renders the layout and compares the render with a reference.
 | `mode`, `sr`, `block`, `host` | see above |
 | `mono` | render one channel instead of two |
 | `bypass` | `true` (every FX) or a list of plugin ids rendered bypassed |
+| `report` | what the plugins report about this render, see [reports](#reports) |
 | `compare` | `"dry"` (default): the same layout without any FX; `"repeat"`: the same render twice; `"none"`: no reference, the render is judged on its own; or a variant `{ "layout", "block", "mode", "bypass" }`, where the fields given replace the scenario's own |
 | `maxDiffDb` | allowed residual in dBFS at the expected lag, -400 … 24 (a mix of several tracks can differ by more than full scale); absent means the renders must be bit-identical |
 | `lag` | the expected lag in samples, test render later than the reference is positive; default 0 |
@@ -361,7 +383,8 @@ A state:
 | `arm` | required, `true` / `false`: the track's record arm (recording is disabled on the track, see below) |
 | `monitor` | required: input monitoring `off`, `on` or `auto` (REAPER's tape style: only while not playing) |
 | `samples` | the observation window in device samples, 64 … 115200000 and at least 4 blocks; default 2 seconds |
-| `expect` | what must hold in the window; a state without it is only recorded. At least one state of a scenario has one |
+| `windows` | `{ "plugin": "<id>", "count": 1 … 1000, "maxBlockDiff": 0 … 1000000 }`: open and close that plugin's floating window `count` times in the window (below) |
+| `expect` | what must hold in the window; a state without it and without `windows` is only recorded. At least one state of a scenario has one of them |
 
 `expect`:
 
@@ -371,6 +394,7 @@ A state:
 | `input` | `silent`: no block the chain gets carries signal; `signal`: every one does |
 | `channels` | `left`: every block with signal has it on the left and none on the right; `same`: left and right are equal in every block with signal; `different`: both sides carry signal and differ in every block with signal |
 | `monitoring` | REAPER reports input monitoring in effect on the track (`B_RECMON_IN_EFFECT`) at the end of the window |
+| `report` | what the plugins report about the window, see [reports](#reports) |
 
 `input` and `channels` need a chain that runs: without `called`, a chain that never ran fails them ("not called, so
 it has no input"). `called: false` together with either is refused, and so is `input: "silent"` with `channels`.
@@ -410,7 +434,9 @@ stopped-armed-on: blocks=94/94 silent=0 signal=94 left=94 right=94 same=0 transp
 
 `blocks=B/C`: the chain ran in B blocks while the device ran C; `silent` and `signal`: blocks without and with
 signal; `left`, `right`: blocks with signal on that side; `same`: blocks with signal whose left and right are equal;
-`transport` and `monitoring` as read back at the end of the window. A state that fails adds `; failed: ...`. A state
+`transport` and `monitoring` as read back at the end of the window; with `windows`, ` windows=O/C of N`: how often the
+window opened and closed; with report criteria, ` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state
+that fails adds `; failed: ...`. A state
 whose numbers describe another state than the one asked for is INCOMPLETE (`; no evidence: ...`): the device ran
 less than the window, or the transport, the arm or the monitoring mode did not read back as asked. So is an armed
 state of a scenario with a feed in whose window the feed played no block: its chain would be silent for the wrong
@@ -422,7 +448,19 @@ the chain, the record path could not be set, the feed could not open its file, t
 arms the track, or not every state was observed; it is FAIL, whatever
 the states say, when any file appeared in the record directory. Facts: `track`, `runFxWhenStopped`,
 `runFxAfterStopMs`, `settleSamples`, `feed` (`source`, `sha256`, `channels`) and per state its settings, `status`,
-`problems` and the numbers, among them `fed` and `fed_samples`: the blocks and frames the feed played in the window.
+`problems` and the numbers, among them `fed` and `fed_samples`: the blocks and frames the feed played in the window,
+`win_open` and `win_closed` with `windows`, and `report` with a report: per plugin and field its `start`, `end` and `delta`.
+
+Windows: the plugin must be on the tested track exactly once. While the state's window runs, the driver opens the
+plugin's floating window (`TrackFX_Show`, 3), waits until `TrackFX_GetFloatingWindow` returns it, gives the editor ten
+turns of the message loop (a web view, for one, builds itself asynchronously), closes it (`TrackFX_Show`, 2) and waits
+until it is gone, `count` times; each wait gives up after 10 s of wall-clock time, and whatever happened the window is
+closed once more at the end. The observation window lasts as long as this takes, and at least `samples`. FAIL: it
+opened or closed fewer than `count` times, or the chain and the device ran more than `maxBlockDiff` blocks apart in the
+window (default 4; not judged when the state expects `called: false`). A tolerance, because the chain's count and the
+clock's are read one after the other: a difference of 1 to 2 blocks was seen on REAPER 7.82 with no window at all, and
+none was added by 20 windows of a plugin with a web view editor. Opening an editor runs the plugin's own GUI code,
+see [SAFETY.md](SAFETY.md#plugin-reports-and-windows).
 
 ```json
 { "id": "monitor-states", "kind": "transport", "layout": "vocal", "feed": { "channels": "different" },
@@ -461,7 +499,69 @@ Also measured there:
 
 Measured on the same setup before: with the default preferences REAPER's automatic bypass of muted tracks did not
 stop a JSFX on a muted track; only an FX with `force_auto_bypass` set stopped being run. Not measured: how a real
-hardware input behaves.
+hardware input behaves. The tool has no way to set `force_auto_bypass`.
+
+### reports
+
+A plugin can count things only it knows (the blocks it got and whether the host called them non-realtime, how often
+its editor opened) and write them to a small JSON file. The harness tells it where through an environment variable,
+reads the file at moments it chooses and judges the numbers. It knows nothing about what they mean: a test build of the
+plugin decides what to count. Audio is never in it.
+
+```json
+"plugins": {
+  "rec": { "bundle": "Recorder Test Build.vst3",
+           "report": { "env": "RECORDER_REPORT_JSON", "fields": ["blocksOffline", "blocksRealtime", "editorOpens"], "pid": "pid", "periodMs": 250 } }
+}
+```
+
+| key | |
+|---|---|
+| `env` | required: the variable that gets the file's path, `[A-Z][A-Z0-9_]{2,63}`. A name Windows, a runtime, REAPER or what it loads, a plugin format or WebView2 reads is refused ([SAFETY.md](SAFETY.md#plugin-reports-and-windows)); so is one that another plugin of the configuration uses |
+| `fields` | required, 1 … 32 distinct names: the numeric fields to take from the file. Nothing else in it is read or recorded |
+| `pid` | the field that holds the id of the process that wrote the file: it must be the REAPER of this step, or the file is no evidence |
+| `periodMs` | how often the plugin writes while something changes, 10 … 10000, default 500 |
+
+What the plugin has to do: read the variable; when it is set, write a flat JSON object to that path at most every
+`periodMs` while the counts change, from a thread that runs while the host's message loop runs. It should replace the
+file atomically: write a temporary file in the same directory and rename it over the target (`MoveFileEx` with
+`MOVEFILE_REPLACE_EXISTING`), so that no reader sees half a file. A turn in which a file that was there is missing is
+skipped as a replacement in progress; a file that is not there at all is no evidence. The directory exists.
+Counts are its own business; if they are totals of the whole process, the plugin must be alone in the project, and the
+harness requires that of every judged plugin: used exactly once in the layout.
+
+The variable is set for the REAPER of one driver step, and the path is a new file of that step in the work directory.
+A reading takes the file as it is at a moment, then waits, turn by turn of REAPER's message loop, until its content
+changes (a write after that moment) or stays the same for four periods (a change before that moment would have been
+written by then). A turn counts at most 100 ms, because a stalled main thread stalls the plugin's timer as well. 30 s of
+wall-clock time is only the limit. The file has to be at most 64 KiB.
+
+Criteria: `expect.report` of a transport state is judged between a reading right after the state's settle time and one
+right after its window; `report` of a `render` between a reading before and one after the render. Both are plugin id →
+field → criterion:
+
+```json
+"report": { "rec": { "blocksOffline": { "delta": { "min": 1 } }, "blocksRealtime": { "delta": 0 }, "editorOpens": { "value": 0 } } }
+```
+
+`delta`: how much the field grew between the readings; `value`: what it reads at the end. Each is a number (exactly
+that) or `{ "min", "max" }` (either may be left out). Because the first reading ends at the first write after its moment and the last
+one starts after the window, a count of a running chain grows by somewhat more than the window's blocks: `{ "min": 1 }`
+is the way to ask for "some". A field only counts what the plugin counts: one that stays 0 because the
+plugin does not implement it yet meets `delta: 0` all the same.
+
+A criterion not met is FAIL. No evidence is INCOMPLETE: the plugin wrote no file; the file is over the size limit, is
+not a JSON object, has a declared field missing or not a number, or names another process; no fresh reading could be
+taken in time. Facts: every declared field of the two readings, per plugin: `start`, `end`, `delta`.
+
+A render with `report` is not started with `-renderproject`, which leaves no moment to read before the render: the
+driver opens the project, waits for "run FX after stopping" to end, takes the first reading once the file has stayed
+the same for four periods, runs the action "Render project, using the most recent render settings, auto-close render
+dialog", which uses the settings in the project, and takes the second. It needs `host.runFxWhenStopped: false` (refused otherwise): with it on, the plugin runs in real time before and after the
+render and its counts cannot be told apart. If the file never stays the same, the row is INCOMPLETE. The audio is
+compared as for any render, and the detail adds ` | report <plugin>.<field>=<end> (+<growth>)`. Measured on REAPER 7.82: the
+action returns when the file is written, no deferred script runs meanwhile, and the realtime count did not move between
+the readings of an `offline` or `1x` render with the preference on.
 
 ## negative cases
 

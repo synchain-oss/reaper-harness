@@ -490,6 +490,21 @@ function Test-HarnessScriptLint {
     , $problems.ToArray()
 }
 
-Export-ModuleMember -Function Get-HarnessSentinel, Get-HarnessFileIdentity, Resolve-HarnessRealPath, Test-HarnessUnder, Assert-HarnessCfgDir, Assert-HarnessResultDir, New-HarnessCfgDir, Initialize-HarnessCfg,
+# Variables a report may not set: what Windows, the .NET and PowerShell runtimes, REAPER and what it loads (ReaScript's
+# Python and Lua, Qt in a plugin), WebView2 and the harness itself read. Names, and prefixes (PYTHON takes PYTHONHOME and
+# PYTHONPATH along); compared without regard to case, as Windows does.
+$script:DeniedNames = 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'USERNAME', 'USERDOMAIN', 'HOMEDRIVE', 'HOMEPATH', 'HOMESHARE',
+    'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMW6432', 'ALLUSERSPROFILE', 'PUBLIC',
+    'PSMODULEPATH', 'COMPUTERNAME', 'NUMBER_OF_PROCESSORS', 'OS', 'DRIVERDATA', 'ONEDRIVE'
+$script:DeniedPrefixes = 'REAPER_', 'WEBVIEW2_', 'COR_', 'CORECLR_', 'COMPLUS_', 'DOTNET_', 'PROCESSOR_', 'POWERSHELL_', 'PSEXEC_', 'VST_', 'VST3_', 'CLAP_', 'JUCE_', 'PYTHON', 'LUA_', 'QT_'
+
+function Test-HarnessReportEnvName([string]$Variable) {
+    if ($Variable -cnotmatch '^[A-Z][A-Z0-9_]{2,63}$') { return "'$Variable' must match ^[A-Z][A-Z0-9_]{2,63}$" }
+    if ($Variable -in $script:DeniedNames) { return "'$Variable' is a variable Windows or a runtime reads; a report may not set it" }
+    foreach ($p in $script:DeniedPrefixes) { if ($Variable.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { return "'$Variable' starts with $p, which REAPER, what it loads, WebView2, a runtime or the harness reads; a report may not set it" } }
+    $null
+}
+
+Export-ModuleMember -Function Test-HarnessReportEnvName, Get-HarnessSentinel, Get-HarnessFileIdentity, Resolve-HarnessRealPath, Test-HarnessUnder, Assert-HarnessCfgDir, Assert-HarnessResultDir, New-HarnessCfgDir, Initialize-HarnessCfg,
     Get-HarnessCfgArgument, Get-HarnessPinnedCfgDir, Set-HarnessIniText, Set-HarnessIniValue, Get-HarnessIniTextValue, Get-HarnessIniValue, Get-HarnessDefaultCfgDir, Get-HarnessDefaultCfgSnapshot, Compare-HarnessDefaultCfgSnapshot,
     Find-HarnessVariableCaseCollisions, Find-HarnessControlChars, Test-HarnessScriptLint

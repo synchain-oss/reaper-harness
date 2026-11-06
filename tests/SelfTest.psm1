@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:Src = Join-Path $PSScriptRoot '../src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Report', 'Config', 'Rpp', 'Plugins', 'Transport', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $PSScriptRoot 'TempDir.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'FakeReaper.psm1') -ErrorAction Stop
 
@@ -1652,6 +1652,19 @@ function Get-ExtensionCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'import: a registration function that throws is a usage error' $true (Test-Usage { & $import @('ext/Throws.psm1') } '*threw*')
     & $add 'import: two extensions registering the same kind is a usage error' $true (Test-Usage { & $import @('ext/FixtureExtension.psm1', 'ext/Clash.psm1') } "*kind 'fixture-count' is already defined*")
     & $add 'import: a Lua step with a built-in name is a usage error' $true (Test-Usage { & $import @() @((Split-Path -Leaf (& $luaFile 'learn.lua' '-- harness-steps: learn')) | ForEach-Object { "ext/$_" }) } "*Lua step 'learn'*already defined*")
+    # Every step of the driver and every module of the harness is taken, not just the one named above
+    $driverSteps = @([regex]::Matches([IO.File]::ReadAllText((Join-Path $RepoRoot 'lua/driver.lua')), '(?m)^function steps\.(\w+)\(') | ForEach-Object { $_.Groups[1].Value })
+    $stepsLet = @(foreach ($builtIn in $driverSteps) {
+            $leaf = Split-Path -Leaf (& $luaFile "taken-$builtIn.lua" "-- harness-steps: $builtIn")
+            if (-not (Test-Usage { & $import @() @("ext/$leaf") } "*Lua step '$builtIn'*already defined*")) { $builtIn }
+        })
+    & $add "import: every step of the driver is taken ($($driverSteps -join ', '); let through: $($stepsLet -join ', '))" $true ($driverSteps.Count -ge 7 -and $stepsLet.Count -eq 0)
+    $ownNames = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1' | ForEach-Object { $_.BaseName })
+    $modulesLet = @(foreach ($own in $ownNames) {
+            Set-Content -LiteralPath (Join-Path $dir "ext\$own.psm1") -Value 'Set-StrictMode -Version Latest'
+            if (-not (Test-Usage { & $import @("ext/$own.psm1") } "*harness's own modules*")) { $own }
+        })
+    & $add "import: every module of the harness is taken ($($ownNames.Count) of them; let through: $($modulesLet -join ', '))" $true ($ownNames.Count -ge 15 -and $modulesLet.Count -eq 0)
     $null = & $luaFile 'dup.lua' '-- harness-steps: ok_step'
     & $add 'import: two Lua files declaring the same step is a usage error' $true (Test-Usage { & $import @() @('ext/ok.lua', 'ext/dup.lua') } "*Lua step 'ok_step'*already defined*")
     $good = & $import @('ext/FixtureExtension.psm1') @('ext/ok.lua')
@@ -1702,7 +1715,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     $state = {
         param([hashtable]$Expect, [string]$Transport = 'stop', [bool]$Arm = $true, [string]$Monitor = 'on')
         $x = ($null -eq $Expect) ? $null : [pscustomobject]@{ Called = $Expect['called']; Input = $Expect['input']; Channels = $Expect['channels']; Monitoring = $Expect['monitoring'] }
-        [pscustomobject]@{ Name = 's'; Transport = $Transport; Arm = $Arm; Monitor = $Monitor; Samples = 4800; Expect = $x }
+        [pscustomobject]@{ Name = 's'; Transport = $Transport; Arm = $Arm; Monitor = $Monitor; Samples = 4800; Windows = $null; Report = [ordered]@{}; Expect = $x }
     }
     $row = {
         param([hashtable]$Set = @{})
@@ -1832,7 +1845,7 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'transport setup: a feed that never ran (-2) is no problem when no state arms the track' $false ((& $setup @{ feed_handle = '-2'; feed_channels = '0'; feed_rate = '0' } @() $neverArmed).Count -eq 0)
     & $add 'transport setup: without a feed its facts are not asked for' $false ((& $setup @{} @('feed_ident', 'feed_handle', 'feed_channels', 'feed_rate') ([pscustomobject]@{ sr = 48000; states = @(1, 2); feed = $null })).Count -eq 0)
     # The time the step gets: the driver's own deadlines (3 n / sr + 10 s a wait, two waits a state) come first
-    $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800 }, [pscustomobject]@{ Samples = 9600 }) }
+    $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $null }, [pscustomobject]@{ Samples = 9600; Windows = $null }) }
     $timedDefault = [pscustomobject]@{ sr = 48000; settleSamples = $null; states = $timed.states }
     & $add 'transport timeout: luaTimeoutSec, the settle times and windows three times over, and 20 s a state' $false ([Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 101.5) -lt 1e-9)
     & $add 'transport timeout: without a settle time it counts 5 s a state' $false ([Math]::Abs((Get-HarnessTransportTimeout -Scenario $timedDefault -LuaTimeoutSec 60) - 130.9) -lt 1e-9)
@@ -1978,6 +1991,234 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
     $cases
 }
 
+# ---------------------------------------------------------------- plugin reports and windows
+function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    # A condition that looks into what may be missing: missing is false, not a group that throws
+    $holds = { param([scriptblock]$Condition) try { [bool](& $Condition) } catch { $false } }
+    # The variable that tells a plugin where to write: never one that Windows, a runtime, REAPER or WebView2 reads
+    & $add 'report variable: a name of the plugin''s own is accepted' $false ($null -eq (Test-HarnessReportEnvName 'FIXTURE_REPORT_JSON'))
+    $refused = 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'PATH', 'TEMP', 'TMP', 'SYSTEMROOT', 'COMSPEC', 'PSMODULEPATH', 'WEBVIEW2_USER_DATA_FOLDER', 'REAPER_HARNESS_JOB', 'COR_PROFILER',
+        'CORECLR_PROFILER', 'COMPLUS_X', 'DOTNET_STARTUP_HOOKS', 'POWERSHELL_X', 'VST3_PATH', 'JUCE_X', 'fixture_report', 'AB', '1ABC'
+    $let = @($refused | Where-Object { $null -eq (Test-HarnessReportEnvName $_) })
+    & $add "report variable: system, runtime, REAPER and WebView2 names, lower case and short names are refused (let through: $($let -join ', '))" $true ($let.Count -eq 0)
+    & $add 'report variable: the reason names the prefix' $true ((Test-HarnessReportEnvName 'WEBVIEW2_X') -clike "*starts with WEBVIEW2_*")
+    # What REAPER loads reads some too: ReaScript's Python and Lua, Qt in a plugin; and the Unix-style home and temp
+    $loaded = @(
+        @{ L = 'PYTHON names (ReaScript''s Python reads PYTHONHOME and PYTHONPATH)'; N = 'PYTHONHOME', 'PYTHONPATH', 'PYTHONSTARTUP'; W = 'PYTHON' }
+        @{ L = 'LUA_ names (Lua reads LUA_PATH and LUA_CPATH)'; N = 'LUA_PATH', 'LUA_CPATH', 'LUA_INIT'; W = 'LUA_' }
+        @{ L = 'QT_ names (Qt loads plugins from QT_PLUGIN_PATH)'; N = 'QT_PLUGIN_PATH', 'QT_QPA_PLATFORM'; W = 'QT_' }
+        @{ L = 'HOME'; N = @('HOME'); W = '' }
+        @{ L = 'TMPDIR'; N = @('TMPDIR'); W = '' }
+    )
+    foreach ($c in $loaded) {
+        $why = @(foreach ($n in $c.N) { [string](Test-HarnessReportEnvName $n) })
+        & $add "report variable: refused, $($c.L) ($($why -join ' | '))" $true ($why.Count -eq $c.N.Count -and @($why | Where-Object { -not $_ -or ($c.W -and $_ -cnotlike "*starts with $($c.W),*") }).Count -eq 0)
+    }
+    # The plan of one step: only plugins of the layout that declare a report
+    $rep = { param($Env, [string[]]$Fields, $PidField = 'pid') [pscustomobject]@{ Env = $Env; Fields = $Fields; PidField = $PidField; PeriodMs = 250 } }
+    $plugins = [ordered]@{ rec = [pscustomobject]@{ Report = (& $rep 'REC_JSON' @('blocks', 'opens')) }; mon = [pscustomobject]@{ Report = $null }; spare = [pscustomobject]@{ Report = (& $rep 'SPARE_JSON' @('x') '') } }
+    $layout = [pscustomobject]@{ Tracks = @([pscustomobject]@{ Name = 'Voice'; Fx = @([pscustomobject]@{ Plugin = 'mon' }, [pscustomobject]@{ Plugin = 'rec' }) }) }
+    $plan = Get-HarnessReportPlan -Plugins $plugins -Layout $layout -Work $Tmp -Name 'sc'
+    & $add 'report plan: only the plugins of the layout that declare a report, each with a file of this step in the work directory' $false (
+        $plan.Count -eq 1 -and $plan[0].Plugin -ceq 'rec' -and $plan[0].Path -ceq (Join-Path $Tmp 'sc.report-rec.json') -and $plan[0].Copy -ceq (Join-Path $Tmp 'sc.report-rec.copy-'))
+    $vars = Get-HarnessReportEnvironment $plan
+    $jobRows = @(ConvertTo-HarnessReportJob $plan)
+    & $add 'report plan: the variable names that file; the driver gets the file, the prefix of the copies and the period in seconds' $false (
+        $vars.Count -eq 1 -and $vars['REC_JSON'] -ceq $plan[0].Path -and $jobRows.Count -eq 1 -and $jobRows[0].path -ceq $plan[0].Path -and $jobRows[0].copy -ceq $plan[0].Copy -and $jobRows[0].period -eq 0.25)
+    $none = Get-HarnessReportPlan -Plugins $plugins -Layout ([pscustomobject]@{ Tracks = @([pscustomobject]@{ Name = 'A'; Fx = @([pscustomobject]@{ Plugin = 'mon' }) }) }) -Work $Tmp -Name 'sc'
+    & $add 'report plan: a layout without a reporting plugin sets no variable' $true ($none.Count -eq 0 -and (Get-HarnessReportEnvironment $none).Count -eq 0)
+    # One copy, checked
+    $copy = Join-Path $Tmp 'report-copy.json'
+    $readCopy = { param([string]$Json) [IO.File]::WriteAllText($copy, $Json); Read-HarnessReportCopy -Path $copy -Fields 'blocks', 'opens' -PidField 'pid' -ProcessId 4242 }
+    $good = & $readCopy '{"schema":1,"pid":4242,"blocks":120,"opens":2.5,"name":"x","flag":true}'
+    & $add 'report copy: the declared fields as numbers, nothing else of the file' $false ($null -eq $good.Problem -and (@($good.Numbers.get_Keys()) -join ',') -ceq 'blocks,opens' -and $good.Numbers['blocks'] -eq 120 -and $good.Numbers['opens'] -eq 2.5)
+    $badCopies = @(
+        @{ L = 'a copy that is not JSON'; B = 'not json'; W = 'it is not JSON' }
+        @{ L = 'a key twice'; B = '{"pid":4242,"blocks":1,"blocks":2,"opens":1}'; W = 'it is not JSON' }
+        @{ L = 'a JSON array'; B = '[1,2]'; W = 'it is not a JSON object' }
+        @{ L = 'a pid that is a string'; B = '{"pid":"4242","blocks":1,"opens":1}'; W = 'its pid is not an integer' }
+        @{ L = 'no pid'; B = '{"blocks":1,"opens":1}'; W = 'its pid is not an integer' }
+        @{ L = 'the pid of another process'; B = '{"pid":4243,"blocks":1,"opens":1}'; W = 'it was written by process 4243, not by the REAPER of this step (4242)' }
+        @{ L = 'a declared field missing'; B = '{"pid":4242,"blocks":1}'; W = 'it has no field opens' }
+        @{ L = 'a declared field null'; B = '{"pid":4242,"blocks":null,"opens":1}'; W = 'it has no field blocks' }
+        @{ L = 'a field that is a string'; B = '{"pid":4242,"blocks":"1","opens":1}'; W = 'its field blocks is not a number' }
+        @{ L = 'a field that is true'; B = '{"pid":4242,"blocks":true,"opens":1}'; W = 'its field blocks is not a number' }
+        @{ L = 'a field too large for a number'; B = '{"pid":4242,"blocks":1e999,"opens":1}'; W = 'its field blocks is not a number' }
+        @{ L = 'a copy over 64 KiB'; B = ('{"pid":4242,"blocks":1,"opens":1,"pad":"' + ('x' * 65536) + '"}'); W = 'it is larger than 65536 bytes' }
+    )
+    foreach ($c in $badCopies) {
+        $got = & $readCopy $c.B
+        & $add "report copy: $($c.L) is no evidence ($($got.Problem))" $true ($null -eq $got.Numbers -and $got.Problem -ceq $c.W)
+    }
+    [IO.File]::WriteAllText($copy, '{"blocks":1}')
+    $noPid = Read-HarnessReportCopy -Path $copy -Fields 'blocks' -ProcessId 4242
+    & $add 'report copy: without a pid field the writer is not asked for' $false ($null -eq $noPid.Problem -and $noPid.Numbers['blocks'] -eq 1)
+    # Reading k of a plan, from the driver's word on it
+    $reading = { param([hashtable]$Said) (Read-HarnessReportReading -Facts $Said -Plan $plan -K 3 -ProcessId 4242)['rec'] }
+    $copyFile = "$($plan[0].Copy)3.json"
+    [IO.File]::WriteAllText($copyFile, '{"pid":4242,"blocks":7,"opens":0}')
+    $fresh = @(foreach ($st in 'changed', 'quiet') { $got = (& $reading @{ rep1_3 = $st }); $got.Numbers ? $got.Numbers['blocks'] : "none: $($got.Problem)" })
+    & $add "report reading: a changed or a quiet reading is read from its copy ($($fresh -join ', '))" $false (($fresh -join ',') -ceq '7,7')
+    $words = @(
+        @{ S = 'missing'; W = 'the plugin wrote no report (REC_JSON)' }; @{ S = 'toolarge'; W = 'its report is larger than 65536 bytes' }
+        @{ S = 'stale'; W = 'no fresh report could be read in time' }; @{ S = 'busy'; W = 'its report kept changing where it had to stay the same: the plugin was still being run' }
+        @{ S = 'Changed'; W = 'the driver took no reading' }; @{ S = $null; W = 'the driver took no reading' }
+    )
+    foreach ($w in $words) {
+        $got = & $reading ($w.S ? @{ rep1_3 = $w.S } : @{})
+        & $add "report reading: the driver's '$($w.S)' is no evidence ($($got.Problem)), whatever copy there is" $true ($null -eq $got.Numbers -and $got.Problem -ceq $w.W)
+    }
+    Remove-Item -LiteralPath $copyFile
+    & $add 'report reading: a fresh reading without its copy is no evidence' $true ((& $reading @{ rep1_3 = 'changed' }).Problem -ceq 'no copy of it was made')
+    # Criteria against two readings
+    $val = { param([double]$BlockCount, [double]$OpenCount) [ordered]@{ rec = [pscustomobject]@{ Numbers = [ordered]@{ blocks = $BlockCount; opens = $OpenCount }; Problem = $null } } }
+    $bound = { param($Exact = $null, $Min = $null, $Max = $null) [pscustomobject]@{ Exact = $Exact; Min = $Min; Max = $Max } }
+    $crit = [ordered]@{ rec = [ordered]@{ opens = [pscustomobject]@{ Delta = (& $bound 20); Value = $null }; blocks = [pscustomobject]@{ Delta = (& $bound -Min 1); Value = (& $bound -Max 1000) } } }
+    $okCrit = Test-HarnessReportCriteria -Criteria $crit -Start (& $val 100 3) -End (& $val 150 23)
+    & $add "report criteria: a delta and a range met; what was seen is said ($($okCrit.Text))" $false (
+        $okCrit.Gaps.Count -eq 0 -and $okCrit.Problems.Count -eq 0 -and $okCrit.Text -ceq 'rec.opens=23 (+20) rec.blocks=150 (+50)' -and $okCrit.Facts['rec']['blocks'].delta -eq 50 -and $okCrit.Facts['rec']['opens'].start -eq 3)
+    $critBad = @(
+        @{ L = 'a delta one short'; E = (& $val 150 22); W = 'rec.opens grew by 19, expected 20' }
+        @{ L = 'a delta one over'; E = (& $val 150 24); W = 'rec.opens grew by 21, expected 20' }
+        @{ L = 'a delta under its minimum'; E = (& $val 100 23); W = 'rec.blocks grew by 0, expected 1..' }
+        @{ L = 'a value over its maximum'; E = (& $val 1001 23); W = 'rec.blocks is 1001, expected ..1000' }
+    )
+    foreach ($c in $critBad) {
+        $got = Test-HarnessReportCriteria -Criteria $crit -Start (& $val 100 3) -End $c.E
+        & $add "report criteria: $($c.L) fails ($($got.Problems -join ' | '))" $true ($got.Gaps.Count -eq 0 -and $got.Problems.Count -eq 1 -and $got.Problems[0] -ceq $c.W)
+    }
+    $gapStart = [ordered]@{ rec = [pscustomobject]@{ Numbers = $null; Problem = 'no fresh report could be read in time' } }
+    $gapped = Test-HarnessReportCriteria -Criteria $crit -Start $gapStart -End (& $val 150 23)
+    & $add "report criteria: a reading that is no evidence leaves the plugin unjudged ($($gapped.Gaps -join ' | '))" $true (
+        $gapped.Problems.Count -eq 0 -and $gapped.Gaps.Count -eq 1 -and $gapped.Gaps[0] -ceq 'the report of rec is no evidence: no fresh report could be read in time')
+    $unjudged = Test-HarnessReportCriteria -Start (& $val 1 2) -End (& $val 5 2)
+    & $add 'report criteria: without criteria the fields are recorded and nothing is judged' $false ($unjudged.Problems.Count -eq 0 -and $unjudged.Text -ceq '' -and $unjudged.Facts['rec']['blocks'].delta -eq 4)
+    # A transport state with windows and report criteria
+    $st = { param($Windows = $null, $Judged = [ordered]@{}, $Expect = $null) [pscustomobject]@{ Name = 's'; Transport = 'play'; Arm = $false; Monitor = 'off'; Samples = 4800; Windows = $Windows; Report = $Judged; Expect = $Expect } }
+    $rowOf = {
+        param([hashtable]$Set = @{})
+        $v = [ordered]@{ clock = 10; clock_samples = 5120; blocks = 10; samples = 5120; silent = 10; signal = 0; left = 0; right = 0; equal = 0; fed = 0; fed_samples = 0; playstate = 1; arm = 0; monitor = 0; monitoring = 0; win_open = 20; win_closed = 20 }
+        foreach ($k in $Set.get_Keys()) { $v[$k] = $Set[$k] }
+        [pscustomobject]$v
+    }
+    $win = [pscustomobject]@{ Plugin = 'rec'; Count = 20; MaxBlockDiff = 4; Fx = 1 }
+    $okWin = Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf)
+    & $add "windows: 20 of 20 opened and closed, the chain ran with the device: PASS ($($okWin.Line))" $false ($okWin.Status -ceq 'PASS' -and $okWin.Line -clike '* windows=20/20 of 20')
+    & $add 'windows: a chain 4 blocks behind the device is within the tolerance' $false ((Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf @{ blocks = 6 })).Status -ceq 'PASS')
+    $calledNot = [pscustomobject]@{ Called = $false; Input = $null; Channels = $null; Monitoring = $null }
+    & $add 'windows: a state whose chain must not run is not held to the device''s blocks' $false ((Test-HarnessTransportState -State (& $st $win -Expect $calledNot) -Row (& $rowOf @{ blocks = 0 })).Status -ceq 'PASS')
+    $winBad = @(
+        @{ L = 'a window that opened 19 times'; S = @{ win_open = 19 }; W = 'the window of rec opened 19 of 20 times' }
+        @{ L = 'a window that closed 18 times'; S = @{ win_closed = 18 }; W = 'the window of rec closed 18 of 20 times' }
+        @{ L = 'a chain 5 blocks behind'; S = @{ blocks = 5 }; W = 'the chain ran 5 blocks and the device 10 while the window opened and closed, more than 4 apart' }
+        @{ L = 'a chain 5 blocks ahead'; S = @{ blocks = 15 }; W = 'the chain ran 15 blocks and the device 10 while the window opened and closed, more than 4 apart' }
+    )
+    foreach ($c in $winBad) {
+        $got = Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf $c.S)
+        & $add "windows: $($c.L) fails ($($got.Line))" $true ($got.Status -ceq 'FAIL' -and @($got.Problems).Count -eq 1 -and $got.Problems[0] -ceq $c.W)
+    }
+    $noCount = Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf @{ win_open = $null })
+    & $add 'windows: no window counts from the driver is no evidence' $true ($noCount.Status -ceq 'INCOMPLETE' -and $noCount.Line -clike '*no evidence: the driver reported no window counts')
+    $readings = { param($Start, $End) @{ Start = $Start; End = $End } }
+    $repOk = Test-HarnessTransportState -State (& $st $win $crit) -Row (& $rowOf) -Readings (& $readings (& $val 100 3) (& $val 150 23))
+    & $add "state report: criteria met with the windows: PASS, the line says what the plugin reported ($($repOk.Line))" $false ($repOk.Status -ceq 'PASS' -and $repOk.Line -clike '* windows=20/20 of 20 report rec.opens=23 (+20) rec.blocks=150 (+50)')
+    $repBad = Test-HarnessTransportState -State (& $st $win $crit) -Row (& $rowOf) -Readings (& $readings (& $val 100 3) (& $val 150 22))
+    & $add 'state report: a criterion not met fails the state' $true ($repBad.Status -ceq 'FAIL' -and $repBad.Problems -ccontains 'rec.opens grew by 19, expected 20')
+    $repGap = Test-HarnessTransportState -State (& $st $win $crit) -Row (& $rowOf) -Readings (& $readings $gapStart (& $val 150 23))
+    & $add 'state report: a reading that is no evidence makes the state INCOMPLETE' $true ($repGap.Status -ceq 'INCOMPLETE' -and $repGap.Problems -ccontains 'the report of rec is no evidence: no fresh report could be read in time')
+    $repNone = Test-HarnessTransportState -State (& $st $null $crit ([pscustomobject]@{ Called = $null; Input = $null; Channels = $null; Monitoring = $null })) -Row (& $rowOf)
+    & $add 'state report: criteria without readings are no evidence' $true ($repNone.Status -ceq 'INCOMPLETE' -and $repNone.Problems -ccontains 'no report was read')
+    $older = [pscustomobject]@{ Name = 's'; Transport = 'play'; Arm = $false; Monitor = 'off'; Samples = 4800; Expect = [pscustomobject]@{ Called = $true; Input = $null; Channels = $null; Monitoring = $null } }
+    & $add 'transport state: a state without Windows and Report (an older caller''s or an extension''s) is judged, with readings or without, and nothing throws' $false (& $holds {
+            (Test-HarnessTransportState -State $older -Row (& $rowOf)).Status -ceq 'PASS' -and (Test-HarnessTransportState -State $older -Row (& $rowOf) -Readings (& $readings (& $val 100 3) (& $val 150 23))).Status -ceq 'PASS' })
+    # "Inform plug-ins of offline rendering state": bit 8 of vstfullstate, the other bits kept
+    & $add 'offline-state preference: only bit 8 changes; without a key it starts from what REAPER reads then (49989, on)' $false (
+        (Get-HarnessVstFullState '49989' $false) -eq 49733 -and (Get-HarnessVstFullState '49733' $true) -eq 49989 -and (Get-HarnessVstFullState '49989' $true) -eq 49989 -and (Get-HarnessVstFullState '0' $true) -eq 256 -and
+        (Get-HarnessVstFullState $null $false) -eq 49733 -and (Get-HarnessVstFullState '' $true) -eq 49989 -and (Get-HarnessVstFullState 'x' $true) -eq 49989)
+    $vsRead = { param($Reads, $Asked) @(Test-HarnessHostReadback -Facts @{ dev_bsize = '512'; dev_srate = '48000'; cfg_workrender = '1'; cfg_vstfullstate = $Reads } -Block 512 -Sr 48000 -AnticipativeFx $true -InformOfflineState $Asked) }
+    & $add 'offline-state preference: the bit that was asked for reads back' $false ((& $vsRead '49989' $true).Count -eq 0 -and (& $vsRead '49733' $false).Count -eq 0)
+    & $add 'offline-state preference: another bit reads as a problem, in both directions' $true (
+        ((& $vsRead '49733' $true) -join ';') -ceq 'Inform plug-ins of offline rendering state reads off, expected on' -and ((& $vsRead '49989' $false) -join ';') -ceq 'Inform plug-ins of offline rendering state reads on, expected off')
+    & $add 'offline-state preference: an unreadable value is a problem' $true (((& $vsRead 'unavailable' $true) -join ';') -ceq "vstfullstate reads 'unavailable'")
+    & $add 'offline-state preference: not asked for, it is not looked at' $false ((Test-HarnessHostReadback -Facts @{ dev_bsize = '512'; dev_srate = '48000'; cfg_workrender = '1' } -Block 512 -Sr 48000 -AnticipativeFx $true).Count -eq 0)
+    # What a render left: the same check for both ways of rendering
+    $wavFile = Join-Path $Tmp 'gap.wav'; $stemFile = Join-Path $Tmp 'gap-stem.wav'
+    & $add 'render files: no file is a gap, whatever else is there' $true ((Get-HarnessRenderGap $wavFile) -ceq 'the render produced no file')
+    [IO.File]::WriteAllText($wavFile, 'x')
+    & $add 'render files: a stem that is not there is a gap, and it is named' $true ((Get-HarnessRenderGap $wavFile @($stemFile)) -ceq 'the render produced no stem file gap-stem.wav')
+    [IO.File]::WriteAllText($stemFile, 'x')
+    & $add 'render files: all of them there is no gap' $false ($null -eq (Get-HarnessRenderGap $wavFile @($stemFile)))
+    # The time the step gets, and what the driver is told
+    $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $win }, [pscustomobject]@{ Samples = 9600; Windows = $null }) }
+    & $add 'transport timeout: 20 s more for every window opened and closed, 60 s a state with reports' $false (
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 501.5) -lt 1e-9 -and [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60 -Reports) - 621.5) -lt 1e-9)
+    # What a configuration makes of reports and windows
+    $cfgText = @'
+{ "schema": 1, "name": "t",
+  "plugins": { "rec": { "bundle": "R.vst3", "report": { "env": "REC_PROBE_JSON", "fields": ["blocksRealtime", "editorOpens"], "pid": "pid", "periodMs": 250 } }, "mon": { "bundle": "M.vst3" } },
+  "layouts": { "one": { "tracks": [ { "name": "Voice", "source": true, "fx": [ { "plugin": "mon" }, { "plugin": "rec" } ] } ] } },
+  "scenarios": [
+    { "id": "t1", "kind": "transport", "layout": "one", "states": [
+      { "name": "p", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "rec", "count": 20 }, "expect": { "report": { "rec": { "editorOpens": { "delta": 20 }, "blocksRealtime": { "delta": { "min": 1 } } } } } },
+      { "name": "q", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "mon", "count": 3, "maxBlockDiff": 9 } } ] },
+    { "id": "r1", "kind": "render", "layout": "one", "host": { "runFxWhenStopped": false, "informOfflineState": false }, "report": { "rec": { "blocksRealtime": { "value": 0 } } } } ] }
+'@
+    $cfgRes = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $cfgText)
+    $t1 = $cfgRes.Config ? $cfgRes.Config.Scenarios[0] : $null
+    & $add "configuration: windows by the plugin's place on the tested track, tolerance 4 unless given; criteria per plugin and field; a state with windows only is judged ($(@($cfgRes.Problems) -join ' | '))" $false (& $holds {
+            @($cfgRes.Problems).Count -eq 0 -and $t1.states[0].Windows.Fx -eq 1 -and $t1.states[0].Windows.MaxBlockDiff -eq 4 -and $t1.states[1].Windows.Fx -eq 0 -and $t1.states[1].Windows.MaxBlockDiff -eq 9 -and
+            $cfgRes.Config.Plugins['rec'].Report.PeriodMs -eq 250 })
+    & $add 'configuration: the criteria of a state are kept per plugin and field' $false (& $holds {
+            $t1.states[0].Report['rec']['editorOpens'].Delta.Exact -eq 20 -and $t1.states[0].Report['rec']['blocksRealtime'].Delta.Min -eq 1 -and $null -eq $t1.states[0].Report['rec']['blocksRealtime'].Value })
+    & $add 'configuration: the criteria of a render are kept per plugin and field' $false (& $holds { $cfgRes.Config.Scenarios[1].report['rec']['blocksRealtime'].Value.Exact -eq 0 })
+    & $add 'configuration: the offline-state preference is on unless a scenario turns it off' $false ($t1.host.InformOfflineState -eq $true -and $cfgRes.Config.Scenarios[1].host.InformOfflineState -eq $false)
+    $noPeriod = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $cfgText.Replace(', "periodMs": 250', ''))
+    & $add 'configuration: a report writes every 500 ms unless it says otherwise' $false (@($noPeriod.Problems).Count -eq 0 -and $noPeriod.Config.Plugins['rec'].Report.PeriodMs -eq 500)
+    $upTo = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $cfgText.Replace('{ "min": 1 }', '{ "max": 7 }'))
+    & $add 'configuration: a range with only a maximum keeps it' $false (& $holds { @($upTo.Problems).Count -eq 0 -and $upTo.Config.Scenarios[0].states[0].Report['rec']['blocksRealtime'].Delta.Max -eq 7 -and $null -eq $upTo.Config.Scenarios[0].states[0].Report['rec']['blocksRealtime'].Delta.Min })
+    $onlyWindows = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $cfgText.Replace(', "expect": { "report": { "rec": { "editorOpens": { "delta": 20 }, "blocksRealtime": { "delta": { "min": 1 } } } } }', ''))
+    & $add "configuration: a scenario whose states have windows and no expect judges something ($(@($onlyWindows.Problems) -join ' | '))" $false (@($onlyWindows.Problems).Count -eq 0)
+    if ($t1) {
+        $job = Get-HarnessTransportJob -Scenario $t1 -Layout $cfgRes.Config.Layouts['one'] -Tools @{ 'harness-block-probe' = 'JS:p'; 'harness-feed' = 'JS:f' } -RecordDir 'R'
+        & $add 'transport job: the window''s FX counts the block probe in front of the chain' $false ($job.states[0].windows.fx -eq 2 -and $job.states[0].windows.count -eq 20 -and $job.states[1].windows.fx -eq 1)
+    }
+    $cfgBad = @(
+        @{ L = 'a report variable REAPER reads'; F = '"REC_PROBE_JSON"'; T = '"REAPER_X"'; W = "config.plugins.rec.report.env: 'REAPER_X' starts with REAPER_*" }
+        @{ L = 'the same variable for two plugins'; F = '"bundle": "M.vst3" }'; T = '"bundle": "M.vst3", "report": { "env": "REC_PROBE_JSON", "fields": ["a"] } }'; W = "config.plugins.mon.report.env: 'REC_PROBE_JSON' is the report variable of rec too" }
+        @{ L = 'a field the report does not declare'; F = '"editorOpens": { "delta": 20 }'; T = '"nope": { "delta": 20 }'; W = "*.expect.report.rec.nope: 'nope' is not one of the report's fields" }
+        @{ L = 'a criterion with neither delta nor value'; F = '"editorOpens": { "delta": 20 }'; T = '"editorOpens": { }'; W = '*.expect.report.rec.editorOpens: needs delta or value' }
+        @{ L = 'a range with neither end'; F = '{ "min": 1 }'; T = '{ }'; W = '*.expect.report.rec.blocksRealtime.delta: needs min or max' }
+        @{ L = 'a range upside down'; F = '{ "min": 1 }'; T = '{ "min": 5, "max": 1 }'; W = '*.expect.report.rec.blocksRealtime.delta: min is above max' }
+        @{ L = 'criteria of a plugin without a report'; F = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }'; T = '"report": { "mon": { "x": { "value": 0 } } }'; W = "config.scenarios[[]1[]].report.mon: plugin 'mon' declares no report" }
+        @{ L = 'a judged plugin twice in the layout'; F = '{ "plugin": "rec" } ]'; T = '{ "plugin": "rec" }, { "plugin": "rec" } ]'; W = "*.expect.report.rec: the layout uses 'rec' 2 times; a judged report needs exactly one instance"; N = 3 }
+        @{ L = 'a judged render with Run FX when stopped on'; F = '"runFxWhenStopped": false, '; T = ''; W = 'config.scenarios[[]1[]].report: judging a render by a report needs host.runFxWhenStopped false: *' }
+        @{ L = 'a window of a plugin that is not on the tested track'; F = '"plugin": "mon", "count": 3'; T = '"plugin": "ghost", "count": 3'; W = "*.windows.plugin: 'ghost' is on the tested track 0 times; its window needs exactly one" }
+        @{ L = 'a window of a plugin twice on the tested track'; F = '{ "plugin": "mon" },'; T = '{ "plugin": "mon" }, { "plugin": "mon" },'; W = "*.windows.plugin: 'mon' is on the tested track 2 times; its window needs exactly one" }
+    )
+    foreach ($c in $cfgBad) {
+        if (-not $cfgText.Contains($c.F)) { & $add "configuration: $($c.L) (the sample to change is gone)" $true $false; continue }
+        $res = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson ($cfgText.Replace($c.F, $c.T)))
+        & $add "configuration: $($c.L) is refused ($(@($res.Problems) -join ' | '))" $true (@($res.Problems).Count -eq ($c['N'] ?? 1) -and @($res.Problems | Where-Object { $_ -clike $c.W }).Count -eq 1)
+    }
+    # The schema refuses the empty objects the validator refuses, so that an editor does not pass what a run will not
+    $schemaText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'schema/config.schema.json'))
+    $agree = { param([string]$Json, [bool]$Accepted) $schemaOk = try { Test-Json -Json $Json -Schema $schemaText -ErrorAction Stop } catch { $false }; $schemaOk -eq $Accepted }
+    & $add 'schema: Test-Json accepts the configuration with reports and windows, like the validator' $false (& $agree $cfgText $true)
+    $empties = @(
+        @{ L = 'an empty range'; F = '{ "min": 1 }'; T = '{ }' }
+        @{ L = 'an empty criterion'; F = '"editorOpens": { "delta": 20 }'; T = '"editorOpens": { }' }
+        @{ L = 'an empty expectation of a state'; F = '"expect": { "report": { "rec": { "editorOpens": { "delta": 20 }, "blocksRealtime": { "delta": { "min": 1 } } } } }'; T = '"expect": { }' }
+    )
+    foreach ($c in $empties) {
+        $emptyJson = $cfgText.Replace($c.F, $c.T)
+        $res = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $emptyJson)
+        & $add "schema: Test-Json rejects $($c.L), like the validator ($(@($res.Problems) -join ' | '))" $true ($emptyJson -cne $cfgText -and @($res.Problems).Count -eq 1 -and (& $agree $emptyJson $false))
+    }
+    $cases
+}
+
 # ---------------------------------------------------------------- wiring
 function Get-WiringCases([string]$RepoRoot) {
     $cases = New-CaseList
@@ -2036,14 +2277,62 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add 'wiring: with warm-up cycles the driver writes the mark after the last of them' $true ($driverText -cmatch '(?s)for i = 1, job\.cycles do.*?if i == job\.warmup then\s*touch\(job\.warmMark\)')
     # The transport step may toggle arming, monitoring and the transport, and must never record
     $actions = @([regex]::Matches($driverText, 'Main_OnCommand\w*\s*\(\s*(\w+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
-    & $add "driver: the only actions it calls are File: Quit (40004) and File: New project (40023) ($($actions -join ', '))" $true (($actions -join ',') -ceq '40004,40023')
+    & $add "driver: the only actions it calls are File: Quit (40004), File: New project (40023) and Render with the project's settings, auto-close (42230) ($($actions -join ', '))" $true (($actions -join ',') -ceq '40004,40023,42230')
+    & $add 'driver: the render action is called in the render step only, between the two readings' $true ($driverText -cmatch '(?s)function steps\.render\(\).*readReports\(1, true\)\s+reaper\.Main_OnCommand\(42230, 0\)\s+readReports\(2\)\s+end' -and @([regex]::Matches($driverText, '42230, 0')).Count -eq 1)
+    & $add 'driver: the render step reports the preference, and takes its first reading after run FX after stopping is over' $true ($driverText -cmatch '(?s)function steps\.render\(\).*put\("cfg_vstfullstate", config\("vstfullstate"\)\)\s+wait\(\(\(tonumber\(config\("runafterstop"\)\) or 4000\) \+ 500\) / 1000\)\s+readReports\(1, true\)')
+    & $add 'driver: a reading ends with a change, or after four write periods without one; a turn counts at most 100 ms; 30 s is the limit; settled, a change starts the four periods again' $true (
+        $driverText -cmatch 'loop - since\[j\] >= 4 \* r\.period' -and $driverText -cmatch 'math\.min\(now - last, 0\.1\)' -and $driverText -cmatch 'local deadline = last \+ 30\b' -and
+        $driverText -cmatch 'if settled then base\[j\], since\[j\], moved\[j\] = \{ t, s \}, loop, true else got\[j\] = \{ t, s, "changed" \} end')
+    & $add 'driver: a turn in which a report that was there is missing (being replaced) is skipped before either way of reading looks at it' $true (
+        $driverText -cmatch 'local t, s = readCapped\(r\.path\)\s+if s == "missing" and base\[j\]\[2\] == "ok" then\s+--[^\n]*\n\s+elseif t ~= base\[j\]\[1\] or s ~= base\[j\]\[2\] then\s+if settled then')
+    $readBody = [regex]::Match($driverText, '(?s)\nlocal function readReports\(k, settled, check\)\r?\n.*?\r?\nend\r?\n').Value
+    & $add 'driver: a reading runs the check it is handed after every turn of the message loop' $true (
+        $readBody -cmatch 'coroutine\.yield\(\)\r?\n\s*if check then check\(\) end\r?\n' -and @([regex]::Matches($readBody, 'coroutine\.yield\(\)')).Count -eq 1)
+    & $add 'driver: a window opens and closes as often as asked, the editor gets ten turns of the message loop, and every wait for it checks the record bit' $true (
+        $driverText -cmatch 'for _ = 1, w\.count do' -and $driverText -cmatch 'for _ = 1, 10 do coroutine\.yield\(\) noRecord\(\) end' -and $driverText -cmatch 'noRecord\(\)\s+if reaper\.time_precise\(\) > limit then return false end')
+    # Every project with plugins and every read-back carries the preference: a scenario cannot lose it on the way (the
+    # dry reference has no plugin to tell)
+    $scenarioTree = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Scenarios.psm1'), [ref]$null, [ref]$null)
+    $hostCalls = { param($name) @($scenarioTree.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq $name }, $true)) }
+    $hasPreference = { param($call) @($call.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'InformOfflineState' }).Count -eq 1 }
+    $projects = & $hostCalls 'New-HarnessRun'
+    $readBacks = & $hostCalls 'Test-HarnessHostReadback'
+    & $add "wiring: every project with plugins and every read-back passes the offline-state preference ($($projects.Count) and $($readBacks.Count))" $true (
+        $projects.Count -ge 7 -and @($projects | Where-Object { $_.Extent.Text -cnotlike '* -NoFx*' -and -not (& $hasPreference $_) }).Count -eq 0 -and $readBacks.Count -ge 3 -and @($readBacks | Where-Object { -not (& $hasPreference $_) }).Count -eq 0)
+    & $add 'driver: every report reading of a state is taken: 2n-1 after the settle time, 2n after the window' $true ($driverText -cmatch '(?s)put\(p \.\. "settled".*?readReports\(2 \* n - 1, false, noRecord\).*?local c0, t0, f0 = snap.*?local c1, t1, f1 = snap.*?readReports\(2 \* n, false, noRecord\)')
+    & $add 'driver: a window is checked with TrackFX_GetFloatingWindow, opened with 3 and closed with 2, and closed once more at the end' $true (
+        $driverText -cmatch 'TrackFX_GetFloatingWindow\(tested, w\.fx\) ~= nil' -and $driverText -cmatch 'TrackFX_Show\(tested, w\.fx, 3\)' -and @([regex]::Matches($driverText, 'TrackFX_Show\(tested, w\.fx, 2\)')).Count -eq 2)
+    & $add 'driver: a report is read with a cap of 64 KiB, the same as the module''s' $true ($driverText -cmatch 'REPORT_MAX = 65536\b' -and $driverText -cmatch 'f:read\(REPORT_MAX \+ 1\)' -and ([IO.File]::ReadAllText((Join-Path $RepoRoot 'src/Report.psm1'))) -cmatch 'MaxBytes = 65536\b')
     & $add 'driver: no record call of any kind, and no action looked up by name' $true ($driverText -cnotmatch 'OnRecord|CSurf_|Main_OnCommandEx|NamedCommandLookup|Record\w*Button')
-    $transportStep = $driverText.Substring([Math]::Max(0, $driverText.IndexOf('function steps.transport()')))
+    # The transport step alone: it ends at the first "end" that is not indented
+    $transportStep = [regex]::Match($driverText, '(?s)(?<=\n)function steps\.transport\(\)\r?\n.*?\r?\nend\r?\n').Value
+    # The body of waitSamples alone (it ends at the first "end" of its own indentation): a later wait that checks the
+    # record bit must not stand in for it
+    $waitBody = [regex]::Match($transportStep, '(?s)\n( *)local function waitSamples\(n\)\r?\n.*?\r?\n\1end\r?\n').Value
+    # Every loop of the transport step that gives up a turn checks the record bit in lines of its own (the lines of a loop
+    # inside it are that loop's), no turn is given up outside a loop, and every reading the step takes gets the check
+    $stepLines = $transportStep -split '\r?\n'
+    $loops = [Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $stepLines.Count; $i++) {
+        $m = [regex]::Match($stepLines[$i], '^( *)(?:for|while)\b.*\bdo\b(.*)$')
+        if (-not $m.Success) { continue }
+        $to = $i
+        if ($m.Groups[2].Value -cnotmatch '\bend\s*$') { $to = $i + 1; while ($to -lt $stepLines.Count -and $stepLines[$to] -cne "$($m.Groups[1].Value)end") { $to++ } }
+        $loops.Add([pscustomobject]@{ From = $i; To = $to })
+    }
+    $ownText = { param($l) @(for ($i = $l.From; $i -le $l.To; $i++) { if (-not @($loops | Where-Object { $_.From -gt $l.From -and $_.To -le $l.To -and $i -ge $_.From -and $i -le $_.To }).Count) { $stepLines[$i] } }) -join "`n" }
+    $yielding = @($loops | Where-Object { (& $ownText $_).Contains('coroutine.yield()') })
+    $unchecked = @($yielding | Where-Object { -not (& $ownText $_).Contains('noRecord()') } | ForEach-Object { $stepLines[$_.From].Trim() })
+    $loose = @(for ($i = 0; $i -lt $stepLines.Count; $i++) { if ($stepLines[$i].Contains('coroutine.yield()') -and -not @($loops | Where-Object { $i -ge $_.From -and $i -le $_.To }).Count) { $stepLines[$i].Trim() } })
+    & $add "driver: every loop of the transport step that gives up a turn checks the record bit in its own lines ($($yielding.Count) loops; unchecked: $($unchecked -join ' | '); outside a loop: $($loose -join ' | '))" $true (
+        $yielding.Count -ge 4 -and $unchecked.Count -eq 0 -and $loose.Count -eq 0 -and $transportStep -cnotmatch '\brepeat\b')
+    $stepReads = @([regex]::Matches($transportStep, 'readReports\(([^()]*)\)') | ForEach-Object { $_.Groups[1].Value })
+    & $add "driver: every reading the transport step takes is handed the record check ($($stepReads -join ' | '))" $true ($stepReads.Count -eq 2 -and @($stepReads | Where-Object { $_ -cnotmatch ', noRecord$' }).Count -eq 0)
     $recModes = @([regex]::Matches($driverText, '"I_RECMODE",\s*(-?\d+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
     & $add "driver: the transport step disables recording on its tracks (record mode 2 only: $($recModes -join ', ')), sets the record path before it arms anything, and every wait checks the record bit" $true (
         $transportStep.StartsWith('function steps.transport()', [StringComparison]::Ordinal) -and ($recModes -join ',') -ceq '2' -and
         $transportStep.IndexOf('"RECORD_PATH", job.recordDir, true') -gt 0 -and $transportStep.IndexOf('"RECORD_PATH", job.recordDir, true') -lt $transportStep.IndexOf('"I_RECARM"') -and
-        $transportStep -cmatch '(?s)local function waitSamples\(n\).*?while [^\n]*\n\s*noRecord\(\)' -and $transportStep -cmatch 'GetPlayState\(\) & 4 ~= 0')
+        $waitBody -cmatch 'while [^\n]*\n\s*noRecord\(\)' -and $transportStep -cmatch 'GetPlayState\(\) & 4 ~= 0')
     $pathStop = $transportStep.IndexOf('if not pathOk then error(')
     & $add 'driver: a record path that does not read back is reported and stops the step before anything is armed or the transport is touched' $true (
         $transportStep -cmatch 'local pathOk = setOk and path == job\.recordDir\r?\n\s*put\("record_path", pathOk and "ok" or "failed"\)' -and
@@ -2173,7 +2462,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {
