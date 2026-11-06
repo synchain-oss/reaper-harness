@@ -296,8 +296,9 @@ function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Lab
 # Runs one driver step. Job: extra fields for the job file. Watch: label -> mark file (process counters are sampled
 # when it appears). ReportEnv: environment variable -> report file of a plugin (Report.psm1), set for this REAPER only;
 # the files are deleted before the start, like the result. Copies: the copies of those files the driver may write
-# (Get-HarnessReportCopies), deleted before the start and before a retry; the caller deletes them once read. Outputs:
-# further files the step writes, for the retry after a licence reminder. Result: the key=value lines as a hashtable.
+# (Get-HarnessReportCopies), deleted before the start and before a retry; the caller deletes them once read, and this
+# function when the launch throws (then nobody reads them). Outputs: further files the step writes, for the retry after
+# a licence reminder. Result: the key=value lines as a hashtable.
 function Invoke-HarnessLuaStep {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Step, [hashtable]$Job = @{}, [hashtable]$Watch = @{},
           [double]$TimeoutSec = 0, [double]$KillAfterSec = 0, [hashtable]$ReportEnv = @{}, [string[]]$Copies = @(), [string[]]$Outputs = @())
@@ -305,14 +306,20 @@ function Invoke-HarnessLuaStep {
     $resultFile = Join-Path $Ctx.Work "$Name.result"
     $environment = @{ REAPER_HARNESS_JOB = $jobFile }
     foreach ($k in $ReportEnv.get_Keys()) { if ($environment.ContainsKey($k)) { throw "the report variable $k is taken" }; $environment[$k] = $ReportEnv[$k] }
-    foreach ($f in @($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
+    foreach ($f in @($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
     $Ctx.Files.Add($jobFile); $Ctx.Files.Add($resultFile); foreach ($f in @($Watch.get_Values()) + @($ReportEnv.get_Values())) { $Ctx.Files.Add($f) }
     $full = @{ step = $Step; result = $resultFile; extensions = @($Ctx.LuaExtensions) }
     foreach ($k in $Job.get_Keys()) { $full[$k] = $Job[$k] }
     Write-HarnessText -Path $jobFile -Text (ConvertTo-HarnessLuaTable $full)
-    $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -Outputs (@($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies + @($Job['saveAs'] | Where-Object { $_ }) + $Outputs) -HostArgs @{
-        ReaperArgs = @($Ctx.Driver); Environment = $environment; WatchFiles = $Watch
-        TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
+    try {
+        $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -Outputs (@($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies + @($Job['saveAs'] | Where-Object { $_ }) + $Outputs) -HostArgs @{
+            ReaperArgs = @($Ctx.Driver); Environment = $environment; WatchFiles = $Watch
+            TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
+        }
+    } catch {
+        # The error that ended the launch is what the caller gets, not one about a copy that could not be deleted
+        foreach ($f in $Copies) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        throw
     }
     $report = @{}
     if (Test-Path -LiteralPath $resultFile) {

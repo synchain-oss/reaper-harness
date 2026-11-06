@@ -941,6 +941,18 @@ $timedOut = {
 try { $late = & $reportRun } finally { & $setOnce $realOnce }
 Write-Case "end to end: a transport launch that ends badly after the driver copied the reports is INCOMPLETE and leaves no copy ($($late.Row.detail); $(& $copiesLeft) left)" $true (
     & $holds { $late.Row.status -ceq 'INCOMPLETE' -and $late.Row.detail -clike 'timed out after *' -and (& $copiesLeft) -eq 0 })
+# A launch that throws once the driver has copied the reports (a guard, the host): nobody reads the copies, they go all the same
+$thrownAt = @{ Copies = -1 }
+$throwsLate = {
+    param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
+    $run = & $realOnce -Ctx $RunCtx -HostArgs $HostArgs -Label $Label
+    if ($Label -ceq 'transport') { $thrownAt.Copies = @(Get-ChildItem -LiteralPath $RunCtx.Work -File -Filter '*.report-*.copy-*.json').Count; throw 'the host failed after the step' }
+    $run
+}.GetNewClosure()
+& $setOnce $throwsLate
+try { $threw = & $reportRun } finally { & $setOnce $realOnce }
+Write-Case "end to end: a transport launch that throws after the driver copied the reports is INCOMPLETE and leaves no copy ($($threw.Row.detail); $($thrownAt.Copies) copies then, $(& $copiesLeft) left)" $true (
+    & $holds { $threw.Row.status -ceq 'INCOMPLETE' -and $threw.Row.detail -clike 'the scenario threw: the host failed after the step*' -and $thrownAt.Copies -gt 0 -and (& $copiesLeft) -eq 0 })
 # The same for a judged render: its configuration file was written over by the transport one above, so it is written again
 $reportRenderCfg = & $writeVariant $reportRenderChange
 $reportRenderCfg.ReaperExe = $pwshExe; $reportRenderCfg.ResultDir = $e2e.ResultDir
