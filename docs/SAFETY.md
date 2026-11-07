@@ -87,7 +87,8 @@ machine (a deny entry, a subst drive, a mapped drive) is checked as undone, and 
   checks are the job of the run command: that no other `reaper.exe` is running is checked once, before the first
   round; the default directory is listed before and after every round. A `reaper.exe` someone starts between two
   rounds of `-Repeat` is not looked for again; what it changes in the default directory while a round runs still
-  shows in the listing after that round, but a change made between two rounds or after the last one is in no listing.
+  shows when that round's two listings are compared, but a change made between two rounds or after the last one is
+  never compared: the next round's first listing simply starts from it.
 - The default lock is `Local\ReaperHarness-gui`, a kernel mutex. `-ExtraGuiLock
   <Local\name>` adds more (for example the lock another tool on the same machine uses for its GUI tests); locks can
   only be added, never removed. All locks of a set are taken in a fixed order, all or nothing, so two runs with
