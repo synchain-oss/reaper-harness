@@ -1,0 +1,118 @@
+{
+  "$schema": "../../schema/config.schema.json",
+  "schema": 1,
+  "name": "fixture",
+  "notes": "Self-test configuration: two stand-in plugins with two named states, the PDC JSFX, a chain, a folder bus, sends and stems, transport states. The self-test runs it against a stand-in for REAPER.",
+  "plugins": {
+    "gain": {
+      "bundle": "Fixture Gain.vst3",
+      "states": {
+        "quiet": { "template": "states/template.rpp", "track": "Lead", "fx": 1 },
+        "loud": { "stateFile": "states/loud.RfxChain" }
+      }
+    },
+    "bus": { "bundle": "Fixture Bus.vst3", "expectPdc": 0 },
+    "delay": { "jsfx": "harness-pdc-delay", "expectPdc": 64, "params": { "Delay (samples)": { "normalized": 0.0078125, "display": "64.0" } } }
+  },
+  "signal": { "seconds": 0.5, "seed": 7, "noiseDb": -24, "sine": { "hz": 440, "db": -30 } },
+  "limits": { "renderTimeoutSec": 30, "luaTimeoutSec": 30, "learnTimeoutSec": 30, "lockWaitSec": 60, "instances": { "cycles": 3, "warmup": 1 } },
+  "layouts": {
+    "chain": {
+      "tracks": [
+        { "name": "Voice", "source": true, "fx": [ { "plugin": "gain", "params": { "Gain": 0.5 } }, { "plugin": "bus" } ] }
+      ]
+    },
+    "bus": {
+      "tracks": [
+        { "name": "Bus", "source": false, "folder": true, "fx": [ { "plugin": "bus" } ] },
+        { "name": "Vox 1", "source": true, "parent": "Bus", "fx": [ { "plugin": "gain" } ] },
+        { "name": "Vox 2", "source": true, "parent": "Bus", "volume": 0.5, "fx": [ { "plugin": "gain", "params": { "Gain": { "normalized": 0.25, "display": "0.25" } } } ] }
+      ]
+    },
+    "states": {
+      "tracks": [
+        { "name": "Quiet", "source": true, "fx": [ { "plugin": "gain", "state": "quiet" } ] },
+        { "name": "Loud", "source": true, "fx": [ { "plugin": "gain", "state": "loud" } ] }
+      ]
+    },
+    "routing": {
+      "tracks": [
+        { "name": "Drums", "source": true, "signal": { "seed": 11 }, "pan": -0.5, "sends": [ { "to": "Verb", "volume": 0.5 }, { "to": "Cue", "mode": "pre" } ] },
+        { "name": "Keys", "source": true, "signal": { "seed": 12, "sine": { "hz": 1000 } }, "mute": true, "sends": [ { "to": "Verb" } ] },
+        { "name": "Verb", "source": false, "fx": [ { "plugin": "gain", "params": { "Trim": 0.25 } } ] },
+        { "name": "Cue", "source": false, "masterSend": false }
+      ]
+    },
+    "pdc": {
+      "tracks": [
+        { "name": "Voice", "source": true, "fx": [ { "plugin": "delay" }, { "plugin": "gain" } ] }
+      ]
+    },
+    "pdc-off": {
+      "tracks": [
+        { "name": "Voice", "source": true, "fx": [ { "plugin": "delay", "params": { "Delay (samples)": { "normalized": 0.001953125, "display": "16.0" }, "Report delay as PDC": 0 } } ] }
+      ]
+    }
+  },
+  "scenarios": [
+    { "id": "chain", "kind": "render", "layout": "chain", "matrix": { "mode": ["offline", "1x"], "sr": [44100, 48000] } },
+    { "id": "chain-repeat", "kind": "render", "layout": "chain", "compare": "repeat" },
+    { "id": "chain-block", "kind": "render", "layout": "chain", "block": 64, "compare": { "block": 1024 } },
+    { "id": "chain-bypass", "kind": "render", "layout": "chain", "bypass": true },
+    { "id": "bus", "kind": "render", "layout": "bus", "maxDiffDb": -120, "notSilent": true, "peakMaxDb": 6 },
+    { "id": "bus-device", "kind": "device", "layout": "bus", "block": 1024 },
+    { "id": "bus-reopen", "kind": "savereopen", "layout": "bus", "bypass": ["bus"] },
+    {
+      "id": "states", "kind": "render", "layout": "states", "maxDiffDb": 0, "rmsChangeDb": { "L": [1.85, 2.05], "R": [1.85, 2.05] },
+      "stems": [
+        { "track": "Quiet", "rmsChangeDb": { "L": [-6.1, -5.9], "R": [-6.1, -5.9] } },
+        { "track": "Loud", "rmsChangeDb": { "L": [5.9, 6.1], "R": [5.9, 6.1] } }
+      ]
+    },
+    { "id": "states-device", "kind": "device", "layout": "states" },
+    { "id": "states-reopen", "kind": "savereopen", "layout": "states", "cycles": 3 },
+    {
+      "id": "routing", "kind": "render", "layout": "routing", "maxDiffDb": 0, "rmsChangeDb": { "L": [-1.7, -1.5], "R": [-1.7, -1.5] }, "energyRatioDb": { "L/R": [5.5, 6.5] },
+      "stems": [
+        "Drums",
+        { "track": "Verb", "rmsChangeDb": { "L": [-6.1, -5.9], "R": [-6.1, -5.9] } },
+        { "track": "Cue", "energyRatioDb": { "L/R": [-0.5, 0.5] } },
+        { "track": "Keys", "compare": "none", "rmsDb": { "L": [-400, -400], "R": [-400, -400] } }
+      ]
+    },
+    { "id": "routing-alone", "kind": "render", "layout": "routing", "compare": "none", "notSilent": true, "peakMaxDb": 6, "energyRatioDb": { "L/R": [5.5, 6.5] }, "stems": [ "Cue" ] },
+    { "id": "pdc", "kind": "render", "layout": "pdc", "block": 32, "host": { "anticipativeFx": false } },
+    { "id": "pdc-device", "kind": "device", "layout": "pdc", "block": 2048, "host": { "anticipativeFx": false } },
+    { "id": "pdc-unreported", "kind": "render", "layout": "pdc-off", "lag": 16, "maxDiffDb": -120 },
+    { "id": "instances", "kind": "instances", "plugins": ["gain", "bus"] },
+    { "id": "ext-count", "kind": "fixture-count", "count": 3 },
+    {
+      "id": "monitor-states", "kind": "transport", "layout": "chain", "feed": { "channels": "different" }, "settleSamples": 240000,
+      "states": [
+        { "name": "stopped-unarmed", "transport": "stop", "arm": false, "monitor": "off", "samples": 4800, "expect": { "called": true, "input": "silent", "monitoring": false } },
+        { "name": "stopped-armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "called": true, "input": "signal", "channels": "different", "monitoring": true } },
+        { "name": "playing-auto", "transport": "play", "arm": true, "monitor": "auto", "samples": 4800, "expect": { "input": "silent", "monitoring": false } },
+        { "name": "paused-unarmed", "transport": "pause", "arm": false, "monitor": "off", "samples": 4800 }
+      ]
+    },
+    {
+      "id": "monitor-stopped-off", "kind": "transport", "layout": "chain", "host": { "runFxWhenStopped": false }, "feed": { "channels": "left" }, "matrix": { "block": [64, 1024] },
+      "states": [
+        { "name": "unarmed", "transport": "stop", "arm": false, "monitor": "off", "samples": 4800, "expect": { "called": false } },
+        { "name": "armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "called": true, "channels": "left" } }
+      ]
+    }
+  ],
+  "negative": [
+    { "id": "neg-bus-is-not-chain", "kind": "render", "layout": "bus", "compare": { "layout": "chain" }, "expect": "FAIL", "expectDetail": "^identical=no lag=0 " },
+    { "id": "neg-pdc-unreported", "kind": "render", "layout": "pdc-off", "expect": "FAIL", "expectDetail": "^identical=no lag=16 " },
+    { "id": "neg-states-swapped", "kind": "render", "layout": "states", "maxDiffDb": 0, "stems": [ { "track": "Quiet", "rmsChangeDb": { "L": [5.9, 6.1] } } ], "expect": "FAIL", "expectDetail": "\\| stem Quiet: .*; failed: rms change L -6\\.02 dB outside" },
+    { "id": "neg-ext-count", "kind": "fixture-count", "count": 0, "expect": "FAIL", "expectDetail": "^counted 0, expected at least 1$" },
+    {
+      "id": "neg-feed-is-not-same", "kind": "transport", "layout": "chain", "feed": { "channels": "different" },
+      "states": [ { "name": "armed-on", "transport": "stop", "arm": true, "monitor": "on", "samples": 4800, "expect": { "channels": "same" } } ],
+      "expect": "FAIL", "expectDetail": "^armed-on: [^|]*; failed: left and right differ in [1-9][0-9]* of [1-9][0-9]* blocks with signal$"
+    }
+  ],
+  "extensions": { "modules": ["ext/FixtureExtension.psm1"], "lua": ["ext/fixture-steps.lua"] }
+}

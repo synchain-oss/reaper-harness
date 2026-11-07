@@ -4,8 +4,10 @@ Unattended REAPER host tests for VST3 plugins on Windows: render null tests, byp
 reopen, instance churn. Every run uses a private, isolated REAPER configuration and never touches
 your own REAPER setup.
 
-> **Status:** in development. Nothing has been released yet, and the command line and the
-> configuration format may still change.
+> **Status:** v0.1.0, the first preview release ([CHANGELOG.md](CHANGELOG.md)). Windows x64 and VST3
+> only; real runs were tested on REAPER 7.82. The configuration and the result file both carry `schema: 1`: a
+> change to either format stays backward compatible or raises that number, and the changelog says how to migrate.
+> The command line may still change between 0.x versions.
 
 [中文说明](README.zh-CN.md)
 
@@ -16,8 +18,70 @@ your own REAPER setup.
   The harness refuses to start when that directory could be REAPER's default resource directory,
   ends only the processes it started itself, and checks before and after every round that the
   default resource directory has not changed.
+- **Tests the build you gave it.** Every round proves, from the module list of the REAPER process
+  and from REAPER's own `fx_ident`, that the plugin binaries loaded are the private copies of your
+  build and not an installed release with the same name.
+- **No silent passes.** Outcomes are PASS, FAIL, INCOMPLETE (no conclusion), SKIPPED or REFUSED;
+  INCOMPLETE never counts as PASS. Built-in negative cases prove in every round that the comparer,
+  the watchdog and the guards still work.
 - **Local only.** It drives an installed copy of REAPER 7 in a real desktop session; you need a
-  REAPER licence under REAPER's own terms. It is not meant for hosted CI runners.
+  REAPER licence under REAPER's own terms. It is not meant for hosted CI runners. Its self-test
+  needs no REAPER and runs on any Windows machine.
+
+## What it tests
+
+| kind | |
+|---|---|
+| `render` | renders a layout (tracks, folders, sends, pan and mute, FX chains with parameters set by name or named plugin states, a test signal per track) and compares it with a dry render, a repeat render or a variant (another block size, render mode, bypass or layout), or judges it on its own: bit-identical, or within a residual, at an expected lag, with peak, silence and per-channel level and balance checks; the master and any track as a stem of its own |
+| `device` | the dummy device runs at the configured block size, sample rate and anticipative FX setting; every FX is loaded, not offline, reports the expected latency, reads back its parameters and holds the state it was given |
+| `savereopen` | saving and reopening, once or many times, keeps every FX, parameter and state, and the reopened project renders bit-identically |
+| `instances` | adding and removing instances many times does not grow handles or memory beyond limits |
+| `transport` | takes a track through transport (stop, play, pause), record arm and input monitoring states and checks in each whether its FX chain is run and what reaches it from an input fed by the tool, optionally opening and closing the plugin's window meanwhile; nothing is ever recorded |
+
+A small JSFX that ships with the tool delays the signal and reports the delay as latency (or not), so plugin delay
+compensation can be tested without depending on the effects that come with REAPER; two more count the blocks a chain
+is run with and feed a track's input for `transport`. A test build of a plugin can [report counts of its own](docs/CONFIG.md#reports),
+such as whether the host told it a render was offline; they are judged next to the audio. Extensions add
+product-specific kinds and driver steps ([docs/EXTENDING.md](docs/EXTENDING.md)).
+
+## Quick start
+
+Requirements: Windows 10 or 11, PowerShell 7.4+, REAPER 7 (x64).
+
+```powershell
+# once: a private configuration directory (never under %APPDATA%)
+pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Init
+
+# check a configuration and the machine (never starts REAPER)
+pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Config my-plugin.json -PluginDir D:\build\VST3
+
+# run
+pwsh run.ps1 -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\build\VST3 -ResultDir D:\reaper-harness\results
+
+# the self-test of the harness itself (no REAPER needed)
+pwsh run.ps1 -SelfTest
+```
+
+Exit codes: 0 PASS, 1 FAIL, 2 INCOMPLETE, 3 SKIPPED, 64 refused or usage error.
+
+## Using it in your plugin project
+
+Keep the harness as a separate clone pinned to one commit, and keep only your configuration (plus a template
+project and extension modules, if you need them) in your own repository; do not copy the harness into it.
+[docs/INTEGRATING.md](docs/INTEGRATING.md) walks through it step by step with a complete example
+([examples/scvb/](examples/scvb/)): getting the tool, the private configuration directory, writing the
+configuration, plugin states from a template project, reading the results, the skip-marker and GUI-lock
+conventions, and what never to do.
+
+## Documentation
+
+- [CHANGELOG.md](CHANGELOG.md): what each version changed
+- [docs/INTEGRATING.md](docs/INTEGRATING.md): using it in your plugin project, with a worked example
+- [docs/USAGE.md](docs/USAGE.md): running it, options, exit codes
+- [docs/CONFIG.md](docs/CONFIG.md): the configuration file; `schema/config.schema.json` is its JSON Schema
+- [docs/SAFETY.md](docs/SAFETY.md): what it guarantees and why
+- [docs/RESULTS.md](docs/RESULTS.md): the result file
+- [docs/EXTENDING.md](docs/EXTENDING.md): extension modules and Lua steps
 
 REAPER is a trademark of Cockos Incorporated. This project is not affiliated with or endorsed by
 Cockos.

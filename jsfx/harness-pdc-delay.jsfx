@@ -1,0 +1,40 @@
+desc: reaper-harness PDC delay
+// SPDX-License-Identifier: MIT
+//
+// Part of reaper-harness. Delays both channels by a whole number of samples and, unless told otherwise, reports
+// that delay to REAPER as plugin delay compensation (PDC). With the report on, REAPER compensates the delay and a
+// render lines up with the dry signal again; with it off the render is late by the delay. The harness installs this
+// file into the private configuration (Effects/reaper-harness/) and refers to it as "jsfx": "harness-pdc-delay".
+
+slider1:0<0,8192,1>Delay (samples)
+slider2:1<0,1,1{Off,On}>Report delay as PDC
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+size = 8193; // the largest delay plus one
+bufl = 0;
+bufr = size;
+memset(0, 0, 2 * size);
+pos = 0;
+
+@slider
+delay = floor(slider1 + 0.5);
+delay < 0 ? delay = 0;
+delay > size - 1 ? delay = size - 1;
+pdc_bot_ch = 0;
+pdc_top_ch = 2;
+pdc_delay = slider2 >= 0.5 ? delay : 0;
+
+@sample
+bufl[pos] = spl0;
+bufr[pos] = spl1;
+rd = pos - delay;
+rd < 0 ? rd += size;
+spl0 = bufl[rd];
+spl1 = bufr[rd];
+pos += 1;
+pos >= size ? pos = 0;
