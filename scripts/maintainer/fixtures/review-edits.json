@@ -1,0 +1,15 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviews": {
+          "pageInfo": { "hasNextPage": false, "endCursor": "Y3Vyc29yOjI=" },
+          "nodes": [
+            { "databaseId": 7000000001, "updatedAt": "2026-11-01T10:02:00Z", "lastEditedAt": null },
+            { "databaseId": 7000000002, "updatedAt": "2026-11-01T10:25:00Z", "lastEditedAt": null }
+          ]
+        }
+      }
+    }
+  }
+}

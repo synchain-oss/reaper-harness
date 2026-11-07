@@ -1,0 +1,12 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 5000000011,
+      "name": "claude-pr-review",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72"
+    }
+  ]
+}

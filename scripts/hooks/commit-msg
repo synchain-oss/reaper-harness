@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+#
+# git commit-msg hook. The criteria live in commit-msg.mjs next to this file; this shell only finds the pinned Node:
+# HARNESS_NODE first, then git config harness.node, then node on PATH (the .mjs rejects a wrong major version).
+node=${HARNESS_NODE:-$(git config --get harness.node)}
+exec "${node:-node}" "$(dirname "$0")/commit-msg.mjs" "$@"

@@ -1,0 +1,22 @@
+[
+  {
+    "id": 7000000001,
+    "state": "COMMENTED",
+    "body": "",
+    "author_association": "NONE",
+    "submitted_at": "2026-11-01T10:02:00Z",
+    "html_url": "https://github.com/synchain-oss/reaper-harness/pull/7#pullrequestreview-7000000001",
+    "commit_id": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72",
+    "user": { "login": "github-actions[bot]", "type": "Bot" }
+  },
+  {
+    "id": 7000000002,
+    "state": "COMMENTED",
+    "body": "",
+    "author_association": "OWNER",
+    "submitted_at": "2026-11-01T10:25:00Z",
+    "html_url": "https://github.com/synchain-oss/reaper-harness/pull/7#pullrequestreview-7000000002",
+    "commit_id": "3f9c2e1d8b7a46550c1e9a2b7d4f60e8a1c35b72",
+    "user": { "login": "DLsnows", "type": "User" }
+  }
+]

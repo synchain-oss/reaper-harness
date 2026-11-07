@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+#
+# git pre-push hook. The criteria live in pre-push.mjs next to this file; this shell only finds the pinned Node:
+# HARNESS_NODE first, then git config harness.node, then node on PATH (the .mjs rejects a wrong major version).
+node=${HARNESS_NODE:-$(git config --get harness.node)}
+exec "${node:-node}" "$(dirname "$0")/pre-push.mjs" "$@"

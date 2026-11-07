@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+#
+# dependabot only maintains the GitHub Actions pins; the other tool pins (.node-version, .gitleaks-version,
+# .actionlint-version and the sha256 values in ci.yml) are single sources and are upgraded by hand.
+# The configuration is read from the default branch (dev) and the PRs go to dev as well: dev has no copy of this file
+# until the first feature line is merged into it, so it only takes effect from then on.
+# The labels must be registered in .github/labels.json, otherwise dependabot creates labels outside the single source.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - dependencies
+      - github_actions
