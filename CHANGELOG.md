@@ -10,7 +10,8 @@ The first preview release. Configuration `schema: 1`, result file `schema: 1`.
 
 - Safety base: a private REAPER configuration directory that can never be the default resource directory, checked
   before every launch; listings of the default directory around every round; only the processes the tool started are
-  ever ended; a GUI lock shared with other tools on the machine; a sample-by-sample WAV comparer (#2).
+  ever ended; a GUI lock held before every launch, with `-ExtraGuiLock` to also take the lock of another tool on the
+  machine; a sample-by-sample WAV comparer (#2).
 - Configuration-driven scenarios (`render`, `device`, `savereopen`, `instances`), learning the plugins' blocks from
   REAPER itself, proof that REAPER loaded the private copy of each plugin, and an extension interface for product-specific
   kinds and driver steps (#4).
