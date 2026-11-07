@@ -3,7 +3,9 @@
 在 Windows 上用 REAPER 无人值守地测试 VST3 插件：渲染对拍（null test）、旁路、存盘重开、反复加减实例。
 每次运行都用一份私有的、隔离的 REAPER 配置，不会碰你自己的 REAPER 设置。
 
-> **状态：** 开发中。还没有发布任何版本，命令行参数和配置文件格式都可能变。
+> **状态：** v0.1.0，第一个预览版（[CHANGELOG.md](CHANGELOG.md)）。只支持 Windows x64 和 VST3；真机只在 REAPER 7.82
+> 上测过。配置文件和结果文件都带 `schema: 1`：两种格式的改动要么向后兼容，要么升这个数字，并在 CHANGELOG 里写明怎么迁移。
+> 0.x 版本之间命令行参数仍可能变。
 
 [English](README.md)
 
@@ -61,6 +63,7 @@ pwsh run.ps1 -SelfTest
 
 文档正文是英文：
 
+- [CHANGELOG.md](CHANGELOG.md)：每个版本改了什么
 - [docs/INTEGRATING.md](docs/INTEGRATING.md)：在你的插件项目里使用，附完整示例
 - [docs/USAGE.md](docs/USAGE.md)：怎么运行、各个参数、退出码
 - [docs/CONFIG.md](docs/CONFIG.md)：配置文件；`schema/config.schema.json` 是它的 JSON Schema
