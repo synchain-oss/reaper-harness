@@ -84,8 +84,10 @@ machine (a deny entry, a subst drive, a mapped drive) is checked as undone, and 
   starts next to it.
 - Before every launch the GUI lock has to be held: `Invoke-HarnessHost` enforces it, and without the object
   `Enter-HarnessLocks` returned for a set holding the default lock it refuses before anything starts. The other two
-  checks before a launch, that no other `reaper.exe` is running and the listing of the default directory, are the job
-  of the run command, once at its start and once per round.
+  checks are the job of the run command: that no other `reaper.exe` is running is checked once, before the first
+  round; the default directory is listed before and after every round. A `reaper.exe` someone starts between two
+  rounds of `-Repeat` is not looked for again; what it changes in the default directory still shows in the listing
+  after the round.
 - The default lock is `Local\ReaperHarness-gui`, a kernel mutex. `-ExtraGuiLock
   <Local\name>` adds more (for example the lock another tool on the same machine uses for its GUI tests); locks can
   only be added, never removed. All locks of a set are taken in a fixed order, all or nothing, so two runs with

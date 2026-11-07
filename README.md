@@ -4,8 +4,10 @@ Unattended REAPER host tests for VST3 plugins on Windows: render null tests, byp
 reopen, instance churn. Every run uses a private, isolated REAPER configuration and never touches
 your own REAPER setup.
 
-> **Status:** in development. Nothing has been released yet, and the command line and the
-> configuration format may still change.
+> **Status:** v0.1.0, the first preview release ([CHANGELOG.md](CHANGELOG.md)). Windows x64 and VST3
+> only; real runs were tested on REAPER 7.82. The configuration and the result file both carry `schema: 1`: a
+> change to either format stays backward compatible or raises that number, and the changelog says how to migrate.
+> The command line may still change between 0.x versions.
 
 [中文说明](README.zh-CN.md)
 
@@ -73,6 +75,7 @@ conventions, and what never to do.
 
 ## Documentation
 
+- [CHANGELOG.md](CHANGELOG.md): what each version changed
 - [docs/INTEGRATING.md](docs/INTEGRATING.md): using it in your plugin project, with a worked example
 - [docs/USAGE.md](docs/USAGE.md): running it, options, exit codes
 - [docs/CONFIG.md](docs/CONFIG.md): the configuration file; `schema/config.schema.json` is its JSON Schema
