@@ -78,7 +78,7 @@ jobs:
       # The step's own timeout is shorter than the job's: a timeout fails this step instead of eating the whole job.
       # 35 minutes = two 15-minute API requests plus a margin; change it together with API_TIMEOUT_MS.
       # classify_inline_comments off: inline comments are posted at once, no extra model call after the session.
-      - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+      - uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
         id: review
         timeout-minutes: 35
         with:
