@@ -75,7 +75,7 @@ function New-HarnessSpec {
     $defs.plugin = SObj ([ordered]@{
             bundle    = (SStr '^[^\\/:*?"<>|\u0000-\u001f]{1,120}\.vst3$' -Doc 'VST3 bundle directory name, looked up in -PluginDir')
             jsfx      = (SStr -Enum $script:JsfxNames -Doc 'a JSFX shipped with the tool, instead of a bundle')
-            expectPdc = (SInt 0 1000000)
+            expectPdc = (SAny @((SInt 0 1000000), (SStr -Enum 'report')) 'an integer 0..1000000, or "report"' -Doc 'the latency in samples the plugin must report (default 0), or "report": recorded, never compared')
             params    = $params
             states    = (SMap $script:StatePattern (SRef stateSource) -Min 1 -Doc 'named plugin states taken from a project or a file')
             report    = (SRef report)
@@ -109,6 +109,13 @@ function New-HarnessSpec {
     $defs.layout = SObj ([ordered]@{ tracks = (SArr (SRef track) -Min 1) }) @('tracks')
     $bypass = SAny @((SBool), (SArr (SStr $script:IdPattern) -Min 1 -Unique)) 'true (every FX) or a list of plugin ids'
     $defs.compareVariant = SObj ([ordered]@{ layout = (SStr $script:IdPattern); block = $block; mode = $mode; bypass = $bypass })
+    # A parameter variant of a render: the FX of the named plugins with another state or other parameters, and more bypassed
+    $defs.variantFx = SObj ([ordered]@{ state = (SStr $script:StatePattern -Doc 'a state of that plugin, in place of the FX''s own'); params = $params }) -MinKeys 1 -Doc 'every FX of that plugin in the layout gets these on top'
+    $defs.variant = SObj ([ordered]@{
+            id     = (SStr $script:StatePattern -Doc 'appended to the scenario id: <id>[-<matrix>]-<variant id>')
+            fx     = (SMap $script:IdPattern (SRef variantFx) -Min 1 -Doc 'plugin id -> state and parameters')
+            bypass = $bypass
+        }) @('id')
     $defs.matrix = SObj ([ordered]@{ mode = (SArr $mode -Min 1 -Unique); sr = (SArr $rate -Min 1 -Unique); block = (SArr $block -Min 1 -Unique) })
     # The device step renders nothing, so a render mode would only multiply identical scenarios
     $defs.deviceMatrix = SObj ([ordered]@{ sr = (SArr $rate -Min 1 -Unique); block = (SArr $block -Min 1 -Unique) })
@@ -169,6 +176,7 @@ function New-HarnessSpec {
     $renderProps.host = SRef host
     $renderProps.matrix = SRef matrix
     $renderProps.keep = SBool -Doc 'keep the render (and its stems) under renders/ of the result directory, with a line in its manifest'
+    $renderProps.variants = SArr (SRef variant) -Min 1 -Max 1000 -Doc 'one scenario per variant, the layout with its settings on top; needs compare'
     $p = & $common 'render'; foreach ($e in $renderProps.GetEnumerator()) { $p[$e.Key] = $e.Value }
     $Kinds.render = SObj $p @('id', 'kind', 'layout')
     $p = & $common 'device'; foreach ($e in ([ordered]@{ layout = (SStr $script:IdPattern); sr = $rate; block = $block; host = (SRef host); matrix = (SRef deviceMatrix) }).GetEnumerator()) { $p[$e.Key] = $e.Value }
@@ -196,7 +204,7 @@ function New-HarnessSpec {
             signal     = (SObj ([ordered]@{ seconds = (SNum 0.5 600); seed = (SInt 0 4294967295); noiseDb = (SNum -200 0); sine = $sine }))
             limits     = (SObj ([ordered]@{
                         renderTimeoutSec = (SNum 1 3600); luaTimeoutSec = (SNum 1 3600); learnTimeoutSec = (SNum 1 3600); lockWaitSec = (SNum 0 86400)
-                        lagSearch = (SInt 0 4096); headSeconds = (SNum 0 600 -ExclusiveMin)
+                        lagSearch = (SInt 0 4096); headSeconds = (SNum 0 600 -ExclusiveMin); learnBatchSize = (SInt 1 256 -Doc 'plugin variants per learn launch, default 32 (the default variants of all plugins share the first launch, however many there are)')
                         instances = (SObj ([ordered]@{ cycles = (SInt 1 10000); warmup = (SInt 0 10000); play = (SBool); maxHandleGrowth = (SInt 0 1000000); maxPrivateGrowthMB = (SNum 0 1000000) }))
                     }))
             layouts    = (SMap $script:IdPattern (SRef layout) -Min 1)
@@ -210,11 +218,11 @@ function New-HarnessSpec {
 $script:Spec = New-HarnessSpec
 function Get-HarnessConfigSpec { $script:Spec }
 
-# Negative variant of a kind: the same fields without matrix and keep, plus expect and expectDetail (both required).
+# Negative variant of a kind: the same fields without matrix, keep and variants, plus expect and expectDetail (both required).
 function Get-NegativeKindSpec([string]$Kind) {
     $k = $script:Spec.Kinds[$Kind]
     $Props = [ordered]@{}
-    foreach ($e in $k.props.GetEnumerator()) { if ($e.Key -cnotin 'matrix', 'keep') { $Props[$e.Key] = $e.Value } }
+    foreach ($e in $k.props.GetEnumerator()) { if ($e.Key -cnotin 'matrix', 'keep', 'variants') { $Props[$e.Key] = $e.Value } }
     $Props.expect = SStr -Enum $script:Expectable
     $Props.expectDetail = SStr -Doc 'regex (.NET, case sensitive) the outcome detail must match'
     SObj $Props (@($k.req) + 'expect', 'expectDetail')
@@ -404,7 +412,7 @@ function ConvertTo-HarnessJsonSchema {
 # ---- defaults ----
 $script:Defaults = @{
     signal    = [ordered]@{ seconds = 4.0; seed = 1; noiseDb = -20.0 }
-    limits    = [ordered]@{ renderTimeoutSec = 90.0; luaTimeoutSec = 120.0; learnTimeoutSec = 120.0; lockWaitSec = 1800.0; lagSearch = 64; headSeconds = 2.0 }
+    limits    = [ordered]@{ renderTimeoutSec = 90.0; luaTimeoutSec = 120.0; learnTimeoutSec = 120.0; lockWaitSec = 1800.0; lagSearch = 64; headSeconds = 2.0; learnBatchSize = 32 }
     instances = [ordered]@{ cycles = 25; warmup = 5; play = $false; maxHandleGrowth = 150; maxPrivateGrowthMB = 150.0 }
     sineDb    = -20.0
     sr        = 48000
@@ -455,7 +463,7 @@ function Get-HarnessBuiltinNegatives {
 function New-CriteriaDefaults { [ordered]@{ maxDiffDb = $null; lag = 0; peakMaxDb = $null; notSilent = $false; rmsDb = $null; energyRatioDb = $null; rmsChangeDb = $null } }
 function New-RenderDefaults {
     $d = New-CriteriaDefaults
-    $d.stems = @(); $d.report = [ordered]@{}; $d.host = (New-HostDefaults); $d.mutate = $null; $d.keep = $false
+    $d.stems = @(); $d.report = [ordered]@{}; $d.host = (New-HostDefaults); $d.mutate = $null; $d.keep = $false; $d.variant = $null; $d.variantLayout = $null
     $d
 }
 function New-HostDefaults { [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $true; InformOfflineState = $true } }
@@ -484,7 +492,20 @@ function ConvertTo-ParamTable($Raw) {
     $params
 }
 
-# The plugins: id -> @{ Id; Kind (vst3 | jsfx); Bundle; Jsfx; ExpectPdc; Params; States (name -> source) }.
+# Parameters of one FX (pure): Top over Base, names in the order of Sort-Object -CaseSensitive.
+function Merge-HarnessParams($Base, $Top) {
+    $params = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+    foreach ($pn in @(@($Base.get_Keys()) + @($Top.get_Keys()) | Sort-Object -Unique -CaseSensitive)) { $params[$pn] = $Top.Contains($pn) ? $Top[$pn] : $Base[$pn] }
+    $params
+}
+
+# The key of one FX setting (pure): plugin, state and the normalized values in the order of Params. Equal settings give
+# equal keys and are learned once; display texts are no part of it.
+function Get-HarnessVariantKey([string]$FxPlugin, [string]$FxState, $FxParams) {
+    $FxPlugin + ($FxState ? "@$FxState" : '') + '|' + (@($FxParams.get_Keys() | ForEach-Object { '{0}={1}' -f $_, $FxParams[$_].Normalized.ToString('R', [Globalization.CultureInfo]::InvariantCulture) }) -join ';')
+}
+
+# The plugins: id -> @{ Id; Kind (vst3 | jsfx); Bundle; Jsfx; ExpectPdc (samples, or 'report'); Params; States (name -> source) }.
 function ConvertTo-Plugins($Raw, $Problems) {
     $Plugins = [ordered]@{}
     $envs = @{}
@@ -512,8 +533,9 @@ function ConvertTo-Plugins($Raw, $Problems) {
             if ($envs.ContainsKey($report.Env)) { $Problems.Add("config.plugins.$k.report.env: '$($report.Env)' is the report variable of $($envs[$report.Env]) too") }
             $envs[$report.Env] = $k
         }
+        $pdc = Get-Or $r 'expectPdc' 0
         $Plugins[$k] = [pscustomobject]@{
-            Id = $k; Kind = ($hasJs ? 'jsfx' : 'vst3'); Bundle = [string](Get-Or $r 'bundle' ''); Jsfx = [string](Get-Or $r 'jsfx' ''); ExpectPdc = [int](Get-Or $r 'expectPdc' 0)
+            Id = $k; Kind = ($hasJs ? 'jsfx' : 'vst3'); Bundle = [string](Get-Or $r 'bundle' ''); Jsfx = [string](Get-Or $r 'jsfx' ''); ExpectPdc = (($pdc -is [string]) ? 'report' : [int]$pdc)
             Params = (ConvertTo-ParamTable (Get-Or $r 'params' $null)); States = $States; Report = $report
         }
     }
@@ -590,12 +612,8 @@ function ConvertTo-Layout([string]$Id, $Raw, $Plugins, $Signal, $Problems) {
             $state = [string](Get-Or $fx 'state' '')
             if ($state -and $def -and -not $def.States.Contains($state)) { $Problems.Add("${Path}.fx[$j]: plugin '$plugin' has no state '$state'") }
             # The plugin's own parameters first, the FX's on top
-            $params = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
-            $own = ConvertTo-ParamTable (Get-Or $fx 'params' $null)
-            $pluginParams = $def ? $def.Params : @{}
-            foreach ($pn in @(@($pluginParams.get_Keys()) + @($own.get_Keys()) | Sort-Object -Unique -CaseSensitive)) { $params[$pn] = $own.Contains($pn) ? $own[$pn] : $pluginParams[$pn] }
-            $variantKey = $plugin + ($state ? "@$state" : '') + '|' + (@($params.get_Keys() | ForEach-Object { '{0}={1}' -f $_, $params[$_].Normalized.ToString('R', [Globalization.CultureInfo]::InvariantCulture) }) -join ';')
-            $fxList.Add([pscustomobject]@{ Plugin = $plugin; State = $state; Bypass = [bool](Get-Or $fx 'bypass' $false); Params = $params; Variant = $variantKey })
+            $params = Merge-HarnessParams ($def ? $def.Params : @{}) (ConvertTo-ParamTable (Get-Or $fx 'params' $null))
+            $fxList.Add([pscustomobject]@{ Plugin = $plugin; State = $state; Bypass = [bool](Get-Or $fx 'bypass' $false); Params = $params; Variant = (Get-HarnessVariantKey $plugin $state $params) })
             $j++
         }
         $sends = @(Get-Or $t 'sends' @() | ForEach-Object { [pscustomobject]@{ To = [string]$_['to']; Mode = [string](Get-Or $_ 'mode' 'post'); Volume = [double](Get-Or $_ 'volume' 1.0) } })
@@ -762,9 +780,12 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
                 $vl = [string](Get-Or $c 'layout' $o.layout)
                 $vlPlugins = $null
                 if ($c.Contains('layout')) { if (-not $Layouts.Contains($vl)) { $Problems.Add("$Path.compare.layout: layout '$vl' is not defined in layouts") } else { $variantLayout = $Layouts[$vl]; $vlPlugins = $variantLayout.Plugins } } else { $vlPlugins = $LayoutPlugins; $variantLayout = $layout }
+                # SameLayout: no layout of its own, so it renders the scenario's (with the scenario's variant on top, when it has one);
+                # OwnBypass: it gives its bypass, else it takes the scenario's (after variant expansion, too)
                 $o.compare = [pscustomobject]@{
                     Kind = 'variant'; Layout = $vl; Block = [int](Get-Or $c 'block' $o.block); Mode = [string](Get-Or $c 'mode' $o.mode)
                     Bypass = $c.Contains('bypass') ? (ConvertTo-Bypass $c['bypass'] "$Path.compare.bypass" $vlPlugins $Problems $Plugins) : $o.bypass
+                    SameLayout = -not $c.Contains('layout'); OwnBypass = $c.Contains('bypass')
                 }
             }
             $Channels = $o.mono ? 1 : 2
@@ -801,6 +822,7 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
             if ($o.report.get_Count() -and $o.host.RunFxWhenStopped) { $Problems.Add("$Path.report: judging a render by a report needs host.runFxWhenStopped false: with it on, the plugin also runs in real time before and after the render") }
             $o.mutate = $null
             $o.keep = [bool](Get-Or $Raw 'keep' $false)
+            $o.variant = $null; $o.variantLayout = $null # set by New-HarnessVariantScenario
         }
         'device' { }
         'savereopen' {
@@ -873,6 +895,101 @@ function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int
     , @($out)
 }
 
+# ---- parameter variants of a render ----
+# The variants of one scenario item, checked once before its matrix is expanded: @{ Id; Fx (plugin -> @{ State; Params });
+# Bypass } each. None when the item has none, or when its layout is not defined (a problem of its own already).
+function ConvertTo-Variants($ScenarioRaw, [string]$Path, $Layouts, $PluginTable, $Problems) {
+    if ($ScenarioRaw['kind'] -cne 'render' -or -not $ScenarioRaw.Contains('variants')) { return , @() }
+    if (-not $ScenarioRaw.Contains('compare')) { $Problems.Add("${Path}: a scenario with variants needs compare (`"none`" to only render)") }
+    $layoutId = [string]$ScenarioRaw['layout']
+    if (-not $Layouts.Contains($layoutId)) { return , @() }
+    $used = $Layouts[$layoutId].Plugins
+    $ids = @{}
+    $list = for ($i = 0; $i -lt $ScenarioRaw['variants'].Count; $i++) {
+        $variantRaw = $ScenarioRaw['variants'][$i]
+        $vp = "$Path.variants[$i]"
+        $vid = [string]$variantRaw['id']
+        if ($ids.ContainsKey($vid)) { $Problems.Add("${vp}: variant id '$vid' is used twice") }
+        $ids[$vid] = $true
+        $over = [ordered]@{}
+        $rawFx = Get-Or $variantRaw 'fx' ([ordered]@{})
+        foreach ($pluginId in @($rawFx.get_Keys())) {
+            $fp = "$vp.fx.$pluginId"
+            if (-not $PluginTable.Contains($pluginId)) { $Problems.Add("${fp}: plugin '$pluginId' is not defined in plugins"); continue }
+            if ($pluginId -cnotin $used) { $Problems.Add("${fp}: plugin '$pluginId' is not used in layout '$layoutId'"); continue }
+            $vState = [string](Get-Or $rawFx[$pluginId] 'state' '')
+            if ($vState -and -not $PluginTable[$pluginId].States.Contains($vState)) { $Problems.Add("${fp}: plugin '$pluginId' has no state '$vState'") }
+            $vParams = ConvertTo-ParamTable (Get-Or $rawFx[$pluginId] 'params' $null)
+            if (-not $vState -and -not $vParams.get_Count()) { $Problems.Add("${fp}: needs state or params") }
+            $over[$pluginId] = [pscustomobject]@{ State = $vState; Params = $vParams }
+        }
+        $bypass = ConvertTo-Bypass (Get-Or $variantRaw 'bypass' $null) "$vp.bypass" $used $Problems @($PluginTable.get_Keys())
+        [pscustomobject]@{ Id = $vid; Fx = $over; Bypass = $bypass }
+    }
+    , @($list)
+}
+
+# A layout with a variant on top (pure; the layout is shared and never changed): every FX of a plugin the variant names
+# takes its state when it gives one and its parameters over the FX's own, and the key of that setting. Shallow copies:
+# only Fx of a track and State, Params and Variant of such an FX are replaced; file, signal, sends, the FX's own bypass
+# and everything else stay as they are.
+function New-HarnessVariantLayout($BaseLayout, $Variant) {
+    $tracks = foreach ($t in $BaseLayout.Tracks) {
+        $copy = $t.PSObject.Copy()
+        $copy.Fx = @(foreach ($fx in $t.Fx) {
+                if (-not $Variant.Fx.Contains($fx.Plugin)) { $fx; continue }
+                $over = $Variant.Fx[$fx.Plugin]
+                $f = $fx.PSObject.Copy()
+                if ($over.State) { $f.State = $over.State }
+                $f.Params = Merge-HarnessParams $fx.Params $over.Params
+                $f.Variant = Get-HarnessVariantKey $f.Plugin $f.State $f.Params
+                $f
+            })
+        $copy
+    }
+    [pscustomobject]@{ Id = $BaseLayout.Id; Tracks = @($tracks); Plugins = $BaseLayout.Plugins }
+}
+
+# Two bypass lists as one (pure): '*' (every FX) wins, otherwise each plugin id once, in order
+function Join-HarnessBypass([string[]]$ScenarioBypass, [string[]]$VariantBypass) {
+    $ids = @(@($ScenarioBypass) + @($VariantBypass) | Where-Object { $_ })
+    if ('*' -cin $ids) { return , @('*') }
+    , @($ids | Select-Object -Unique)
+}
+
+# One expanded scenario of a variant (pure): <id>-<variant id>, the variant's layout, the bypass of both. A compare
+# variant without a layout of its own renders the same variant layout, and without a bypass of its own takes this one.
+function New-HarnessVariantScenario($Scenario, $Variant, $BaseLayout) {
+    $s = $Scenario.PSObject.Copy()
+    $s.id = "$($Scenario.id)-$($Variant.Id)"
+    $s.variant = $Variant.Id
+    $s.variantLayout = New-HarnessVariantLayout $BaseLayout $Variant
+    $s.bypass = Join-HarnessBypass $Scenario.bypass $Variant.Bypass
+    if ($s.compare.Kind -ceq 'variant' -and $s.compare.SameLayout -and -not $s.compare.OwnBypass) { $c = $s.compare.PSObject.Copy(); $c.Bypass = $s.bypass; $s.compare = $c }
+    $s
+}
+
+# One learned entry per setting (Get-HarnessVariantKey): the display texts asked of one parameter of it must agree, over
+# every layout and every variant layout. A display given once and left out elsewhere is checked all the same (learn).
+function Test-HarnessDisplays([object[]]$Layouts, $Problems) {
+    $first = @{}
+    $told = @{}
+    foreach ($l in $Layouts) {
+        foreach ($fx in @($l.Tracks | ForEach-Object { $_.Fx })) {
+            foreach ($pn in $fx.Params.get_Keys()) {
+                $d = $fx.Params[$pn].Display
+                if ($null -eq $d) { continue }
+                $k = "$($fx.Variant)`n$pn"
+                if (-not $first.ContainsKey($k)) { $first[$k] = $d; continue }
+                if ($first[$k] -cne $d -and -not $told.ContainsKey($k)) {
+                    $told[$k] = $true # once per setting
+                    $Problems.Add("plugin '$($fx.Plugin)' parameter '$pn' at $($fx.Params[$pn].Normalized.ToString('R', [Globalization.CultureInfo]::InvariantCulture)) is asked to show both '$($first[$k])' and '$d': one learned setting has one display text")
+                }
+            }
+        }
+    }
+}
+
 # Reads, validates and normalises one configuration file. Kinds: extension kinds already registered (kind -> @{
 # Validate; Handler; ... }); pass them so scenarios of those kinds validate. ConfigDir of the result is the real
 # directory of the file (extension and state paths are relative to it).
@@ -924,14 +1041,21 @@ function Test-HarnessConfigData {
                 foreach ($axis in $item['matrix'].get_Keys()) { if ($item.Contains($axis)) { $Problems.Add("${Path}: '$axis' is given both directly and in matrix") } }
                 if ($item['matrix'].get_Count() -eq 0) { $Problems.Add("${Path}.matrix: needs at least one of mode, sr, block (device and transport: sr, block)") }
             }
-            # baseId: the id as written, before matrix expansion
-            foreach ($expanded in (Expand-Matrix $item)) { $all.Add((ConvertTo-Scenario $expanded $Path ($section -eq 'negative') $Layouts $Plugins $Limits $Problems $Kinds | Add-Member -NotePropertyName baseId -NotePropertyValue ([string]$item['id']) -PassThru)) }
+            # baseId: the id as written, before matrix and variant expansion; the legs of a matrix outside, its variants inside
+            $variantList = ConvertTo-Variants $item $Path $Layouts $Plugins $Problems
+            foreach ($expanded in (Expand-Matrix $item)) {
+                $one = ConvertTo-Scenario $expanded $Path ($section -eq 'negative') $Layouts $Plugins $Limits $Problems $Kinds | Add-Member -NotePropertyName baseId -NotePropertyValue ([string]$item['id']) -PassThru
+                if (-not $variantList.Count) { $all.Add($one) }
+                foreach ($v in $variantList) { $all.Add((New-HarnessVariantScenario $one $v $Layouts[$one.layout])) }
+            }
         }
     }
+    Test-HarnessDisplays (@($Layouts.get_Values()) + @($all | Where-Object { $_.PSObject.Properties['variantLayout'] -and $_.variantLayout } | ForEach-Object { $_.variantLayout })) $Problems
     $seen = @{}
     foreach ($s in $all) {
-        if ($s.id.Length -gt 80) { $Problems.Add("scenario id '$($s.id)' is longer than 80 characters after matrix expansion") }
-        if ($s.id -cin $reserved) { $Problems.Add("scenario id '$($s.id)' is reserved for a built-in negative case") }
+        if ($s.id.Length -gt 80) { $Problems.Add("scenario id '$($s.id)' is longer than 80 characters after matrix and variant expansion") }
+        if ($s.id -cin 'learn', 'round-error') { $Problems.Add("scenario id '$($s.id)' is the id of a row the tool writes") }
+        elseif ($s.id -cin $reserved) { $Problems.Add("scenario id '$($s.id)' is reserved for a built-in negative case") }
         if ($seen.ContainsKey($s.id)) { $Problems.Add("scenario id '$($s.id)' is used twice") }
         $seen[$s.id] = $true
     }

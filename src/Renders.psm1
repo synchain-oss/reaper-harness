@@ -17,7 +17,8 @@
 #   Move-HarnessKeptFile        one file, only to a place under the result directory, never over another (pure on files)
 #   Get-HarnessKeptFileFacts    a kept file: path, sha256, frames, channels, sampleRate, format, peakDb, nanCount, infCount
 #   Get-HarnessFxFacts          every FX of a layout as rendered: plugin, binary hash, bypass, state, the hash of its
-#                               block as written into the project, the parameters asked for and read back, the latency
+#                               block as written into the project, the parameters asked for (value and display text)
+#                               and read back, the latency
 #   ConvertTo-HarnessKeptFacts  a record with its paths relative to the result directory (the facts of the row)
 
 Set-StrictMode -Version Latest
@@ -116,7 +117,7 @@ function Get-HarnessFxFacts([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$L
                     blockSha256 = ($Ctx.Blocks.ContainsKey($fx.Variant) ? [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.UTF8Encoding]::new($false).GetBytes((Get-HarnessBlockText $Ctx.Blocks[$fx.Variant])))).ToLowerInvariant() : $null)
                     params = @(foreach ($pn in $fx.Params.get_Keys()) {
                             $back = ($read -and $read.Params.Contains($pn)) ? $read.Params[$pn] : $null
-                            [ordered]@{ name = $pn; normalized = $fx.Params[$pn].Normalized; readNormalized = ($back ? $back.Read : $null); readDisplay = ($back ? $back.Display : $null) }
+                            [ordered]@{ name = $pn; normalized = $fx.Params[$pn].Normalized; display = $fx.Params[$pn].Display; readNormalized = ($back ? $back.Read : $null); readDisplay = ($back ? $back.Display : $null) }
                         })
                     pdc = (($read -and [int]::TryParse([string]$read.Pdc, [ref]$pdc)) ? $pdc : $null); pdcReadAt = ($read ? [ordered]@{ sr = $read.Sr; block = $read.Block } : $null)
                 }
@@ -178,15 +179,20 @@ function Save-HarnessKeptRender {
                 if ($p.Track) { $named = [ordered]@{ track = $p.Track }; foreach ($k in $facts.get_Keys()) { $named[$k] = $facts[$k] }; $facts = $named }
                 $facts
             })
+        # The layout as rendered (the variant's, when it is one); a plugin whose latency is only reported has it read at
+        # learning: a kept render without that reading is not described in full
+        $scenarioLayout = Get-HarnessScenarioLayout $Ctx.Config $s
+        $fxFacts = Get-HarnessFxFacts $Ctx $scenarioLayout @($s.bypass)
+        if ($out[0]['path']) { foreach ($x in $fxFacts) { if ($Ctx.Config.Plugins[$x.plugin].ExpectPdc -is [string] -and $null -eq $x.pdc) { $unread.Add("the latency of $($x.plugin) on $($x.track) was not read") } } }
         if ($problems.Count) { $Status = Get-HarnessWorse $Status 'INCOMPLETE'; $Detail += "; not kept: $($problems -join '; ')" }
         if ($unread.Count) { $Status = Get-HarnessWorse $Status 'INCOMPLETE'; $Detail += "; kept, but $($unread -join '; ')" }
-        $scenarioLayout = Get-HarnessLayout $Ctx $s.layout
         $record = [ordered]@{
-            schema = 1; runStamp = $Keep.Stamp; round = $Round; scenario = $s.id; baseScenario = ($s.PSObject.Properties['baseId'] ? $s.baseId : $s.id); variant = $null; layout = $s.layout; kind = $s.kind
+            schema = 1; runStamp = $Keep.Stamp; round = $Round; scenario = $s.id; baseScenario = ($s.PSObject.Properties['baseId'] ? $s.baseId : $s.id)
+            variant = ($s.PSObject.Properties['variant'] ? $s.variant : $null); layout = $s.layout; kind = $s.kind
             status = $Status; detail = $Detail; output = $out[0]; stems = @($out | Select-Object -Skip 1)
             render = [ordered]@{ sr = $s.sr; block = $s.block; mode = $s.mode; channels = ($s.mono ? 1 : 2)
                 host = [ordered]@{ anticipativeFx = [bool]$s.host.AnticipativeFx; runFxWhenStopped = [bool]$s.host.RunFxWhenStopped; informOfflineState = [bool]$s.host.InformOfflineState } }
-            sources = (Get-HarnessSourceFacts $Ctx $scenarioLayout); fx = (Get-HarnessFxFacts $Ctx $scenarioLayout @($s.bypass))
+            sources = (Get-HarnessSourceFacts $Ctx $scenarioLayout); fx = $fxFacts
         }
         foreach ($k in $Keep.Run.get_Keys()) { $record[$k] = $Keep.Run[$k] }
         $record = Hide-HarnessFacts $record # every string of the line, keys too: details carry exception texts, names come from plugins

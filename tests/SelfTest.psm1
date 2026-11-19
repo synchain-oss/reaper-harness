@@ -1048,6 +1048,8 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @((Test-HarnessConfigData -Raw $raw -Kinds $extensions.Kinds).Problems)
     }
     $scenario = { param($raw, $id) @($raw['scenarios'] | Where-Object { $_['id'] -eq $id })[0] }
+    $vary = { param($raw, [object[]]$VariantList) (& $scenario $raw 'chain-repeat')['variants'] = $VariantList }
+    $gainVariant = { param([string]$VariantId, $GainFx) [ordered]@{ id = $VariantId; fx = [ordered]@{ gain = $GainFx } } }
     $mutations = @(
         @{ L = 'an unknown key at the top'; E = { param($c) $c['surprise'] = 1 }; M = "unknown key 'surprise'" }
         @{ L = 'an unknown key in a scenario'; E = { param($c) (& $scenario $c 'bus')['speed'] = 2 }; M = "unknown key 'speed'" }
@@ -1136,6 +1138,31 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'keep on a device scenario (only renders are kept)'; E = { param($c) (& $scenario $c 'bus-device')['keep'] = $true }; M = "unknown key 'keep'" }
         @{ L = 'keep in a negative case'; E = { param($c) $c['negative'][0]['keep'] = $true }; M = "unknown key 'keep'" }
         @{ L = 'keep that is not a boolean'; E = { param($c) (& $scenario $c 'bus')['keep'] = 'yes' }; M = 'keep' }
+        @{ L = 'two variants with one id'; E = { param($c) & $vary $c @([ordered]@{ id = 'a' }, [ordered]@{ id = 'a'; bypass = $true }) }; M = "variants[1]: variant id 'a' is used twice" }
+        @{ L = 'a variant of a plugin that is not defined'; E = { param($c) & $vary $c @([ordered]@{ id = 'a'; fx = [ordered]@{ nope = [ordered]@{ params = [ordered]@{ Gain = 0.5 } } } }) }; M = "fx.nope: plugin 'nope' is not defined in plugins" }
+        @{ L = 'a variant of a plugin its layout does not use'; E = { param($c) & $vary $c @([ordered]@{ id = 'a'; fx = [ordered]@{ delay = [ordered]@{ params = [ordered]@{ 'Delay (samples)' = 0.5 } } } }) }; M = "fx.delay: plugin 'delay' is not used in layout 'chain'" }
+        @{ L = 'a variant state the plugin does not have'; E = { param($c) & $vary $c @((& $gainVariant 'a' ([ordered]@{ state = 'nowhere' }))) }; M = "fx.gain: plugin 'gain' has no state 'nowhere'" }
+        @{ L = 'the FX of a variant with empty parameters and no state'; E = { param($c) & $vary $c @((& $gainVariant 'a' ([ordered]@{ params = [ordered]@{} }))) }; M = 'fx.gain: needs state or params' }
+        @{ L = 'the FX of a variant with nothing in it'; E = { param($c) & $vary $c @((& $gainVariant 'a' ([ordered]@{}))) }; M = 'fx.gain: needs state or params' }
+        @{ L = 'a variant that bypasses a plugin its layout does not use'; E = { param($c) & $vary $c @([ordered]@{ id = 'a'; bypass = @('delay') }) }; M = "variants[0].bypass: plugin 'delay' is not used in that layout" }
+        @{ L = 'variants without compare (a render of a variant compares with something or says "none")'; E = { param($c) (& $scenario $c 'chain-bypass')['variants'] = @([ordered]@{ id = 'a' }) }; M = 'a scenario with variants needs compare' }
+        @{ L = 'a variant id that makes the scenario id longer than 80 characters'; E = { param($c) $s = & $scenario $c 'chain-repeat'; $s['id'] = 'chain-repeat-' + ('x' * 30); $s['variants'] = @([ordered]@{ id = 'v' + ('w' * 39) }) }; M = 'is longer than 80 characters after matrix and variant expansion' }
+        @{ L = 'a variant whose scenario id is that of another scenario'; E = { param($c) $s = & $scenario $c 'bus'; $s['compare'] = [ordered]@{ block = 256 }; $s['variants'] = @([ordered]@{ id = 'device' }) }; M = "scenario id 'bus-device' is used twice" }
+        @{ L = 'a scenario with the id of the learn row'; E = { param($c) (& $scenario $c 'bus')['id'] = 'learn' }; M = "scenario id 'learn' is the id of a row the tool writes" }
+        @{ L = 'a scenario with the id of the round-error row'; E = { param($c) (& $scenario $c 'bus')['id'] = 'round-error' }; M = "scenario id 'round-error' is the id of a row the tool writes" }
+        @{ L = 'two display texts for one learned setting'; E = { param($c) $c['layouts']['chain']['tracks'][0]['fx'][0]['params']['Gain'] = [ordered]@{ normalized = 0.25; display = '0.3' } }; M = "plugin 'gain' parameter 'Gain' at 0.25 is asked to show both '0.3' and '0.25'" }
+        @{ L = 'variants on a device scenario (only renders have variants)'; E = { param($c) (& $scenario $c 'bus-device')['variants'] = @([ordered]@{ id = 'a' }) }; M = "unknown key 'variants'" }
+        @{ L = 'variants in a negative case'; E = { param($c) $c['negative'][0]['variants'] = @([ordered]@{ id = 'a' }) }; M = "unknown key 'variants'" }
+        @{ L = 'a variant without an id'; E = { param($c) & $vary $c @([ordered]@{ bypass = $true }) }; M = "variants[0]: missing 'id'" }
+        @{ L = 'a variant id that breaks the pattern'; E = { param($c) & $vary $c @([ordered]@{ id = 'Dry Run' }) }; M = "'Dry Run' does not match" }
+        @{ L = 'an empty list of variants'; E = { param($c) & $vary $c @() }; M = 'variants: needs at least 1 item' }
+        @{ L = 'more than 1000 variants'; E = { param($c) & $vary $c @(1..1001 | ForEach-Object { [ordered]@{ id = "v$_" } }) }; M = 'variants: has more than 1000 items' }
+        @{ L = 'an unknown key in a variant'; E = { param($c) & $vary $c @([ordered]@{ id = 'a'; params = [ordered]@{ Gain = 0.5 } }) }; M = "variants[0]: unknown key 'params'" }
+        @{ L = 'an unknown key in the FX of a variant'; E = { param($c) & $vary $c @((& $gainVariant 'a' ([ordered]@{ bypass = $true }))) }; M = "fx.gain: unknown key 'bypass'" }
+        @{ L = 'a variant with an empty fx'; E = { param($c) & $vary $c @([ordered]@{ id = 'a'; fx = [ordered]@{} }) }; M = 'fx: needs at least 1 entry' }
+        @{ L = 'an expectPdc word other than report'; E = { param($c) $c['plugins']['delay']['expectPdc'] = 'reported' }; M = 'plugins.delay.expectPdc' }
+        @{ L = 'a learn batch size of 0'; E = { param($c) $c['limits']['learnBatchSize'] = 0 }; M = 'learnBatchSize: must be between 1 and 256' }
+        @{ L = 'a learn batch size of 257'; E = { param($c) $c['limits']['learnBatchSize'] = 257 }; M = 'learnBatchSize: must be between 1 and 256' }
     )
     foreach ($mu in $mutations) {
         $found = & $problems $mu.E
@@ -1226,18 +1253,28 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @($fileConf.Problems).Count -eq 0 -and $fileConf.Config.Layouts['chain'].Tracks[0].File -ceq 'sources/voice.wav' -and $kept.Count -eq 4 -and @($kept | Where-Object { $_.keep -ne $true -or $_.baseId -cne 'chain' }).Count -eq 0 -and
         @($fileConf.Config.Scenarios | Where-Object { $_.id -ceq 'chain-repeat' })[0].keep -eq $false -and (Get-HarnessDryLayout).Tracks[0].File -ceq '' -and @(Get-HarnessBuiltinNegatives | Where-Object { $_.kind -ceq 'render' -and $_.keep -ne $false }).Count -eq 0)
     & $add 'schema: Test-Json accepts a source file on a track and keep on a render, like the validator' $false (& $agree (ConvertTo-HarnessJsonText -Value $withFile) $true)
+    $withVariants = ConvertFrom-HarnessJson $text
+    & $vary $withVariants @([ordered]@{ id = 'dry'; bypass = $true }, (& $gainVariant 'loud-up' ([ordered]@{ state = 'loud'; params = [ordered]@{ Trim = [ordered]@{ normalized = 0.75; display = '0.75' } } })), [ordered]@{ id = 'no-bus'; fx = [ordered]@{ gain = [ordered]@{ params = [ordered]@{ Gain = 0.125 } } }; bypass = @('bus') })
+    $withVariants['plugins']['delay']['expectPdc'] = 'report'
+    $withVariants['limits']['learnBatchSize'] = 8
+    $variantConf = Test-HarnessConfigData -Raw $withVariants -Kinds $extensions.Kinds
+    & $add "schema: Test-Json accepts variants, expectPdc `"report`" and learnBatchSize, like the validator ($(@($variantConf.Problems) -join ' | '))" $false (
+        @($variantConf.Problems).Count -eq 0 -and $variantConf.Config.Limits.learnBatchSize -eq 8 -and @($variantConf.Config.Scenarios | Where-Object { $_.baseId -ceq 'chain-repeat' }).Count -eq 3 -and (& $agree (ConvertTo-HarnessJsonText -Value $withVariants) $true))
+    & $add 'configuration: learnBatchSize is 32 unless given' $false ($conf.Limits.learnBatchSize -eq 32)
     $structural = @($mutations | Where-Object { $_.L -in 'an unknown key at the top', 'an unknown key in a scenario', 'schema 2', 'a string where a number belongs', 'a sample rate out of range', 'a scenario id that breaks the pattern', 'an unknown expected outcome', 'a negative case without expectDetail',
             'a state with both a template and a state file', 'a template state without the FX number', 'an unknown JSFX', 'an unknown send mode', 'a pan out of range', 'a range of one number', 'a range of three numbers', 'savereopen with 0 cycles', 'an unknown host setting', 'a render mode axis in the matrix of a device scenario (the device step renders nothing)',
             'a transport state with an unknown transport (recording is no state the harness can be asked for)', 'a transport state with an unknown monitoring mode', 'a transport state without arm', 'a transport state whose arm is not a boolean',
             'an unknown key in a transport state', 'an unknown key in the expectation of a state', 'an unknown input expectation', 'an unknown channel layout of a feed', 'a state window shorter than 64 samples', 'a negative settle time',
             'a transport scenario without states', 'a transport scenario of 65 states', 'a render mode axis in the matrix of a transport scenario (nothing is rendered)', 'Run FX when stopped that is not a boolean', 'a state name that breaks the pattern',
-            'a tool JSFX of the transport kind configured as a plugin', 'a file that is not a string', 'keep on a device scenario (only renders are kept)', 'keep in a negative case', 'keep that is not a boolean' })
+            'a tool JSFX of the transport kind configured as a plugin', 'a file that is not a string', 'keep on a device scenario (only renders are kept)', 'keep in a negative case', 'keep that is not a boolean',
+            'variants on a device scenario (only renders have variants)', 'variants in a negative case', 'a variant without an id', 'a variant id that breaks the pattern', 'an empty list of variants', 'more than 1000 variants',
+            'an unknown key in a variant', 'an unknown key in the FX of a variant', 'the FX of a variant with nothing in it', 'a variant with an empty fx', 'an expectPdc word other than report', 'a learn batch size of 0', 'a learn batch size of 257' })
     $disagree = @(foreach ($mu in $structural) {
             $raw = ConvertFrom-HarnessJson $text
             & $mu.E $raw
             if (-not (& $agree (ConvertTo-HarnessJsonText -Value $raw) $false)) { $mu.L }
         })
-    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 38 -and $disagree.Count -eq 0)
+    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 51 -and $disagree.Count -eq 0)
     $cases
 }
 
@@ -1491,6 +1528,11 @@ end
     & $add 'learn report: a plugin that could not be added (index -1) is a failure naming it' $true (@((& $mut { param($r) $r.fx2_idx = '-1' }).Fail -match '^bus could not be added').Count -eq 1)
     & $add 'learn report: another plugin matched the name (TrackFX_AddByName is loose) is a failure' $true (@((& $mut { param($r) $r.fx1_name = 'VST3: Fixture Gain Pro (Fixture Audio)' }).Fail -match 'another plugin matched').Count -eq 1)
     & $add 'learn report: an offline FX is a failure' $true (@((& $mut { param($r) $r.fx2_offline = 'true' }).Fail -match 'offline').Count -eq 1)
+    $offlineOne = & $mut { param($r) $r.fx2_offline = 'true' }
+    $outsideOne = & $mut { param($r) $r.fx1_ident = 'S:\VST3\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3<1{5A1B2C3D4E5F60718293A4B5C6D7E8F9' }
+    & $add 'learn report: only an entry that failed nothing is taken: not an offline one, nor one loaded from outside the private copy; the clean one next to it is' $true (
+        $offlineOne.Blocks.ContainsKey('gain|g') -and -not $offlineOne.Blocks.ContainsKey('bus|') -and -not $offlineOne.Reads.ContainsKey('bus|') -and
+        -not $outsideOne.Blocks.ContainsKey('gain|g') -and $outsideOne.Blocks.ContainsKey('bus|'))
     & $add 'learn report: fx_ident naming a binary outside the private directory is foreign (the private copy is not what was tested)' $true (@((& $mut { param($r) $r.fx1_ident = 'S:\VST3\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3<1{5A1B2C3D4E5F60718293A4B5C6D7E8F9' }).Foreign).Count -eq 1)
     & $add 'learn report: a class ID in fx_ident other than the one in moduleinfo.json is a failure' $true (@((& $mut { param($r) $r.fx2_ident = "$($installed.bus.Binary)<1{FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" }).Fail -match 'class ID in fx_ident').Count -eq 1)
     & $add 'learn report: a parameter that reads back differently is a failure' $true (@((& $mut { param($r) $r.fx1_p1 = '0.25' }).Fail -match "parameter 'Gain'").Count -eq 1)
@@ -1570,6 +1612,227 @@ end
     $apiProof = & $api.StateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (& $api.FxBlocks ("<REAPER_PROJECT`n" + (& $one 'Quiet' 'Q') + (& $one 'Loud' 'L') + ">`n"))
     & $add 'extension API: StateProof over FxBlocks of a saved project text proves the states as device does' $false ($apiProof.Problems.Count -eq 0 -and ($apiProof.Proven -join ',') -ceq 'gain quiet aaaaaaaaaaaa,gain loud bbbbbbbbbbbb')
     & $add 'state proof: state FX missing from the saved project are problems' $true (@((Test-HarnessStateProof -Layout $spLayout -Blocks $spBlocks -States $spStates -Saved (Get-HarnessFxBlocks "<REAPER_PROJECT`n>`n")).Problems -match 'not in the saved project').Count -eq 2)
+    $cases
+}
+
+# ---------------------------------------------------------------- parameter variants and learning in batches
+function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $configFile = Join-Path $RepoRoot 'tests/fixtures/config.json'
+    $kinds = (Import-HarnessExtensions (Read-HarnessConfigExtensions $configFile)).Kinds
+    $text = [IO.File]::ReadAllText($configFile)
+    $scenario = { param($raw, $id) @($raw['scenarios'] | Where-Object { $_['id'] -eq $id })[0] }
+    # The fixture with a change: the result of Test-HarnessConfigData (Problems, Config)
+    $with = { param([scriptblock]$Edit) $raw = ConvertFrom-HarnessJson $text; & $Edit $raw; Test-HarnessConfigData -Raw $raw -Kinds $kinds }
+    $v = { param([string]$VariantId, $FxSet = $null, $Bypass = $null) $o = [ordered]@{ id = $VariantId }; if ($null -ne $FxSet) { $o['fx'] = $FxSet }; if ($null -ne $Bypass) { $o['bypass'] = $Bypass }; $o }
+    $gainP = { param($p) [ordered]@{ gain = [ordered]@{ params = $p } } }
+    $renderOnly = { param($s) foreach ($k in 'maxDiffDb', 'notSilent', 'peakMaxDb') { $s.Remove($k) }; $s['compare'] = 'none' }
+    $byId = { param($r, [string]$ScenarioId) $r.Config ? ($r.Config.Scenarios | Where-Object { $_.id -ceq $ScenarioId } | Select-Object -First 1) : $null }
+    # The keys a scenario needs, joined (the function returns its list as one object)
+    $needs = { param($OfConfig, $OfScenario) $k = Get-HarnessScenarioLearnKeys -Config $OfConfig -Scenario $OfScenario; @($k | ForEach-Object { $_.Key }) -join ',' }
+    $keysOf = { param($l) @($l.Tracks | ForEach-Object { $_.Fx } | ForEach-Object { $_.Variant }) -join ' ; ' }
+
+    # Expansion: <id>[-<matrix suffix>]-<variant id>, legs of the matrix outside, the variants inside, in the order written
+    $m = & $with { param($c) $s = & $scenario $c 'chain'; $s['compare'] = 'none'; $s['variants'] = @((& $v 'dry' $null $true), (& $v 'as-written'), (& $v 't025' (& $gainP ([ordered]@{ Trim = 0.25 })))) }
+    $chainIds = @($m.Config ? @($m.Config.Scenarios | Where-Object { $_.baseId -ceq 'chain' } | ForEach-Object { $_.id }) : @())
+    & $add "variants: a matrix of four legs and three variants give twelve scenarios, the legs outside, the variants inside, each knowing its variant and the id as written ($($chainIds -join ', '))" $false (
+        @($m.Problems).Count -eq 0 -and $chainIds.Count -eq 12 -and ($chainIds[0..3] -join ',') -ceq 'chain-offline-44100-dry,chain-offline-44100-as-written,chain-offline-44100-t025,chain-offline-48000-dry' -and
+        $chainIds[11] -ceq 'chain-1x-48000-t025' -and @($m.Config.Scenarios | Where-Object { $_.baseId -ceq 'chain' -and ($_.layout -cne 'chain' -or -not $_.variant) }).Count -eq 0 -and
+        (& $byId $m 'chain-1x-44100-t025').variant -ceq 't025' -and (& $byId $m 'chain-1x-44100-t025').mode -ceq '1x' -and (& $byId $m 'chain-1x-44100-t025').sr -eq 44100)
+    $one = & $with { param($c) $s = & $scenario $c 'bus'; & $renderOnly $s; $s['variants'] = @((& $v 'a'), (& $v 'b' $null @('bus'))) }
+    & $add 'variants: without a matrix the ids are <id>-<variant id>; a scenario without variants has none and keeps its id' $false (
+        @($one.Problems).Count -eq 0 -and (& $byId $one 'bus-a').baseId -ceq 'bus' -and (& $byId $one 'bus-b').variant -ceq 'b' -and $null -eq (& $byId $one 'bus') -and
+        $null -eq (& $byId $one 'routing').variant -and $null -eq (& $byId $one 'routing').variantLayout -and $null -ne (& $byId $one 'bus-a').variantLayout)
+    # The overlay: plugin < layout FX < variant, a state replaces the FX's, every instance of the plugin, nothing else
+    $o = & $with {
+        param($c)
+        $s = & $scenario $c 'bus'; & $renderOnly $s
+        $s['variants'] = @((& $v 'trim' (& $gainP ([ordered]@{ Trim = 0.75 }))), (& $v 'gain' (& $gainP ([ordered]@{ Gain = 0.125 }))), (& $v 'loud' ([ordered]@{ gain = [ordered]@{ state = 'loud' } })), (& $v 'trim-again' (& $gainP ([ordered]@{ Trim = 0.75 }))))
+        $c['scenarios'] += [ordered]@{ id = 'pdc-vary'; kind = 'render'; layout = 'pdc'; compare = 'none'; variants = @((& $v 'report-off' ([ordered]@{ delay = [ordered]@{ params = [ordered]@{ 'Report delay as PDC' = 0 } } })), (& $v 'longer' ([ordered]@{ delay = [ordered]@{ params = [ordered]@{ 'Delay (samples)' = 0.015625 } } }))) }
+    }
+    $busLayout = $o.Config ? $o.Config.Layouts['bus'] : $null
+    $trim = (& $byId $o 'bus-trim').variantLayout
+    & $add "variants: a variant's parameters go on top of the FX's own, on every FX of that plugin; the other plugins and the layout itself are left as they were ($(& $keysOf $trim))" $false (
+        @($o.Problems).Count -eq 0 -and (& $keysOf $trim) -ceq 'bus| ; gain|Trim=0.75 ; gain|Gain=0.25;Trim=0.75' -and $trim.Tracks[1].Fx[0].Params['Trim'].Normalized -eq 0.75 -and
+        $trim.Tracks[2].Fx[0].Params['Gain'].Display -ceq '0.25' -and [object]::ReferenceEquals($trim.Tracks[0].Fx[0], $busLayout.Tracks[0].Fx[0]) -and
+        (& $keysOf $busLayout) -ceq 'bus| ; gain| ; gain|Gain=0.25' -and -not $busLayout.Tracks[1].Fx[0].Params.Contains('Trim'))
+    & $add 'variants: a parameter the FX has is replaced by the variant, its state by the variant state; the key is that of the new setting' $false (
+        (& $keysOf (& $byId $o 'bus-gain').variantLayout) -ceq 'bus| ; gain|Gain=0.125 ; gain|Gain=0.125' -and (& $keysOf (& $byId $o 'bus-loud').variantLayout) -ceq 'bus| ; gain@loud| ; gain@loud|Gain=0.25' -and
+        (& $byId $o 'bus-loud').variantLayout.Tracks[1].Fx[0].State -ceq 'loud')
+    $pdcVary = & $byId $o 'pdc-vary-longer'
+    $offVary = & $byId $o 'pdc-vary-report-off'
+    & $add 'variants: the plugin''s own parameters stay under the FX''s and the variant''s (a JSFX with a parameter set by its plugin)' $false (
+        $pdcVary.variantLayout.Tracks[0].Fx[0].Params['Delay (samples)'].Normalized -eq 0.015625 -and $offVary.variantLayout.Tracks[0].Fx[0].Params['Delay (samples)'].Normalized -eq 0.0078125 -and
+        $offVary.variantLayout.Tracks[0].Fx[0].Params['Report delay as PDC'].Normalized -eq 0 -and $offVary.variantLayout.Tracks[0].Fx[1].Variant -ceq 'gain|')
+    $differ = @(for ($t = 0; $t -lt $busLayout.Tracks.Count; $t++) {
+            foreach ($pn in @($busLayout.Tracks[$t].PSObject.Properties.Name | Where-Object { $_ -cne 'Fx' })) { if (-not [object]::Equals($busLayout.Tracks[$t].$pn, $trim.Tracks[$t].$pn)) { "$t.$pn" } }
+        })
+    & $add "variants: every property of a track but its FX is that of the layout ($($differ -join ', '))" $false ($differ.Count -eq 0 -and $trim.Tracks.Count -eq 3 -and $trim.Id -ceq 'bus')
+    $learned = Get-HarnessLearnVariants -Config $o.Config -Scenarios @($o.Config.Scenarios | Where-Object { $_.baseId -ceq 'bus' })
+    & $add 'variants: two variants asking the same setting share one learned entry, first used by the first' $false (
+        @($learned | Where-Object { $_.Key -ceq 'gain|Trim=0.75' }).Count -eq 1 -and @($learned | Where-Object { $_.Key -ceq 'gain|Trim=0.75' })[0].For -ceq 'bus-trim' -and
+        @($learned | Where-Object { $_.Key -ceq 'gain@loud|' })[0].For -ceq 'bus-loud' -and @($learned | Where-Object { $_.Key -ceq 'gain|' })[0].For -ceq '')
+    # A file source and an FX of its own bypass flag stay as they are under a variant
+    $fb = & $with {
+        param($c)
+        $c['layouts']['chain']['tracks'][0]['file'] = 'sources/voice.wav'; $c['layouts']['chain']['tracks'][0]['fx'][1]['bypass'] = $true
+        $s = & $scenario $c 'chain-repeat'; $s['compare'] = 'none'; $s['bypass'] = @('gain'); $s['variants'] = @((& $v 'b' ([ordered]@{ bus = [ordered]@{ params = [ordered]@{ Trim = 0.5 } } }) @('bus')), (& $v 'all' $null $true))
+    }
+    $fbV = (& $byId $fb 'chain-repeat-b')
+    & $add 'variants: a file source keeps its file and an FX bypassed in the layout stays bypassed when a variant sets it' $false (
+        @($fb.Problems).Count -eq 0 -and $fbV.variantLayout.Tracks[0].File -ceq 'sources/voice.wav' -and $fbV.variantLayout.Tracks[0].Fx[1].Bypass -eq $true -and $fbV.variantLayout.Tracks[0].Fx[1].Variant -ceq 'bus|Trim=0.5')
+    & $add 'variants: the bypass of a variant adds to the scenario''s, each plugin once; true (every FX) wins' $false (
+        ($fbV.bypass -join ',') -ceq 'gain,bus' -and ((& $byId $fb 'chain-repeat-all').bypass -join ',') -ceq '*')
+    $blocks = @{ 'gain|Gain=0.5' = @('<VST "g"', 'G', '>'); 'bus|Trim=0.5' = @('<VST "b"', 'B', '>'); 'bus|' = @('<VST "b0"', 'B0', '>') }
+    $rppB = New-HarnessProjectText -Layout $fbV.variantLayout -Blocks $blocks -SourceWav 'S.wav' -Sources @{ Voice = 'V.wav' } -RenderDir 'D' -RenderName 'N' -Bypass @()
+    & $add 'variants: an FX bypassed in the layout and set by a variant is written BYPASS 1 with the block of the variant' $false ($rppB -cmatch '(?s)BYPASS 0 0 0\n      <VST "g".*BYPASS 1 0 0\n      <VST "b"\n')
+    # A compare variant without a layout of its own renders the same variant layout and, without its own bypass, the
+    # scenario's after expansion; with its own of either it keeps that
+    $cv = & $with {
+        param($c)
+        $s = & $scenario $c 'chain-block'; $s['variants'] = @((& $v 'dry' $null $true), (& $v 't' (& $gainP ([ordered]@{ Trim = 0.25 }))))
+        $c['scenarios'] += [ordered]@{ id = 'cmp-own'; kind = 'render'; layout = 'chain'; compare = [ordered]@{ block = 256; bypass = @('bus') }; variants = @((& $v 'dry' $null $true)) }
+        $c['scenarios'] += [ordered]@{ id = 'cmp-other'; kind = 'render'; layout = 'chain'; compare = [ordered]@{ layout = 'bus' }; variants = @((& $v 't' (& $gainP ([ordered]@{ Trim = 0.25 })))) }
+    }
+    $cDry = & $byId $cv 'chain-block-dry'; $cT = & $byId $cv 'chain-block-t'
+    & $add 'variants: a compare variant without layout and bypass of its own compares the variant layout with the bypass of the variant' $false (
+        @($cv.Problems).Count -eq 0 -and $cDry.compare.SameLayout -and ($cDry.compare.Bypass -join ',') -ceq '*' -and $cDry.compare.Block -eq 1024 -and ($cT.compare.Bypass -join ',') -ceq '' -and
+        (& $needs $cv.Config $cT) -ceq 'gain|Gain=0.5;Trim=0.25,bus|')
+    & $add 'variants: a compare variant with a bypass or a layout of its own keeps it, and its layout is learned as written' $false (
+        ((& $byId $cv 'cmp-own-dry').compare.Bypass -join ',') -ceq 'bus' -and (& $byId $cv 'cmp-own-dry').compare.OwnBypass -and -not (& $byId $cv 'cmp-other-t').compare.SameLayout -and
+        (& $needs $cv.Config (& $byId $cv 'cmp-other-t')) -ceq 'gain|Gain=0.5;Trim=0.25,bus|,gain|,gain|Gain=0.25')
+    # Checked once per item, before the matrix: one problem, not one per leg; a layout that is not there is its own problem only
+    $twice = & $with { param($c) $s = & $scenario $c 'chain'; $s['compare'] = 'none'; $s['variants'] = @((& $v 'a'), (& $v 'a')) }
+    & $add "variants: a variant id used twice in a scenario of four legs is one problem ($(@($twice.Problems) -join ' | '))" $true (@($twice.Problems | Where-Object { $_ -like "*variant id 'a' is used twice*" }).Count -eq 1)
+    $noLayout = try { & $with { param($c) $s = & $scenario $c 'bus'; $s['layout'] = 'nowhere'; & $renderOnly $s; $s['variants'] = @((& $v 'a' (& $gainP ([ordered]@{ Trim = 0.25 })))) } } catch { "threw: $($_.Exception.Message)" }
+    & $add "variants: of a scenario whose layout is not defined only that is said, nothing throws ($(@($noLayout.Problems) -join ' | '))" $true (
+        $noLayout -isnot [string] -and @($noLayout.Problems).Count -eq 1 -and @($noLayout.Problems)[0] -like "*layout 'nowhere' is not defined in layouts*")
+    # The displays of one learned setting: merged when one side gives none, refused when two differ (in any order, over
+    # the layouts and the variant layouts)
+    $dWithout = & $with { param($c) $c['layouts']['chain']['tracks'][0]['fx'][0]['params']['Gain'] = 0.25 } # chain (no display) is used before bus (0.25)
+    $dWith = & $with { param($c) $c['layouts']['routing']['tracks'][2]['fx'][0]['params'] = [ordered]@{ Gain = 0.25 } } # bus (0.25) before routing (none)
+    $entryOf = { param($r, $WantKey) @((Get-HarnessLearnVariants -Config $r.Config -Scenarios @($r.Config.Scenarios)) | Where-Object { $_.Key -ceq $WantKey })[0] }
+    & $add 'displays: a display text one use of a setting gives and another leaves out is learned and checked, whichever comes first; the layouts are not changed' $false (
+        @($dWithout.Problems).Count -eq 0 -and @($dWith.Problems).Count -eq 0 -and (& $entryOf $dWithout 'gain|Gain=0.25').Params['Gain'].Display -ceq '0.25' -and
+        (& $entryOf $dWithout 'gain|Gain=0.25').For -ceq 'chain-offline-44100' -and (& $entryOf $dWith 'gain|Gain=0.25').Params['Gain'].Display -ceq '0.25' -and
+        $null -eq $dWithout.Config.Layouts['chain'].Tracks[0].Fx[0].Params['Gain'].Display)
+    $dTwoLayouts = & $with { param($c) $c['layouts']['chain']['tracks'][0]['fx'][0]['params']['Gain'] = [ordered]@{ normalized = 0.25; display = '0.3' } }
+    $dTwoLater = & $with { param($c) $c['layouts']['routing']['tracks'][2]['fx'][0]['params'] = [ordered]@{ Gain = [ordered]@{ normalized = 0.25; display = '0.3' } } }
+    $dVariants = & $with { param($c) $c['scenarios'] += [ordered]@{ id = 'dv'; kind = 'render'; layout = 'states'; compare = 'none' }; $c['scenarios'][-1]['variants'] = @((& $v 'x' (& $gainP ([ordered]@{ Gain = [ordered]@{ normalized = 0.4; display = 'x' } }))), (& $v 'y' (& $gainP ([ordered]@{ Gain = [ordered]@{ normalized = 0.4; display = 'y' } })))) }
+    $dLayoutVariant = & $with { param($c) $s = & $scenario $c 'bus'; & $renderOnly $s; $s['variants'] = @((& $v 'x' (& $gainP ([ordered]@{ Gain = [ordered]@{ normalized = 0.25; display = '0.3' } })))) }
+    $both = { param($r) @($r.Problems | Where-Object { $_ -like "*parameter 'Gain' at * is asked to show both *" }) }
+    & $add "displays: one setting asked to show two texts is a usage error, over two layouts in either order, over two variants (once per setting: two states), over a layout and a variant ($(@(& $both $dVariants) -join ' | '))" $true (
+        @(& $both $dTwoLayouts).Count -eq 1 -and @(& $both $dTwoLater).Count -eq 1 -and @(& $both $dVariants).Count -eq 2 -and @(& $both $dLayoutVariant).Count -eq 1 -and
+        @(& $both $dTwoLayouts)[0] -clike "plugin 'gain' parameter 'Gain' at 0.25 is asked to show both '0.3' and '0.25'*")
+
+    # Batches of learning
+    $e = { param([string]$EntryKey, [string]$For) [pscustomobject]@{ Key = $EntryKey; Plugin = 'p'; State = ''; Params = [ordered]@{}; For = $For } }
+    $entryList = @((& $e 'a|' ''), (& $e 'b|' ''), (& $e 'c|' ''), (& $e 'x1' 's1'), (& $e 'x2' 's1'), (& $e 'y1' 's2'), (& $e 'y2' 's2'), (& $e 'z1' 's3'), (& $e 'z2' 's3'), (& $e 'z3' 's3'), (& $e 'z4' 's3'), (& $e 'z5' 's3'), (& $e 'w1' 's4'))
+    $plan = { param($Size) $launches = Get-HarnessLearnBatches -Variants $entryList -Size $Size; @($launches | ForEach-Object { "$($_.No):" + (@($_.Entries | ForEach-Object { $_.Key }) -join ',') }) -join ' ' }
+    $p4 = & $plan 4
+    & $add "learn batches: the defaults first and together, then groups of one first use, whole where they fit; a group larger than the size cut in order ($p4)" $false (
+        $p4 -ceq '1:a|,b|,c| 2:x1,x2,y1,y2 3:z1,z2,z3,z4 4:z5,w1')
+    $p2 = & $plan 2
+    $p1 = & $plan 1
+    & $add "learn batches: more defaults than the size stay in the first launch; size 1 gives a launch per entry ($p2 / $p1)" $false (
+        $p2 -ceq '1:a|,b|,c| 2:x1,x2 3:y1,y2 4:z1,z2 5:z3,z4 6:z5,w1' -and $p1 -ceq '1:a|,b|,c| 2:x1 3:x2 4:y1 5:y2 6:z1 7:z2 8:z3 9:z4 10:z5 11:w1')
+    $launches3 = Get-HarnessLearnBatches -Variants $entryList -Size 3
+    $flat = @($launches3 | ForEach-Object { $_.Entries } | ForEach-Object { $_.Key })
+    & $add 'learn batches: no entry lost, none twice, the order kept' $false (($flat -join ',') -ceq (@($entryList | ForEach-Object { $_.Key }) -join ','))
+    & $add 'learn batches: the row of a batch is learn with one batch, learn.<k> with several' $false ((Get-HarnessLearnRowId 1 1) -ceq 'learn' -and (Get-HarnessLearnRowId 2 3) -ceq 'learn.2')
+    # One walk: every variant a scenario needs is in exactly one batch, over the fixture and configurations with variants
+    $leaks = @(foreach ($r in @($m, $o, $fb, $cv, $dWithout)) {
+            $needing = @($r.Config.Scenarios) + @($r.Config.Negative)
+            $planned = Get-HarnessLearnBatches -Variants (Get-HarnessLearnVariants -Config $r.Config -Scenarios $needing) -Size 2
+            foreach ($s in $needing) {
+                foreach ($k in @((& $needs $r.Config $s) -split ',' | Where-Object { $_ })) {
+                    $in = @($planned | Where-Object { @($_.Entries | Where-Object { $_.Key -ceq $k }).Count })
+                    if ($in.Count -ne 1) { "$($s.id): $k in $($in.Count)" }
+                }
+            }
+        })
+    & $add "learn batches: every variant each scenario needs is in exactly one batch ($($leaks -join ', '))" $false ($leaks.Count -eq 0)
+    # What each kind needs
+    $fixture = Read-HarnessConfig -Path $configFile -Kinds $kinds
+    $needOf = { param([string]$ScenarioId) & $needs $fixture @(@($fixture.Scenarios) + @($fixture.Negative) + @(Get-HarnessBuiltinNegatives -Transport) | Where-Object { $_.id -ceq $ScenarioId })[0] }
+    & $add "learning needs: a render its layout and the layout it compares with, a device and a transport their layout, instances the defaults of its plugins, an extension its layout, a built-in negative nothing ($(& $needOf 'neg-bus-is-not-chain'))" $false (
+        (& $needOf 'neg-bus-is-not-chain') -ceq 'bus|,gain|,gain|Gain=0.25,gain|Gain=0.5' -and (& $needOf 'bus-device') -ceq 'bus|,gain|,gain|Gain=0.25' -and (& $needOf 'monitor-states') -ceq 'gain|Gain=0.5,bus|' -and
+        (& $needOf 'instances') -ceq ((@($fixture.Scenarios | Where-Object { $_.id -ceq 'instances' })[0].plugins | ForEach-Object { "$_|" }) -join ',') -and (& $needOf 'neg-offset-1-sample') -ceq '' -and
+        (& $needOf 'states-device') -ceq 'gain@quiet|,gain@loud|')
+    # Why a scenario does not run
+    $twoStates = & $with { param($c) $c['layouts']['chain']['tracks'][0]['fx'][0]['state'] = 'quiet'; $c['layouts']['bus']['tracks'][2]['fx'][0]['state'] = 'quiet' }
+    $gapCtx = { param($r, [string[]]$Have, [hashtable]$BatchOf, [int]$Count) $bl = @{}; foreach ($k in $Have) { $bl[$k] = @('x') }; @{ Config = $r.Config; Blocks = $bl; LearnBatchOf = $BatchOf; LearnBatchCount = $Count } }
+    $sOf = { param($r, $ScenarioId) @(@($r.Config.Scenarios) + @($r.Config.Negative) | Where-Object { $_.id -ceq $ScenarioId })[0] }
+    $planned = @{ 'gain@quiet|' = 2; 'gain@quiet|Gain=0.5' = 2; 'bus|' = 1; 'gain@quiet|Gain=0.25' = 3; 'gain|' = 1 }
+    $noAlone = & $gapCtx $twoStates @('gain@quiet|Gain=0.5', 'bus|', 'gain@quiet|Gain=0.25', 'gain|') $planned 3
+    $gaps = @('chain-repeat', 'bus', 'neg-bus-is-not-chain', 'bus-device' | ForEach-Object { Get-HarnessLearnGap -Context $noAlone -Scenario (& $sOf $twoStates $_) })
+    & $add "learning gaps: a state learned alone that failed keeps every scenario using it with parameters on top from running, in either layout ($($gaps -join ' | '))" $true (
+        @($gaps | Where-Object { $_ -cne 'not run: learning the plugin blocks it needs did not succeed (see the learn.2 row)' }).Count -eq 0)
+    $all = & $gapCtx $twoStates @('gain@quiet|', 'gain@quiet|Gain=0.5', 'bus|', 'gain@quiet|Gain=0.25', 'gain|') $planned 3
+    & $add 'learning gaps: a scenario all of whose variants were learned runs; a built-in negative case needs nothing' $false (
+        (Get-HarnessLearnGap -Context $all -Scenario (& $sOf $twoStates 'bus-device')) -ceq '' -and (Get-HarnessLearnGap -Context $noAlone -Scenario @(Get-HarnessBuiltinNegatives)[0] -Halt 'not run: x') -ceq '')
+    & $add 'learning gaps: a variant no batch was planned for is named; a halt is the reason for every scenario that needs learning' $true (
+        (Get-HarnessLearnGap -Context (& $gapCtx $twoStates @() @{} 1) -Scenario (& $sOf $twoStates 'bus-device')) -ceq 'not run: learning did not cover bus as this scenario uses it' -and
+        (Get-HarnessLearnGap -Context $all -Scenario (& $sOf $twoStates 'bus-device') -Halt 'not run: learning saw x') -ceq 'not run: learning saw x')
+    & $add 'learning gaps: a kind of an extension runs only when every learn row passed (Complete)' $true (
+        (Get-HarnessLearnGap -Context $all -Scenario (& $sOf $twoStates 'ext-count')) -clike 'not run: learning did not pass in every batch*(see the learn rows)' -and
+        (Get-HarnessLearnGap -Context $all -Scenario (& $sOf $twoStates 'ext-count') -Complete $true) -ceq '')
+
+    # The verdict of one batch: Foreign anywhere first, then a failed launch, then a failed entry, then an unseen binary of the batch
+    $binA = 'P:\plugins\A.vst3\Contents\x86_64-win\A.vst3'; $binB = 'P:\plugins\B.vst3\Contents\x86_64-win\B.vst3'
+    $inst = @{ a = [pscustomobject]@{ Binary = $binA; BinaryLeaf = 'A.vst3' }; b = [pscustomobject]@{ Binary = $binB; BinaryLeaf = 'B.vst3' } }
+    $same = { param($x, $y) [string]::Equals($x, $y, [StringComparison]::OrdinalIgnoreCase) }
+    $ent = { param([string]$Plugin, [string]$EntryKey) [pscustomobject]@{ Key = $EntryKey; Plugin = $Plugin; State = ''; Params = [ordered]@{} } }
+    $chk = { param([string[]]$Clean, [string[]]$Fail = @(), [string[]]$FromOutside = @()) $bl = @{}; foreach ($k in $Clean) { $bl[$k] = @('x') }; [pscustomobject]@{ Fail = $Fail; Foreign = $FromOutside; Blocks = $bl } }
+    $verdict = { param($BatchEntries, $CheckResult, [hashtable]$ModuleList, [string]$LaunchFailed = '') Get-HarnessLearnVerdict -Variants $BatchEntries -Check $CheckResult -LaunchWhy $LaunchFailed -Installed $inst -Seen $ModuleList -SameFile $same }
+    $aOnly = @((& $ent 'a' 'a|x'), (& $ent 'js' 'js|'))
+    $ok = & $verdict $aOnly (& $chk @('a|x', 'js|')) @{ 'A.vst3' = @($binA) }
+    & $add 'learn verdict: a batch whose plugins loaded from the private copy passes, also when the binary of a plugin of another batch was not seen; its facts are about its own binaries' $false (
+        $ok.Status -ceq 'PASS' -and ($ok.Commit -join ',') -ceq 'a|x,js|' -and $ok.Modules.Verdict -ceq 'Proven' -and (@($ok.Modules.Binaries.get_Keys()) -join ',') -ceq 'A.vst3' -and -not $ok.Foreign)
+    $unseen = & $verdict @((& $ent 'a' 'a|x'), (& $ent 'b' 'b|y'), (& $ent 'js' 'js|')) (& $chk @('a|x', 'b|y', 'js|')) @{ 'A.vst3' = @($binA) }
+    & $add 'learn verdict: a binary of a plugin of the batch never seen is INCOMPLETE; what was proven is committed, its entries are not' $true (
+        $unseen.Status -ceq 'INCOMPLETE' -and $unseen.Detail -clike '*never showed B.vst3 loaded*' -and ($unseen.Commit -join ',') -ceq 'a|x,js|' -and -not $unseen.Foreign)
+    $foreignAny = & $verdict $aOnly (& $chk @('a|x', 'js|')) @{ 'A.vst3' = @($binA); 'B.vst3' = @('S:\VST3\B.vst3') }
+    $jsForeign = & $verdict @((& $ent 'js' 'js|')) (& $chk @('js|')) @{ 'B.vst3' = @('S:\VST3\B.vst3') }
+    & $add 'learn verdict: a tested binary from outside the private copy, of any plugin, in a batch of JSFX only too, is INCOMPLETE, commits nothing and stops learning' $true (
+        $foreignAny.Status -ceq 'INCOMPLETE' -and $foreignAny.Foreign -and $foreignAny.Commit.Count -eq 0 -and $foreignAny.Detail -clike 'not the private copy: a module named B.vst3*' -and
+        $jsForeign.Foreign -and $jsForeign.Commit.Count -eq 0 -and $jsForeign.Modules.Verdict -ceq 'NoBinary')
+    $identForeign = & $verdict $aOnly (& $chk @('js|') @() @('a was loaded from S:\x')) @{ 'A.vst3' = @($binA) }
+    & $add 'learn verdict: an fx_ident outside the private copy is Foreign as well' $true ($identForeign.Foreign -and $identForeign.Commit.Count -eq 0)
+    $failed = & $verdict @((& $ent 'a' 'a|x'), (& $ent 'b' 'b|y')) (& $chk @('a|x') @('b (variant 2) is offline')) @{ 'A.vst3' = @($binA) }
+    & $add 'learn verdict: a failed entry is FAIL before an unseen binary, and the clean entries of the batch are committed' $true ($failed.Status -ceq 'FAIL' -and ($failed.Commit -join ',') -ceq 'a|x')
+    $noLaunch = & $verdict $aOnly $null @{} 'timed out after 30 s'
+    & $add 'learn verdict: a launch that failed is INCOMPLETE and commits nothing' $true ($noLaunch.Status -ceq 'INCOMPLETE' -and $noLaunch.Detail -ceq 'the learn launch failed: timed out after 30 s' -and $noLaunch.Commit.Count -eq 0 -and -not $noLaunch.Foreign)
+    $jsOnly = & $verdict @((& $ent 'js' 'js|')) (& $chk @('js|')) @{}
+    & $add 'learn verdict: a batch of JSFX only has no binary to prove and passes on fx_ident' $false ($jsOnly.Status -ceq 'PASS' -and $jsOnly.Modules.Verdict -ceq 'NoBinary' -and $jsOnly.Detail -clike '*no plugin binary to check (only JSFX)*')
+
+    # The latency of a plugin that only reports it
+    $plugins = [ordered]@{ d = [pscustomobject]@{ ExpectPdc = 'report' }; n = [pscustomobject]@{ ExpectPdc = 64 }; z = [pscustomobject]@{ ExpectPdc = 0 } }
+    $fxOf = { param([string]$Plugin) [pscustomobject]@{ Plugin = $Plugin; State = ''; Bypass = $false; Params = [ordered]@{}; Variant = "$Plugin|" } }
+    $pl = [pscustomobject]@{ Tracks = @([pscustomobject]@{ Name = 'V'; Fx = @((& $fxOf 'd'), (& $fxOf 'n'), (& $fxOf 'z')) }) }
+    $facts = { param([string]$DelayPdc, [string]$NumPdc = '64', [string]$ZeroPdc = '0') @{ tracks = '1'; t0_fx_count = '3'; t0_fx0_pdc = $DelayPdc; t0_fx1_pdc = $NumPdc; t0_fx2_pdc = $ZeroPdc; t0_fx0_bypassed = 'false'; t0_fx1_bypassed = 'false'; t0_fx2_bypassed = 'false'; t0_fx0_offline = 'false'; t0_fx1_offline = 'false'; t0_fx2_offline = 'false' } }
+    $fr = { param($FactSet) $g = [Collections.Generic.List[string]]::new(); $fxBad = Test-HarnessFxReport -Facts $FactSet -Layout $pl -Plugins $plugins -Gaps $g; [pscustomobject]@{ Bad = @($fxBad); Gaps = @($g) } }
+    $read = & $fr (& $facts '512')
+    $withoutGaps = Test-HarnessFxReport -Facts (& $facts '') -Layout $pl -Plugins $plugins
+    $unreadPdc = & $fr (& $facts '')
+    & $add 'latency: a plugin with expectPdc "report" is not compared, whatever it reports; a reading that is not there is a gap' $true (
+        $read.Bad.Count -eq 0 -and $read.Gaps.Count -eq 0 -and $unreadPdc.Bad.Count -eq 0 -and ($unreadPdc.Gaps -join ';') -ceq 't0_fx0_pdc was not read (the latency of d is only reported)' -and
+        (& $fr (& $facts '-1')).Gaps.Count -eq 1 -and $withoutGaps.Count -eq 0)
+    $numeric = try { (& $fr (& $facts '7' '32')).Bad -join ';' } catch { "threw: $($_.Exception.Message)" }
+    & $add "latency: a numeric expectPdc is still compared, 0 included ($numeric)" $true ($numeric -ceq 't0_fx1_pdc=32, expected 64' -and (& $fr (& $facts '7' '64' '0')).Bad.Count -eq 0 -and (& $fr (& $facts '7' '64' '3')).Bad.Count -eq 1)
+    $pf = Get-HarnessPdcFacts (& $facts '512') '' $pl $plugins
+    & $add 'latency: the facts list each FX whose latency is only reported, with what it reported (null when nothing)' $false (
+        $pf.Count -eq 1 -and $pf[0].track -ceq 'V' -and $pf[0].index -eq 0 -and $pf[0].plugin -ceq 'd' -and $pf[0].pdc -eq 512 -and $null -eq (Get-HarnessPdcFacts (& $facts '') '' $pl $plugins)[0].pdc)
+    $reopenPdc = Test-HarnessReopenFacts -Facts @{ before_t0_fx0_pdc = '64'; after1_t0_fx0_pdc = '32' } -Cycles 1
+    & $add 'latency: a latency that changes on reopen is still a problem of savereopen' $true (($reopenPdc -join ';') -ceq "t0_fx0_pdc changed on reopen 1 of 1: '64' -> '32'")
+    $cfgPdc = & $with { param($c) $c['plugins']['delay']['expectPdc'] = 'report' }
+    & $add 'latency: expectPdc "report" is kept as that word, a number as a number' $false (@($cfgPdc.Problems).Count -eq 0 -and $cfgPdc.Config.Plugins['delay'].ExpectPdc -ceq 'report' -and $cfgPdc.Config.Plugins['bus'].ExpectPdc -is [int])
+    # The layout a scenario renders
+    $sl = { param($s) Get-HarnessScenarioLayout -Config $o.Config -Scenario $s }
+    & $add 'scenario layout: the variant layout when there is one, else the layout of the configuration, the dry one for @dry, nothing without a layout' $false (
+        [object]::ReferenceEquals((& $sl (& $byId $o 'bus-trim')), $trim) -and [object]::ReferenceEquals((& $sl (& $byId $o 'routing')), $o.Config.Layouts['routing']) -and
+        (& $sl ([pscustomobject]@{ layout = '@dry' })).Id -ceq '@dry' -and $null -eq (& $sl ([pscustomobject]@{ id = 'i'; kind = 'instances' })))
     $cases
 }
 
@@ -2941,7 +3204,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot }, { Get-SourceCases $scratch }, { Get-RenderCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-VariantCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {

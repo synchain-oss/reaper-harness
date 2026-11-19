@@ -17,6 +17,10 @@
 #       FileAtStart (a list): whether the file that variable names was there when a launch started; the launch writes it
 #       CopiesAtStart (a list): how many copies of the step's reports were there when a driver step started
 #       JSFX are found by their add name ("JS:<path under Effects>") in the configuration directory's Effects
+#       OwnModules: the module list of a learn launch shows only the binaries of the plugins that launch added (otherwise
+#       every launch shows every configured binary)
+#       PdcUnread: no latency is read (pdc= stays empty), in the learn step and in device, savereopen and transport
+#       LearnNoResult (n): the n-th learn launch since Set-FakeReaper writes no result
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
 #   ConvertFrom-FakeLua <text>                        reads a job file written by ConvertTo-HarnessLuaTable
 
@@ -61,9 +65,13 @@ $script:At = 0
 $script:DelayParam = 'Delay (samples)'
 $script:ReportParam = 'Report delay as PDC'
 
-function Set-FakeReaper([hashtable]$Spec) { $script:Spec = $Spec }
+$script:LearnLaunches = 0
+$script:JobBinaries = $null # the binaries the learn step of the last launch added (OwnModules)
+function Set-FakeReaper([hashtable]$Spec) { $script:Spec = $Spec; $script:LearnLaunches = 0 }
 function Get-FakeReaperLauncher { { param($psi) Invoke-FakeLaunch $psi } }
-function Get-FakeModuleSampler { { param($proc) @(Get-FakeBinaries) } }
+function Get-FakeModuleSampler { { param($proc) ($script:Spec['OwnModules'] -and $null -ne $script:JobBinaries) ? @($script:JobBinaries) : @(Get-FakeBinaries) } }
+function Get-FakeBinary([string]$Bundle) { [IO.Path]::Combine($script:Spec.CfgDir, 'plugins', $Bundle, 'Contents', 'x86_64-win', $Bundle) }
+function Get-FakePdcText($fx) { $script:Spec['PdcUnread'] ? '' : "$(Get-FakePdc $fx)" }
 
 function Get-FakeBinaries {
     foreach ($p in $script:Spec.Plugins.get_Values()) { [IO.Path]::Combine($script:Spec.CfgDir, 'plugins', $p.Bundle, 'Contents', 'x86_64-win', $p.Bundle) }
@@ -306,7 +314,7 @@ function Add-FakeTracks($Lines, [string]$Prefix, [string]$Project, $Reads) {
             $q = "${Prefix}t${t}_fx${f}_"
             $pdc = Get-FakePdc $x
             if (-not $x.Bypassed) { $chain += $pdc }
-            foreach ($kv in @("name=$($x.Name)", "pdc=$pdc", "chain_pdc_actual=$chain", "bypassed=$($x.Bypassed.ToString().ToLowerInvariant())", 'offline=false')) { $Lines.Add($q + $kv) }
+            foreach ($kv in @("name=$($x.Name)", "pdc=$(Get-FakePdcText $x)", "chain_pdc_actual=$chain", "bypassed=$($x.Bypassed.ToString().ToLowerInvariant())", 'offline=false')) { $Lines.Add($q + $kv) }
         }
     }
     $k = 0
@@ -353,13 +361,14 @@ function Invoke-FakeLearn($job, $report) {
         $null = $rpp.Append("  <TRACK`n    NAME `"$trackName`"`n")
         if (-not $fx) { $report.Add("${key}idx=-1"); $null = $rpp.Append("  >`n"); continue }
         $ident = ($fx.Kind -eq 'JS') ? $fx.Ident : $fx.Plugin.Ident
+        if ($fx.Kind -ne 'JS') { $script:JobBinaries = @($script:JobBinaries) + (Get-FakeBinary $fx.Plugin.Bundle) }
         $k = 0
         $readBack = foreach ($prm in @($e['params'])) {
             $k++
             $fx.Params[$prm['name']] = [double]$prm['value']
             "${key}p$k=$(Format-Fake $prm['value'])"; "${key}p${k}_display=$(Get-FakeDisplay $fx $prm['name'] ([double]$prm['value']))"
         }
-        foreach ($kv in @('idx=0', "name=$($fx.Name)", "ident=$ident", "pdc=$(Get-FakePdc $fx)", 'offline=false', 'nparams=4')) { $report.Add($key + $kv) }
+        foreach ($kv in @('idx=0', "name=$($fx.Name)", "ident=$ident", "pdc=$(Get-FakePdcText $fx)", 'offline=false', 'nparams=4')) { $report.Add($key + $kv) }
         foreach ($line in @($readBack)) { $report.Add($line) }
         $null = $rpp.Append("    <FXCHAIN`n      BYPASS 0 0 0`n")
         foreach ($line in (Format-FakeFxBlock $fx)) { $null = $rpp.Append("      $line`n") }
@@ -475,6 +484,9 @@ function Invoke-FakeStep([string]$JobFile) {
     switch ($job['step']) {
         'learn' {
             $behave = 'linger'
+            $script:JobBinaries = @()
+            $script:LearnLaunches++
+            if ($script:Spec['LearnNoResult'] -eq $script:LearnLaunches) { return $behave }
             Invoke-FakeLearn $job $report
         }
         'device' {
@@ -514,6 +526,7 @@ function Invoke-FakeStep([string]$JobFile) {
 
 function Invoke-FakeLaunch($psi) {
     $given = @($psi.ArgumentList)
+    $script:JobBinaries = $null
     $script:Spec.Seen.Add($given -join ' ')
     if ($script:Spec['EnvName']) {
         $told = [string]$psi.Environment[$script:Spec.EnvName]

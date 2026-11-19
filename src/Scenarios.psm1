@@ -99,6 +99,7 @@ function New-HarnessContext {
         Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new(); ToolJsfx = $ToolJsfx
         SourceCopies = @{} # file key -> the checked copy of this round (Copy-HarnessSourceFiles)
         LearnReads = @{} # variant key -> what the learn launch read back (Invoke-HarnessLearn)
+        LearnBatchOf = @{}; LearnBatchCount = 0 # variant key -> the learn batch planned to learn it, and how many there are
         Retries = [Collections.Generic.List[object]]::new() # launches started once more (see Invoke-HarnessLaunch)
         Started = [Collections.Generic.List[object]]::new() # every process started: Pid, StartUtc
         StillRunning = $null # set when the watchdog could not end a process: Pid, Label, Lock
@@ -248,6 +249,15 @@ function Get-HarnessSignal {
 
 function Get-HarnessLayout($Ctx, [string]$Id) { ($Id -ceq '@dry') ? (Get-HarnessDryLayout) : $Ctx.Config.Layouts[$Id] }
 
+# The layout a scenario renders: the one of its variant (its layout with the variant on top) when it has one, else its
+# layout as Get-HarnessLayout gives it; $null without a layout
+function Get-HarnessScenarioLayout([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$Scenario) {
+    $p = $Scenario.PSObject.Properties
+    if ($p['variantLayout'] -and $Scenario.variantLayout) { return $Scenario.variantLayout }
+    if (-not ($p['layout'] -and $Scenario.layout -is [string])) { return $null }
+    ($Scenario.layout -ceq '@dry') ? (Get-HarnessDryLayout) : $Config.Layouts[$Scenario.layout]
+}
+
 # The files of one render in the work directory (pure): Project, Wav (the master) and Stems (track name -> file).
 # With stems REAPER writes <Name>-stem-<track>.wav per stem and <Name>-stem-Master.wav for the master (the render
 # pattern of New-HarnessProjectText), so a stem never takes the name of another render of the scenario
@@ -314,10 +324,11 @@ function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Lab
 # the files are deleted before the start, like the result. Copies: the copies of those files the driver may write
 # (Get-HarnessReportCopies), deleted before the start and before a retry; the caller deletes them once read, and this
 # function when the launch throws (then nobody reads them). Outputs: further files the step writes, for the retry after
-# a licence reminder. Result: the key=value lines as a hashtable.
+# a licence reminder. Label: what the launch is called in Ctx.LaunchLog and Ctx.Retries (default: Step). Result: the
+# key=value lines as a hashtable.
 function Invoke-HarnessLuaStep {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Step, [hashtable]$Job = @{}, [hashtable]$Watch = @{},
-          [double]$TimeoutSec = 0, [double]$KillAfterSec = 0, [hashtable]$ReportEnv = @{}, [string[]]$Copies = @(), [string[]]$Outputs = @())
+          [double]$TimeoutSec = 0, [double]$KillAfterSec = 0, [hashtable]$ReportEnv = @{}, [string[]]$Copies = @(), [string[]]$Outputs = @(), [string]$Label = '')
     $jobFile = Join-Path $Ctx.Work "$Name.job.lua"
     $resultFile = Join-Path $Ctx.Work "$Name.result"
     $environment = @{ REAPER_HARNESS_JOB = $jobFile }
@@ -328,7 +339,7 @@ function Invoke-HarnessLuaStep {
     foreach ($k in $Job.get_Keys()) { $full[$k] = $Job[$k] }
     Write-HarnessText -Path $jobFile -Text (ConvertTo-HarnessLuaTable $full)
     try {
-        $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Step -Outputs (@($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies + @($Job['saveAs'] | Where-Object { $_ }) + $Outputs) -HostArgs @{
+        $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label ($Label ? $Label : $Step) -Outputs (@($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies + @($Job['saveAs'] | Where-Object { $_ }) + $Outputs) -HostArgs @{
             ReaperArgs = @($Ctx.Driver); Environment = $environment; WatchFiles = $Watch
             TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
         }
@@ -377,9 +388,11 @@ function Test-HarnessParamValue([string]$Read, [string]$Display, $Want) {
 
 # Pure function: the driver's report of one project (prefix '' / before_ / after_) against the layout. Checks the
 # track and FX counts, the learned names, the bypass states, the latency (pdc == expectPdc), that no FX is
-# offline, and the configured parameters. Bypass: plugin ids bypassed on top of the layout ('*' = all).
+# offline, and the configured parameters. Bypass: plugin ids bypassed on top of the layout ('*' = all). The latency of a
+# plugin with expectPdc "report" is not compared: given Gaps, a reading that is not there goes into it (no evidence).
 function Test-HarnessFxReport {
-    param([Parameter(Mandatory)][hashtable]$Facts, [string]$Prefix = '', [Parameter(Mandatory)]$Layout, [hashtable]$Names = @{}, $Plugins, [string[]]$Bypass = @(), [object[]]$Reads = @())
+    param([Parameter(Mandatory)][hashtable]$Facts, [string]$Prefix = '', [Parameter(Mandatory)]$Layout, [hashtable]$Names = @{}, $Plugins, [string[]]$Bypass = @(), [object[]]$Reads = @(),
+          [Collections.Generic.List[string]]$Gaps = $null)
     $bad = [Collections.Generic.List[string]]::new()
     $p = $Prefix
     if ($Facts["${p}tracks"] -ne "$($Layout.Tracks.Count)") { $bad.Add("${p}tracks=$($Facts["${p}tracks"]), expected $($Layout.Tracks.Count)") }
@@ -393,7 +406,9 @@ function Test-HarnessFxReport {
             $Want = $Names[$fx.Plugin]
             if ($Want -and $Facts["${q}name"] -cne $Want) { $bad.Add("${q}name='$($Facts["${q}name"])', expected '$Want'") }
             $pdc = $Plugins[$fx.Plugin].ExpectPdc
-            if ($Facts["${q}pdc"] -ne "$pdc") { $bad.Add("${q}pdc=$($Facts["${q}pdc"]), expected $pdc") }
+            # -is, not -eq 'report': an integer on the left would convert the text and throw
+            if ($pdc -is [string]) { if ($null -ne $Gaps -and [string]$Facts["${q}pdc"] -cnotmatch '\A[0-9]{1,9}\z') { $Gaps.Add("${q}pdc was not read (the latency of $($fx.Plugin) is only reported)") } }
+            elseif ($Facts["${q}pdc"] -ne "$pdc") { $bad.Add("${q}pdc=$($Facts["${q}pdc"]), expected $pdc") }
             $off = ($fx.Bypass -or ('*' -cin $Bypass) -or ($fx.Plugin -cin $Bypass)) ? 'true' : 'false'
             if ($Facts["${q}bypassed"] -ne $off) { $bad.Add("${q}bypassed=$($Facts["${q}bypassed"]), expected $off") }
             if ($Facts["${q}offline"] -ne 'false') { $bad.Add("${q}offline=$($Facts["${q}offline"]) (the plugin did not load)") }
@@ -406,6 +421,19 @@ function Test-HarnessFxReport {
         if ($why) { $bad.Add("${q}parameter '$($r.name)' $why") }
     }
     , $bad.ToArray()
+}
+
+# Pure function: the latency each FX of a plugin with expectPdc "report" reported (prefix as above): track, index,
+# plugin, pdc (null when it was not read)
+function Get-HarnessPdcFacts([Parameter(Mandatory)][hashtable]$Facts, [string]$Prefix = '', [Parameter(Mandatory)]$Layout, $Plugins) {
+    , @(for ($t = 0; $t -lt $Layout.Tracks.Count; $t++) {
+            $fxs = @($Layout.Tracks[$t].Fx)
+            for ($f = 0; $f -lt $fxs.Count; $f++) {
+                if ($Plugins[$fxs[$f].Plugin].ExpectPdc -isnot [string]) { continue }
+                $v = [string]$Facts["${Prefix}t${t}_fx${f}_pdc"]
+                [ordered]@{ track = $Layout.Tracks[$t].Name; index = $f; plugin = $fxs[$f].Plugin; pdc = (($v -cmatch '\A[0-9]{1,9}\z') ? [int]$v : $null) }
+            }
+        })
 }
 
 # Pure function: the FX of the layout that run with a named state, against a project REAPER saved with them loaded
@@ -536,7 +564,7 @@ function Invoke-HarnessRenderScenario($Ctx, $s) {
     $af = [bool]$s.host.AnticipativeFx
     $rfs = [bool]$s.host.RunFxWhenStopped
     $inform = [bool]$s.host.InformOfflineState
-    $Layout = Get-HarnessLayout $Ctx $s.layout
+    $Layout = Get-HarnessScenarioLayout $Ctx.Config $s
     $Stems = @($s.stems)
     $refStems = @($Stems | Where-Object { $_.Compare -eq 'reference' } | ForEach-Object { $_.Track })
     $c = $s.compare
@@ -552,7 +580,8 @@ function Invoke-HarnessRenderScenario($Ctx, $s) {
             if ($res0.Why) { return New-HarnessOutcome INCOMPLETE "the first render failed: $($res0.Why)" }
         }
         'variant' {
-            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-variant" -Layout (Get-HarnessLayout $Ctx $c.Layout) -Sr $s.sr -Block $c.Block -Mode $c.Mode -Channels $ch -Bypass $c.Bypass -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform
+            $vLayout = ($c.PSObject.Properties['SameLayout'] -and $c.SameLayout) ? $Layout : (Get-HarnessLayout $Ctx $c.Layout)
+            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-variant" -Layout $vLayout -Sr $s.sr -Block $c.Block -Mode $c.Mode -Channels $ch -Bypass $c.Bypass -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform
             $res0 = Invoke-HarnessRender $Ctx $ref.Project $ref.Wav -Also @($ref.Stems.get_Values())
             if ($res0.Why) { return New-HarnessOutcome INCOMPLETE "the variant render failed: $($res0.Why)" }
         }
@@ -591,8 +620,9 @@ function Invoke-HarnessDeviceScenario($Ctx, $s) {
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step device -Job $Job
     if ($lua.Why) { return New-HarnessOutcome INCOMPLETE $lua.Why }
     $bad = [Collections.Generic.List[string]]::new()
+    $noEvidence = [Collections.Generic.List[string]]::new()
     foreach ($p in (Test-HarnessHostReadback -Facts $lua.Result -Block $s.block -Sr $s.sr -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform)) { $bad.Add($p) }
-    foreach ($p in (Test-HarnessFxReport -Facts $lua.Result -Layout $Layout -Names $Ctx.Names -Plugins $Ctx.Config.Plugins -Reads $Reads)) { $bad.Add($p) }
+    foreach ($p in (Test-HarnessFxReport -Facts $lua.Result -Layout $Layout -Names $Ctx.Names -Plugins $Ctx.Config.Plugins -Reads $Reads -Gaps $noEvidence)) { $bad.Add($p) }
     $proof = $null
     if ($hasStates) {
         if ($lua.Result['saved'] -ne 'true' -or -not (Test-Path -LiteralPath $Job.saveAs)) { return New-HarnessOutcome INCOMPLETE 'the copy that proves the states was not saved' }
@@ -600,10 +630,19 @@ function Invoke-HarnessDeviceScenario($Ctx, $s) {
         foreach ($p in $proof.Problems) { $bad.Add($p) }
     }
     if ($bad.Count) { return New-HarnessOutcome FAIL ($bad -join '; ') }
-    $fxCount = @($Layout.Tracks | ForEach-Object { $_.Fx }).Count
-    $summary = "block $($s.block) and rate $($s.sr) read back, anticipative FX $($af ? 'on' : 'off'); $fxCount FX report the configured latency; $($Reads.Count) parameters read back"
+    $reportOnly = Get-HarnessPdcFacts $lua.Result '' $Layout $Ctx.Config.Plugins
+    $fxCount = @($Layout.Tracks | ForEach-Object { $_.Fx }).Count - $reportOnly.Count
+    $summary = "block $($s.block) and rate $($s.sr) read back, anticipative FX $($af ? 'on' : 'off'); $fxCount FX report the configured latency$($reportOnly.Count ? ", $($reportOnly.Count) report it only" : ''); $($Reads.Count) parameters read back"
     if ($proof) { $summary += "; states saved back unchanged: $($proof.Proven -join ', ')" }
-    New-HarnessOutcome PASS $summary
+    Get-HarnessGapOutcome PASS $summary $noEvidence $reportOnly
+}
+
+# An outcome with what could not be read on top (Gaps: INCOMPLETE unless it is FAIL already), and the latency of the
+# report-only FX in its facts (only when there are any)
+function Get-HarnessGapOutcome([string]$Status, [string]$Detail, [Collections.Generic.List[string]]$Gaps, [object[]]$PdcFacts, $Facts = $null) {
+    if ($PdcFacts.Count) { if ($null -eq $Facts) { $Facts = [ordered]@{} }; $Facts['pdc'] = $PdcFacts }
+    if ($Gaps.Count) { $Status = Get-HarnessOutcomeStatus @($Status, 'INCOMPLETE'); $Detail += "; no evidence: $($Gaps -join '; ')" }
+    New-HarnessOutcome $Status $Detail $Facts
 }
 
 function Invoke-HarnessSaveReopenScenario($Ctx, $s) {
@@ -618,9 +657,10 @@ function Invoke-HarnessSaveReopenScenario($Ctx, $s) {
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step savereopen -Job @{ project = $r.Project; saveAs = $copy; reads = (ConvertTo-LuaReads $Reads); cycles = $reopens }
     if ($lua.Why) { return New-HarnessOutcome INCOMPLETE $lua.Why }
     $bad = [Collections.Generic.List[string]]::new()
+    $noEvidence = [Collections.Generic.List[string]]::new()
     $prefixes = @('before_') + @(1..$reopens | ForEach-Object { "after${_}_" })
     foreach ($Prefix in $prefixes) {
-        foreach ($p in (Test-HarnessFxReport -Facts $lua.Result -Prefix $Prefix -Layout $Layout -Names $Ctx.Names -Plugins $Ctx.Config.Plugins -Bypass $s.bypass -Reads $Reads)) { $bad.Add($p) }
+        foreach ($p in (Test-HarnessFxReport -Facts $lua.Result -Prefix $Prefix -Layout $Layout -Names $Ctx.Names -Plugins $Ctx.Config.Plugins -Bypass $s.bypass -Reads $Reads -Gaps $noEvidence)) { $bad.Add($p) }
     }
     foreach ($p in (Test-HarnessReopenFacts -Facts $lua.Result -Cycles $reopens)) { $bad.Add($p) }
     if ($lua.Result['saved'] -ne 'true') { $bad.Add('no new project file was saved') }
@@ -642,7 +682,7 @@ function Invoke-HarnessSaveReopenScenario($Ctx, $s) {
     if ($res2.Why) { return New-HarnessOutcome INCOMPLETE "the render of the reopened project failed: $($res2.Why)" }
     $cmp = Compare-HarnessWavFiles -A $reopened -B $r.Wav -LagSearch ([int]$Ctx.Limits.lagSearch) -HeadSeconds ([double]$Ctx.Limits.headSeconds)
     $stateText = $proof ? "; states saved back unchanged: $($proof.Proven -join ', ')" : ''
-    New-HarnessOutcome $cmp.Status "FX state unchanged after $reopens save and reopen cycle$($reopens -eq 1 ? '' : 's') ($($Reads.Count) parameters)$stateText; reopened render vs original: $($cmp.Detail)"
+    Get-HarnessGapOutcome $cmp.Status "FX state unchanged after $reopens save and reopen cycle$($reopens -eq 1 ? '' : 's') ($($Reads.Count) parameters)$stateText; reopened render vs original: $($cmp.Detail)" $noEvidence (Get-HarnessPdcFacts $lua.Result 'before_' $Layout $Ctx.Config.Plugins)
 }
 
 function Invoke-HarnessInstancesScenario($Ctx, $s) {
@@ -698,11 +738,13 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
     if ($lua.Why) { return New-HarnessOutcome INCOMPLETE $lua.Why }
     $f = $lua.Result
     $bad = [Collections.Generic.List[string]]::new()
+    $noEvidence = [Collections.Generic.List[string]]::new()
     foreach ($p in (Test-HarnessHostReadback -Facts $f -Block $s.block -Sr $s.sr -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform)) { $bad.Add($p) }
-    foreach ($p in (Test-HarnessFxReport -Facts $f -Layout $Layout -Names $Ctx.Names -Plugins $Ctx.Config.Plugins -Reads $Reads)) { $bad.Add($p) }
+    foreach ($p in (Test-HarnessFxReport -Facts $f -Layout $Layout -Names $Ctx.Names -Plugins $Ctx.Config.Plugins -Reads $Reads -Gaps $noEvidence)) { $bad.Add($p) }
     if ($bad.Count) { return New-HarnessOutcome FAIL ($bad -join '; ') }
     $idents = @{ 'harness-block-probe' = $Ctx.ToolJsfx['harness-block-probe'].Ident; 'harness-feed' = $Ctx.ToolJsfx['harness-feed'].Ident }
     $gap = Test-HarnessTransportSetup -Facts $f -Scenario $s -Idents $idents -FxCount @($Layout.Tracks[$Job.track].Fx).Count
+    $gap = @($gap) + @($noEvidence)
     if ($gap.Count) { return New-HarnessOutcome INCOMPLETE ($gap -join '; ') }
     $perState = [Collections.Generic.List[object]]::new()
     $judged = for ($i = 0; $i -lt $s.states.Count; $i++) {
@@ -718,6 +760,8 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
         $j
     }
     $seen = [ordered]@{ track = $s.track; runFxWhenStopped = $rfs; runFxAfterStopMs = $f['cfg_runafterstop']; settleSamples = $f['settle']; feed = $feed; states = $perState.ToArray() }
+    $reportOnly = Get-HarnessPdcFacts $f '' $Layout $Ctx.Config.Plugins
+    if ($reportOnly.Count) { $seen.pdc = $reportOnly }
     New-HarnessOutcome (Get-HarnessOutcomeStatus @($judged | ForEach-Object { $_.Status })) (@($judged | ForEach-Object { $_.Line }) -join ' | ') $seen
 }
 
@@ -755,7 +799,7 @@ function Get-HarnessScenarioKinds { , @($script:Handlers.get_Keys() | Sort-Objec
 function Get-HarnessApi {
     @{
         Outcome = ${function:New-HarnessOutcome}; NewRun = ${function:New-HarnessRun}; Render = ${function:Invoke-HarnessRender}; LuaStep = ${function:Invoke-HarnessLuaStep}
-        Compare = ${function:Compare-HarnessWavFiles}; HostFailure = ${function:Get-HarnessHostFailure}; Layout = ${function:Get-HarnessLayout}; Signal = ${function:Get-HarnessSignal}
+        Compare = ${function:Compare-HarnessWavFiles}; HostFailure = ${function:Get-HarnessHostFailure}; Layout = ${function:Get-HarnessLayout}; ScenarioLayout = ${function:Get-HarnessScenarioLayout}; Signal = ${function:Get-HarnessSignal}
         Reference = ${function:Get-HarnessReference}; HidePaths = ${function:Hide-HarnessPaths}; FxReport = ${function:Test-HarnessFxReport}; ParamReads = ${function:Get-HarnessParamReads}
         Judge = ${function:Invoke-HarnessCompare}; StateProof = ${function:Test-HarnessStateProof}; FxBlocks = ${function:Get-HarnessFxBlocks}
     }
@@ -780,6 +824,6 @@ function Invoke-HarnessScenario {
 }
 
 Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, Hide-HarnessFacts, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
-    Get-HarnessLayout, Get-HarnessRunFiles, Get-HarnessReferenceName, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
+    Get-HarnessLayout, Get-HarnessScenarioLayout, Get-HarnessPdcFacts, Get-HarnessRunFiles, Get-HarnessReferenceName, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
     Get-HarnessScenarioKinds, Get-HarnessApi, Invoke-HarnessScenario, Get-HarnessSkipMarkerHit, Get-HarnessWorkrender, Test-HarnessStateProof, Invoke-HarnessCompare,
     Test-HarnessHostReadback, Test-HarnessReopenFacts, Get-HarnessRunAllOnStop, Get-HarnessVstFullState, Get-HarnessRenderGap
