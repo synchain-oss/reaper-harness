@@ -160,6 +160,7 @@ A layout is a list of tracks in project order.
 | `name` | yes | unique within the layout; no double quotes or control characters |
 | `source` | yes | the track carries the test signal |
 | `signal` | | this track's own signal: `seed`, `noiseDb`, `sine` replace the top-level ones; only on a `source` track |
+| `file` | | a WAV file the track plays instead of the test signal, relative to the configuration file; only on a `source` track and not together with `signal` (see [source files](#source-files)) |
 | `folder` | | a REAPER folder (bus) track |
 | `parent` | | name of the folder track above this one; children follow their folder directly |
 | `volume` | | linear track volume 0 … 4, default 1 |
@@ -193,6 +194,53 @@ Measured on REAPER 7.82 (offline render, 48 kHz, REAPER's default preferences): 
 stem and sends nothing, through post-fader, pre-fader and pre-FX sends alike. Pan is REAPER's default for stereo
 tracks (balance: the far channel is scaled, -0.5 halves the right channel, 6.02 dB below the left).
 
+### source files
+
+`"file": "audio/voice.wav"` on a `source` track plays that file instead of the test signal. The path follows the
+rules of extension paths: relative to the configuration file and inside its directory, links and junctions resolved.
+
+Before REAPER starts, every file a picked scenario uses (in its layout or in the layout it compares with) is checked
+once: its header is read (not its samples) and its SHA-256 taken. A usage error (exit 64) that lists every problem at
+once, and REAPER is never started, when
+
+- the file is not there, is not a WAV file, or its path leaves the directory of the configuration file;
+- it is not pcm16, pcm24 or float32 (what a 32-bit float render carries exactly; pcm32 and float64 are refused);
+- it has other than 1 or 2 channels, holds no samples, or is longer than 600 s;
+- a scenario using it runs at another `sr` (nothing is resampled; a matrix is checked per expanded scenario), or
+  renders `mono` while the file has two channels (nothing is mixed down).
+
+Scenarios of extension kinds have no `sr` the harness knows of, so before the start they are not checked against the
+rate; when one of them renders a file at another rate than the render, or with more channels, `NewRun` refuses
+([EXTENDING.md](EXTENDING.md)) and the row is INCOMPLETE: nothing is resampled or mixed down for them either. Files
+that only scenarios left out by `-Only` use are not read at all.
+
+Each round copies every file into its work directory once, as `_source-<first 12 hex digits of its SHA-256>.wav`, and
+checks the copy's SHA-256 and its header (format, channels, rate, frames) against those taken before the start: header
+and hash were two reads of the file, and a file written over in between would pair the facts of one content with the
+hash of another. REAPER only ever sees the copy (it writes peak files next to a source, never into the directory of
+the configuration file). When either differs, the copy is deleted and every scenario that uses the file is
+INCOMPLETE: `source file <path> changed since it was checked`. Another name of the same content still gets a copy of its
+own. A copy is never read-only, whatever the file is. The copies are work files: removed after a green round unless
+`-KeepWork` is given.
+
+The item of a file track starts at 0 and is as long as the file: frames / rate, written with every digit and never
+short of the last frame (when frames / rate times the rate falls short of the frames in floating point, the next
+larger number is written). The items of the other source tracks keep the length of the test signal
+(`signal.seconds`); a project renders as long as its longest item. A file is played as it is: the shift and the volume
+change of the built-in negative cases apply to their own internal layout only.
+
+`render`, `device` and `savereopen` play the file wherever they would play the test signal, the dry reference
+included. `transport` places no items (what reaches the tested track comes through its input): a file in its layout is
+checked and listed like any other, and not played. `instances` has no layout.
+
+A file of one channel on a track of a two-channel render comes out on both channels, equal to each other and to the
+file: measured on REAPER 7.82 (offline render, 48 kHz, a track with no FX at pan centre and volume 1, REAPER's default
+project settings), the left and the right channel were sample-identical to each other and to the pcm24 samples of the
+file, 0.00 dB from it, with no pan-law attenuation; with `mono: true` the one-channel render was identical to the file
+too ([validation record](validation/2026-11-19-file-sources.md)). Other pan positions were not measured.
+
+The result lists each file with its full SHA-256 ([RESULTS.md](RESULTS.md#top-level)).
+
 ## JSFX
 
 The tool ships one JSFX for configurations in `jsfx/`, written for it (MIT); the two others there are tools of the
@@ -211,7 +259,10 @@ Measured on REAPER 7.82 (offline render, 48 kHz): with the report on, a 64-sampl
 renders bit-identical to the dry render at block sizes 32 and 2048 (in the master and in stems); with the report
 off, a 16-sample delay renders 16 samples late. In a mix of several tracks where one reports latency, the stems
 were bit-identical to the dry ones but the master differed from the dry master by about -156 dBFS (rounding in the
-compensated sum): give such a scenario a `maxDiffDb`.
+compensated sum): give such a scenario a `maxDiffDb`. These renders used the test signal, which holds no exact zero
+sample. With a [source file](#source-files) that holds digital silence, the active JSFX left values of at most 1.5e-16
+(about -316 dBFS) where the file is exactly 0, and nothing elsewhere; bypassed, it rendered bit-identical
+([validation record](validation/2026-11-19-file-sources.md)).
 
 ## scenarios
 
@@ -285,6 +336,7 @@ Renders the layout and compares the render with a reference.
 | `energyRatioDb` | `"A/B"` → `[min, max]`: RMS of channel A minus RMS of channel B of the test render, in dB |
 | `rmsChangeDb` | channel → `[min, max]`: RMS of the test render minus RMS of the reference, per channel, in dB |
 | `stems` | tracks rendered as files of their own, see [stems](#stems) |
+| `keep` | `true`: keep the render and its stems under `renders/` of the result directory, see [keep](#keep) |
 
 The pass criteria are fields of the scenario itself, not a nested object: in negative cases `expect` names the
 expected outcome. Both renders must be readable, comparable (same rate and channel count) and free of NaN and Inf
@@ -330,6 +382,27 @@ fader and pan.
 
 There is no switch for bypassing an FX in the middle of a render; render two layouts (or the same layout with and
 without `bypass`) and compare them instead.
+
+### keep
+
+`"keep": true` on a `render` scenario (on no other kind, and not in negative cases: usage errors) keeps what it
+rendered. After its verdict, whatever the verdict, its render moves out of the work directory to
+`<result directory>/renders/<run stamp>/run<round>/<id>.wav` and each stem to `<id>-stem-<track>.wav` next to it;
+the references (dry, first, variant) are not kept. A scenario of a matrix keeps each expanded scenario under its own
+id. The run stamp is the one of the work directories (`yyyyMMdd-HHmmss`), shared by all rounds of a run.
+
+Each kept scenario appends one line to `renders/<run stamp>/manifest.jsonl` as soon as it is done (the format is in
+[RESULTS.md](RESULTS.md#kept-renders)): what the files are, how they were rendered, what each source track played,
+and every FX with what REAPER read back. A render that failed (no file) still gets its line, with nothing moved.
+
+A kept file is never overwritten: when its place is taken (by another scenario whose id and stem name give the same
+file name, or by a run started in the same second, which finds the manifest there and keeps nothing), the file stays
+in the work directory and the scenario is INCOMPLETE with the reason (a FAIL stays FAIL). The same holds when the
+place would not be under the result directory, links and junctions resolved, or when its real path cannot be read.
+`renders/<run stamp>/` itself is checked that way before anything is made in it: when it fails, nothing of the run is
+kept and no manifest is written. A kept file that cannot be read afterwards (a scanner holding it) stays kept, its line
+is written with what could be read, and the scenario is INCOMPLETE. A render with NaN or Inf samples keeps its FAIL
+and is kept all the same, its line counting them.
 
 ### device
 

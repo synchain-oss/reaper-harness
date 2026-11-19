@@ -32,7 +32,7 @@ your own REAPER setup.
 
 | kind | |
 |---|---|
-| `render` | renders a layout (tracks, folders, sends, pan and mute, FX chains with parameters set by name or named plugin states, a test signal per track) and compares it with a dry render, a repeat render or a variant (another block size, render mode, bypass or layout), or judges it on its own: bit-identical, or within a residual, at an expected lag, with peak, silence and per-channel level and balance checks; the master and any track as a stem of its own |
+| `render` | renders a layout (tracks, folders, sends, pan and mute, FX chains with parameters set by name or named plugin states, a test signal or a WAV file of your own per track) and compares it with a dry render, a repeat render or a variant (another block size, render mode, bypass or layout), or judges it on its own: bit-identical, or within a residual, at an expected lag, with peak, silence and per-channel level and balance checks; the master and any track as a stem of its own, kept on request |
 | `device` | the dummy device runs at the configured block size, sample rate and anticipative FX setting; every FX is loaded, not offline, reports the expected latency, reads back its parameters and holds the state it was given |
 | `savereopen` | saving and reopening, once or many times, keeps every FX, parameter and state, and the reopened project renders bit-identically |
 | `instances` | adding and removing instances many times does not grow handles or memory beyond limits |
@@ -41,7 +41,9 @@ your own REAPER setup.
 A small JSFX that ships with the tool delays the signal and reports the delay as latency (or not), so plugin delay
 compensation can be tested without depending on the effects that come with REAPER; two more count the blocks a chain
 is run with and feed a track's input for `transport`. A test build of a plugin can [report counts of its own](docs/CONFIG.md#reports),
-such as whether the host told it a render was offline; they are judged next to the audio. Extensions add
+such as whether the host told it a render was offline; they are judged next to the audio. A render scenario can
+[keep its render and stems](docs/CONFIG.md#keep) next to the result file, with a manifest line saying what each file
+is, what each track played and every FX as rendered, for analysis outside the tool. Extensions add
 product-specific kinds and driver steps ([docs/EXTENDING.md](docs/EXTENDING.md)).
 
 ## Quick start

@@ -4,6 +4,24 @@ What each version of reaper-harness changed. Before 1.0 the command line may cha
 configuration file and the result file are versioned on their own by their `schema` number: a change to either format
 stays backward compatible or raises that number, and the entry of that version says how to migrate.
 
+## Unreleased
+
+- A track can play a WAV file of your own instead of the test signal (`layouts.<id>.tracks[].file`): pcm16, pcm24 or
+  float32, 1 or 2 channels, at the rate of every scenario that uses it. It is checked before REAPER starts, copied into
+  the work directory each round (the copy's hash and header checked again), never resampled or mixed down (by the
+  kinds of extensions neither), and listed with its SHA-256 in the result file (`sources`). Configuration and result
+  file stay `schema: 1`.
+- `keep: true` on a `render` scenario keeps its render and stems under `renders/<run stamp>/run<round>/` of the
+  result directory (links and junctions resolved), whatever the verdict and never over another file, and appends a
+  line per kept scenario to `renders/<run stamp>/manifest.jsonl`: the files with their full SHA-256, peak and NaN / Inf
+  counts, the render settings, what each source track played, and every FX as rendered (bypass, state, the hash of its
+  block in the project, the parameters and latency REAPER read back at the learn launch). The row of a kept render
+  repeats its line in `facts.kept`; the result file names the manifest (`manifest`).
+- The result file names the version of the harness (`toolVersion`) and the commit it ran from (`toolCommit`, read
+  from its `.git` without running git; null when it cannot be read). Both are new fields: `schema` stays 1.
+- The learn launch reads each plugin's latency after its parameters are set and it had a second to settle, no longer
+  right after adding it.
+
 ## v0.1.0 (2026-11-07)
 
 The first preview release. Configuration `schema: 1`, result file `schema: 1`.

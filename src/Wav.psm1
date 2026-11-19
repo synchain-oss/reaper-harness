@@ -3,6 +3,8 @@
 # WAV reading, comparison and test signals, in C# compiled at load time (no external program).
 #   Read-HarnessWav           reads PCM 16/24/32, float 32/64 and WAVE_FORMAT_EXTENSIBLE; a damaged or unsupported
 #                             file throws an error whose message starts with "WAV:" (never a crash)
+#   Read-HarnessWavHeader     the same checks, the format facts only (no samples are read)
+#   Get-HarnessWavScan        format facts, peak, NaN and Inf counts, reading the samples block by block
 #   Compare-HarnessWavFiles   reads two files and compares them; returns facts (Get-HarnessCompareFacts) and the
 #                             verdict (Get-HarnessCompareVerdict)
 #   Get-HarnessCompareVerdict pure function: facts + criteria -> PASS / FAIL / INCOMPLETE and one stable English line
@@ -22,8 +24,11 @@ using System.Text;
 
 public sealed class HarnessWavData {
     public int Rate; public int Channels; public long Frames; public string Format; public bool Extensible;
-    public double[] Samples; // interleaved
+    public double[] Samples; // interleaved; null when only the header was read
+    public long DataAt;      // where the samples start in the file
 }
+
+public sealed class HarnessWavScan { public HarnessWavData Info; public double Peak; public long Nan, Inf; }
 
 public sealed class HarnessCompareFacts {
     public int RateA, RateB, ChannelsA, ChannelsB; public long FramesA, FramesB; public string FormatA, FormatB;
@@ -42,44 +47,62 @@ public sealed class HarnessCompareFacts {
 public static class HarnessWav {
     static Exception Bad(string why) { return new InvalidDataException("WAV: " + why); }
 
-    public static HarnessWavData Read(string path) {
-        byte[] b;
-        try { b = File.ReadAllBytes(path); } catch (Exception e) { throw Bad("cannot read the file (" + e.GetType().Name + ")"); }
-        if (b.Length < 12 || Encoding.ASCII.GetString(b, 0, 4) != "RIFF" || Encoding.ASCII.GetString(b, 8, 4) != "WAVE") throw Bad("not a RIFF/WAVE file");
-        int pos = 12, fmtAt = -1, fmtLen = 0, dataAt = -1; long dataLen = 0;
-        while (pos + 8 <= b.Length) {
-            string id = Encoding.ASCII.GetString(b, pos, 4);
-            long len = BitConverter.ToUInt32(b, pos + 4);
-            int body = pos + 8;
+    static FileStream Open(string path) {
+        try { return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16); } catch (Exception e) { throw Bad("cannot read the file (" + e.GetType().Name + ")"); }
+    }
+
+    // n bytes at offset at; a file that ends early or cannot be read is a damaged file
+    static byte[] Take(Stream st, long at, int n) {
+        var b = new byte[n];
+        try {
+            st.Position = at;
+            for (int got = 0; got < n; ) { int k = st.Read(b, got, n - got); if (k <= 0) throw new EndOfStreamException(); got += k; }
+        } catch (Exception e) { throw Bad("cannot read the file (" + e.GetType().Name + ")"); }
+        return b;
+    }
+
+    // The chunks are walked by their headers only; the samples are not read
+    static HarnessWavData Parse(Stream st) {
+        long size = st.Length;
+        if (size < 12) throw Bad("not a RIFF/WAVE file");
+        byte[] h = Take(st, 0, 12);
+        if (Encoding.ASCII.GetString(h, 0, 4) != "RIFF" || Encoding.ASCII.GetString(h, 8, 4) != "WAVE") throw Bad("not a RIFF/WAVE file");
+        long pos = 12, fmtAt = -1, dataAt = -1, dataLen = 0; int fmtLen = 0;
+        while (pos + 8 <= size) {
+            byte[] c = Take(st, pos, 8);
+            string id = Encoding.ASCII.GetString(c, 0, 4);
+            long len = BitConverter.ToUInt32(c, 4);
+            long body = pos + 8;
             if (id == "fmt ") { fmtAt = body; fmtLen = (int)Math.Min(len, int.MaxValue); }
             else if (id == "data") {
                 // 0xFFFFFFFF is the "length unknown" placeholder: the writer never came back to fill in the length, so the file
                 // is not finished, however many whole frames it holds
                 if (len == 0xFFFFFFFFL) throw Bad("the data length was never written (placeholder 0xFFFFFFFF), the file is not finished");
                 // a render cut off (a crash, a full disk, a writer that never finished) is never read as a shorter file
-                if (len > (long)b.Length - body) throw Bad("data chunk is truncated (" + len + " bytes declared, " + ((long)b.Length - body) + " in the file)");
+                if (len > size - body) throw Bad("data chunk is truncated (" + len + " bytes declared, " + (size - body) + " in the file)");
                 dataAt = body; dataLen = len; break;
             }
             long next = body + len + (len & 1);
-            if (next > b.Length) break;
-            pos = (int)next;
+            if (next > size) break;
+            pos = next;
         }
         if (fmtAt < 0) throw Bad("no fmt chunk");
-        if (fmtLen < 16 || fmtLen > b.Length - fmtAt) throw Bad("fmt chunk is too short or truncated");
+        if (fmtLen < 16 || fmtLen > size - fmtAt) throw Bad("fmt chunk is too short or truncated");
         if (dataAt < 0) throw Bad("no data chunk");
-        int tag = BitConverter.ToUInt16(b, fmtAt);
-        int channels = BitConverter.ToUInt16(b, fmtAt + 2);
-        int rate = (int)BitConverter.ToUInt32(b, fmtAt + 4);
-        int align = BitConverter.ToUInt16(b, fmtAt + 12);
-        int bits = BitConverter.ToUInt16(b, fmtAt + 14);
+        byte[] b = Take(st, fmtAt, Math.Min(fmtLen, 40));
+        int tag = BitConverter.ToUInt16(b, 0);
+        int channels = BitConverter.ToUInt16(b, 2);
+        int rate = (int)BitConverter.ToUInt32(b, 4);
+        int align = BitConverter.ToUInt16(b, 12);
+        int bits = BitConverter.ToUInt16(b, 14);
         bool ext = false;
         if (tag == 0xFFFE) {
             if (fmtLen < 40) throw Bad("WAVE_FORMAT_EXTENSIBLE fmt chunk is too short");
             ext = true;
             // SubFormat GUID: the first two bytes are the format tag, the rest is the fixed KSDATAFORMAT suffix
             byte[] tail = { 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 };
-            for (int i = 0; i < 14; i++) if (b[fmtAt + 26 + i] != tail[i]) throw Bad("WAVE_FORMAT_EXTENSIBLE with an unknown sub-format");
-            tag = BitConverter.ToUInt16(b, fmtAt + 24);
+            for (int i = 0; i < 14; i++) if (b[26 + i] != tail[i]) throw Bad("WAVE_FORMAT_EXTENSIBLE with an unknown sub-format");
+            tag = BitConverter.ToUInt16(b, 24);
         }
         if (channels < 1 || channels > 64) throw Bad("channel count " + channels + " is out of range");
         if (rate < 1 || rate > 1536000) throw Bad("sample rate " + rate + " is out of range");
@@ -87,22 +110,54 @@ public static class HarnessWav {
         if (tag == 1 && (bits == 16 || bits == 24 || bits == 32)) format = "pcm" + bits;
         else if (tag == 3 && (bits == 32 || bits == 64)) format = "float" + bits;
         else throw Bad("unsupported encoding (format tag " + tag + ", " + bits + " bits)");
-        int bytes = bits / 8;
-        if (align != bytes * channels) throw Bad("block align " + align + " does not match " + channels + " channels of " + bits + " bits");
+        if (align != bits / 8 * channels) throw Bad("block align " + align + " does not match " + channels + " channels of " + bits + " bits");
         if (dataLen % align != 0) throw Bad("data chunk does not hold whole frames (" + dataLen + " bytes, " + align + " per frame)");
-        long frames = dataLen / align;
-        var s = new double[frames * channels];
-        int p = dataAt;
-        for (long i = 0; i < s.LongLength; i++, p += bytes) {
-            switch (format) {
-                case "pcm16": s[i] = BitConverter.ToInt16(b, p) / 32768.0; break;
-                case "pcm24": s[i] = ((b[p] | (b[p + 1] << 8) | ((sbyte)b[p + 2] << 16))) / 8388608.0; break;
-                case "pcm32": s[i] = BitConverter.ToInt32(b, p) / 2147483648.0; break;
-                case "float32": s[i] = BitConverter.ToSingle(b, p); break;
-                default: s[i] = BitConverter.ToDouble(b, p); break;
-            }
+        return new HarnessWavData { Rate = rate, Channels = channels, Frames = dataLen / align, Format = format, Extensible = ext, DataAt = dataAt };
+    }
+
+    static double Decode(byte[] b, int p, string format) {
+        switch (format) {
+            case "pcm16": return BitConverter.ToInt16(b, p) / 32768.0;
+            case "pcm24": return ((b[p] | (b[p + 1] << 8) | ((sbyte)b[p + 2] << 16))) / 8388608.0;
+            case "pcm32": return BitConverter.ToInt32(b, p) / 2147483648.0;
+            case "float32": return BitConverter.ToSingle(b, p);
+            default: return BitConverter.ToDouble(b, p);
         }
-        return new HarnessWavData { Rate = rate, Channels = channels, Frames = frames, Format = format, Extensible = ext, Samples = s };
+    }
+
+    // Every sample of the data in file order, read block by block
+    static void Each(Stream st, HarnessWavData w, Action<long, double> each) {
+        int bytes = w.Format == "pcm16" ? 2 : w.Format == "pcm24" ? 3 : w.Format == "float64" ? 8 : 4;
+        long total = w.Frames * w.Channels;
+        for (long i = 0; i < total; ) {
+            int n = (int)Math.Min(65536, total - i);
+            byte[] b = Take(st, w.DataAt + i * bytes, n * bytes);
+            for (int k = 0; k < n; k++) each(i + k, Decode(b, k * bytes, w.Format));
+            i += n;
+        }
+    }
+
+    // The format facts only (Samples stays null): what a source file is checked by before anything starts
+    public static HarnessWavData Header(string path) { using (var st = Open(path)) return Parse(st); }
+
+    public static HarnessWavData Read(string path) {
+        using (var st = Open(path)) {
+            var w = Parse(st);
+            var s = new double[w.Frames * w.Channels];
+            Each(st, w, (i, v) => s[i] = v);
+            w.Samples = s;
+            return w;
+        }
+    }
+
+    // Peak over the finite samples, NaN and Inf counted apart, without holding the samples
+    public static HarnessWavScan Scan(string path) {
+        using (var st = Open(path)) {
+            var w = Parse(st);
+            var r = new HarnessWavScan { Info = w };
+            Each(st, w, (i, v) => { if (double.IsNaN(v)) r.Nan++; else if (double.IsInfinity(v)) r.Inf++; else if (Math.Abs(v) > r.Peak) r.Peak = Math.Abs(v); });
+            return r;
+        }
     }
 
     public static void Write(string path, int rate, int channels, string format, bool extensible, double[] s) {
@@ -244,6 +299,14 @@ function Format-HarnessDb([double]$Linear) {
 
 function Read-HarnessWav([Parameter(Mandatory)][string]$Path) {
     try { [HarnessWav]::Read($Path) } catch { throw ($_.Exception.InnerException ?? $_.Exception).Message }
+}
+
+function Read-HarnessWavHeader([Parameter(Mandatory)][string]$Path) {
+    try { [HarnessWav]::Header($Path) } catch { throw ($_.Exception.InnerException ?? $_.Exception).Message }
+}
+
+function Get-HarnessWavScan([Parameter(Mandatory)][string]$Path) {
+    try { [HarnessWav]::Scan($Path) } catch { throw ($_.Exception.InnerException ?? $_.Exception).Message }
 }
 
 function Write-HarnessWav {
@@ -400,5 +463,5 @@ function Test-HarnessWavFile {
     Get-HarnessRenderVerdict -Facts $Facts -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb
 }
 
-Export-ModuleMember -Function Format-HarnessDb, Read-HarnessWav, Write-HarnessWav, New-HarnessSignalFile, Get-HarnessCompareVerdict, Get-HarnessRenderVerdict, Get-HarnessChannelProblems,
+Export-ModuleMember -Function Format-HarnessDb, Read-HarnessWav, Read-HarnessWavHeader, Get-HarnessWavScan, Write-HarnessWav, New-HarnessSignalFile, Get-HarnessCompareVerdict, Get-HarnessRenderVerdict, Get-HarnessChannelProblems,
     ConvertTo-HarnessLevelDb, Compare-HarnessWavFiles, Test-HarnessWavFile

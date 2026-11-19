@@ -35,6 +35,14 @@ public static class FakeMix {
         if (channels == 2) { for (int i = 0; i + 1 < n; i += 2) { dst[i] += gl * src[i]; dst[i + 1] += gr * src[i + 1]; } }
         else { for (int i = 0; i < n; i++) dst[i] += gl * src[i]; }
     }
+    // The first frames of a source on a track of ch channels, cut or padded with zeros; a source of one channel plays on
+    // every channel (what REAPER does with it is in the validation record, not here)
+    public static double[] Fit(double[] src, int srcCh, long frames, int ch) {
+        var y = new double[frames * ch];
+        long have = src.Length / srcCh;
+        for (long f = 0; f < frames && f < have; f++) for (int c = 0; c < ch; c++) y[f * ch + c] = src[f * srcCh + Math.Min(c, srcCh - 1)];
+        return y;
+    }
     public static double[] Scale(double[] x, double g) { var y = new double[x.Length]; for (int i = 0; i < x.Length; i++) y[i] = g * x[i]; return y; }
     public static double[] Delay(double[] x, int frames, int channels) {
         var y = new double[x.Length];
@@ -154,7 +162,8 @@ function Test-FakeReportsPdc($fx) { -not $fx.Params.Contains($script:ReportParam
 function Get-FakePdc($fx) { (Test-FakeReportsPdc $fx) ? (Get-FakeDelay $fx) : 0 }
 
 # ---- projects ----
-# Tracks of a project: Name, Volume, Pan, Mute, Isbus, Sel, MainSend, Recv (Src, Mode, Vol), Source (wav path or ''),
+# Tracks of a project: Name, Volume, Pan, Mute, Isbus, Sel, MainSend, Recv (Src, Mode, Vol), Source (wav path or ''), Length
+# (of its item, $null without one),
 # Fx (Kind, Name, Ident, Header, Bypassed, Params name -> value).
 function Read-FakeProject([string]$Text) {
     $tracks = [Collections.Generic.List[object]]::new()
@@ -173,7 +182,7 @@ function Read-FakeProject([string]$Text) {
             continue
         }
         if ($s -eq '<TRACK') {
-            $cur = [pscustomobject]@{ Name = ''; Volume = 1.0; Pan = 0.0; Mute = $false; Isbus = '0 0'; Sel = $false; MainSend = $true; Recv = [Collections.Generic.List[object]]::new(); Source = ''; Fx = [Collections.Generic.List[object]]::new() }
+            $cur = [pscustomobject]@{ Name = ''; Volume = 1.0; Pan = 0.0; Mute = $false; Isbus = '0 0'; Sel = $false; MainSend = $true; Recv = [Collections.Generic.List[object]]::new(); Source = ''; Length = $null; Fx = [Collections.Generic.List[object]]::new() }
             $tracks.Add($cur); continue
         }
         if ($null -eq $cur) { continue }
@@ -185,6 +194,7 @@ function Read-FakeProject([string]$Text) {
         elseif ($s -match '^MAINSEND (\d)') { $cur.MainSend = $Matches[1] -ne '0' }
         elseif ($s -match '^AUXRECV (\d+) (\d+) (\S+)') { $cur.Recv.Add([pscustomobject]@{ Src = [int]$Matches[1]; Mode = [int]$Matches[2]; Vol = [double]::Parse($Matches[3], $script:Inv) }) }
         elseif ($s -match '^FILE "(.*)"$') { $cur.Source = $Matches[1] }
+        elseif ($s -match '^LENGTH (\S+)$') { $cur.Length = [double]::Parse($Matches[1], $script:Inv) }
         elseif ($s -match '^BYPASS (\d)') { $bypassNext = $Matches[1] -ne '0' }
         elseif ($s -match '^<(VST|JS) (.*)$') {
             $kind = $Matches[1]
@@ -214,10 +224,17 @@ function Get-FakeMix([string]$Text) {
         if ($flag[0] -eq '1') { $stack.Add($i) }
         elseif ($flag[0] -eq '2') { for ($k = 0; $k -lt -[int]$flag[1]; $k++) { $stack.RemoveAt($stack.Count - 1) } }
     }
+    # An item plays floor(LENGTH x rate) frames of its file: a length that falls short of the last frame loses it
     $sources = @{}
     $len = 0
     foreach ($t in $tracks) {
-        if ($t.Source -and -not $sources.ContainsKey($t.Source)) { $w = Read-HarnessWav $t.Source; $sources[$t.Source] = $w.Samples; $len = [Math]::Max($len, $w.Samples.Length) }
+        if (-not $t.Source) { continue }
+        $key = "$($t.Source)|$($t.Length)"
+        if ($sources.ContainsKey($key)) { continue }
+        $w = Read-HarnessWav $t.Source
+        $frames = ($null -ne $t.Length) ? [long][Math]::Floor($t.Length * $rate) : $w.Frames
+        $sources[$key] = [FakeMix]::Fit($w.Samples, $w.Channels, $frames, $channels)
+        $len = [Math]::Max($len, $sources[$key].Length)
     }
     $memo = @{}
     $busy = @{}
@@ -230,7 +247,7 @@ function Get-FakeMix([string]$Text) {
             $busy[$i] = $true
             $t = $tracks[$i]
             $pre = [double[]]::new($len)
-            if ($t.Source) { [FakeMix]::Add($pre, $sources[$t.Source], 1.0, 1.0, $channels) }
+            if ($t.Source) { [FakeMix]::Add($pre, $sources["$($t.Source)|$($t.Length)"], 1.0, 1.0, $channels) }
             for ($j = 0; $j -lt $n; $j++) { if ($parent[$j] -eq $i -and $tracks[$j].MainSend) { [FakeMix]::Add($pre, (& $get $j 'out'), 1.0, 1.0, $channels) } }
             foreach ($r in $t.Recv) {
                 if ($tracks[$r.Src].Mute) { continue } # mute silences every send of the track, pre-fader and pre-FX too

@@ -68,7 +68,9 @@ written as its text, masked the same way. JSON has no NaN or infinity, so those 
 `"Infinity"` and `"-Infinity"`, and dates as ISO 8601 strings.
 
 Scenarios of extension kinds always get the learned plugin blocks: by the time `Run` is called, `$Ctx.Blocks` and
-`$Ctx.Names` (plugin id → the name REAPER shows) are filled, and the private copies are proven.
+`$Ctx.Names` (plugin id → the name REAPER shows) are filled, and the private copies are proven. `$Ctx.LearnReads`
+holds what the learn launch read back per variant key (the key of `$Ctx.Blocks`): `Name`, `Pdc`, `Params` (name →
+`Read`, `Display`, as REAPER reported them) and the `Sr` and `Block` they were read at (48000, 512).
 
 `$Ctx.Api` holds the building blocks the built-in kinds use; call them with `&`:
 
@@ -76,7 +78,7 @@ Scenarios of extension kinds always get the learned plugin blocks: by the time `
 |---|---|
 | `Outcome` | `& $Ctx.Api.Outcome PASS 'detail' $facts` |
 | `Layout` | `& $Ctx.Api.Layout $Ctx '<layout id>'`: the normalised layout |
-| `NewRun` | `& $Ctx.Api.NewRun -Ctx $Ctx -Name <file name> -Layout <layout> [-Sr] [-Block] [-Mode] [-Channels] [-Bypass] [-NoFx] [-Stems <track names>] [-AnticipativeFx <bool>]`: writes the project (from the learned blocks) and sets the audio device (anticipative FX on unless `-AnticipativeFx $false`); returns `Project`, `Wav` (the master) and `Stems` (track name → file). The master is `<Name>.wav`; with stems REAPER writes `<Name>-stem-<track>.wav` per stem and the master as `<Name>-stem-Master.wav`. Start your names with the scenario id: names starting with `_` are the harness's own |
+| `NewRun` | `& $Ctx.Api.NewRun -Ctx $Ctx -Name <file name> -Layout <layout> [-Sr] [-Block] [-Mode] [-Channels] [-Bypass] [-NoFx] [-Stems <track names>] [-AnticipativeFx <bool>] [-NoItems]`: writes the project (from the learned blocks) and sets the audio device (anticipative FX on unless `-AnticipativeFx $false`); returns `Project`, `Wav` (the master) and `Stems` (track name → file). A track with a [`file`](CONFIG.md#source-files) plays the round's checked copy of it, as long as the file; a scenario whose layout (or `compare.layout`) uses a file whose copy failed its check is INCOMPLETE before `Run` is called. Nothing is resampled or mixed down: `NewRun` throws (the row is INCOMPLETE) when such a file is at another rate than `-Sr` or has more channels than `-Channels`; with `-NoItems` nothing is placed and nothing is asked of the file. The master is `<Name>.wav`; with stems REAPER writes `<Name>-stem-<track>.wav` per stem and the master as `<Name>-stem-Master.wav`. Start your names with the scenario id: names starting with `_` are the harness's own |
 | `Render` | `& $Ctx.Api.Render $Ctx <project> <wav> [-Also <files>]`: one render launch; returns `Run` and `Why` (empty when it worked; a file of `-Also`, such as the stems of `NewRun`, that the render did not produce is a reason too) |
 | `LuaStep` | `& $Ctx.Api.LuaStep -Ctx $Ctx -Name <file name> -Step <step> [-Job @{...}] [-Watch @{ label = <mark file> }] [-TimeoutSec]`: one driver launch; returns `Run`, `Result` (the key=value lines as a hashtable) and `Why` |
 | `Compare` | `& $Ctx.Api.Compare -A <wav> -B <wav> [-MaxDiffDb] [-Lag] [-PeakMaxDb] [-NotSilent]`: the comparer; returns an outcome |

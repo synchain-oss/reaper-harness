@@ -41,6 +41,13 @@ function ConvertTo-HarnessLuaTable([Parameter(Mandatory)][System.Collections.IDi
 
 function Format-Number([double]$Value) { $Value.ToString('R', $script:Inv) }
 
+# One plugin block as a project holds it: every line indented under its FXCHAIN and ended by a line feed. A kept
+# render's manifest hashes this text, which ties what was read back to what was rendered.
+function Get-HarnessBlockText([string[]]$BlockLines) { -join @($BlockLines | ForEach-Object { "      $_`n" }) }
+
+# Whether an FX is written bypassed: its own flag, or the scenario's bypass ('*' = every FX, or plugin ids)
+function Test-HarnessFxBypassed($Effect, [string[]]$Bypass = @()) { [bool]($Effect.Bypass -or ('*' -cin $Bypass) -or ($Effect.Plugin -cin $Bypass)) }
+
 # Quotes a value for an .rpp line. Names come from the validated configuration (no double quotes, no control
 # characters); paths come from this tool.
 function ConvertTo-RppString([string]$Text) {
@@ -64,7 +71,8 @@ function Get-HarnessFolderFlags([object[]]$Tracks) {
 # "<VST ..." or "<JS ...", last line ">"). Bypass: plugin ids whose FX are written bypassed ('*' = every FX) on top
 # of the layout's own bypass flags. NoFx: leave every FX out (the dry reference). VolumeScale: multiplies the volume
 # of the source tracks (a built-in negative case uses 0.5). Sources: track name -> signal file for tracks with a
-# signal of their own (the others get SourceWav). Stems: track names rendered as stems: the render then writes
+# signal of their own or a file (the others get SourceWav). Lengths: track name -> item length in seconds for tracks
+# that play a file (the others get Seconds). Stems: track names rendered as stems: the render then writes
 # <RenderName>-stem-<track>.wav per stem and <RenderName>-stem-Master.wav (REAPER's "master mix + stems of selected
 # tracks"; Get-HarnessRunFiles in Scenarios.psm1 expects these names). NoItems: no track plays anything (the transport
 # kind: what a track gets comes through its input).
@@ -74,6 +82,7 @@ function New-HarnessProjectText {
         [hashtable]$Blocks = @{},
         [Parameter(Mandatory)][string]$SourceWav,
         [hashtable]$Sources = @{},
+        [hashtable]$Lengths = @{},
         [Parameter(Mandatory)][string]$RenderDir,
         [Parameter(Mandatory)][string]$RenderName,
         [int]$SampleRate = 48000,
@@ -125,16 +134,15 @@ function New-HarnessProjectText {
             & $add '    <FXCHAIN'
             foreach ($fx in $t.Fx) {
                 if (-not $Blocks.ContainsKey($fx.Variant)) { throw "no learned block for plugin '$($fx.Plugin)' (variant $($fx.Variant))" }
-                $off = $fx.Bypass -or ('*' -cin $Bypass) -or ($fx.Plugin -cin $Bypass)
-                & $add "      BYPASS $($off ? 1 : 0) 0 0"
-                foreach ($blockLine in $Blocks[$fx.Variant]) { & $add ('      ' + $blockLine) }
+                & $add "      BYPASS $((Test-HarnessFxBypassed $fx $Bypass) ? 1 : 0) 0 0"
+                $null = $sb.Append((Get-HarnessBlockText $Blocks[$fx.Variant]))
             }
             & $add '    >'
         }
         if ($t.Source -and -not $NoItems) {
             & $add '    <ITEM'
             & $add '      POSITION 0'
-            & $add "      LENGTH $(Format-Number $Seconds)"
+            & $add "      LENGTH $(Format-Number ($Lengths.ContainsKey($t.Name) ? $Lengths[$t.Name] : $Seconds))"
             & $add '      <SOURCE WAVE'
             & $add "        FILE $(ConvertTo-RppString ($Sources.ContainsKey($t.Name) ? $Sources[$t.Name] : $SourceWav))"
             & $add '      >'
@@ -253,4 +261,4 @@ function Get-HarnessFxBlocks([Parameter(Mandatory)][AllowEmptyString()][string]$
 }
 
 Export-ModuleMember -Function New-HarnessProjectText, New-HarnessLearnProjectText, Get-HarnessFxBlocks, ConvertFrom-HarnessRppTokens, Get-HarnessFolderFlags, ConvertTo-HarnessLuaTable,
-    ConvertTo-HarnessLuaValue, Write-HarnessText
+    ConvertTo-HarnessLuaValue, Write-HarnessText, Get-HarnessBlockText, Test-HarnessFxBypassed

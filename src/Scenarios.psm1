@@ -30,6 +30,7 @@ Import-Module (Join-Path $PSScriptRoot 'Config.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Plugins.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Transport.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Report.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Sources.psm1') -ErrorAction Stop
 
 function New-HarnessOutcome([string]$Status, [string]$Detail = '', $Facts = $null) {
     $o = [ordered]@{ Status = $Status; Detail = $Detail }
@@ -96,6 +97,8 @@ function New-HarnessContext {
         Locks = $Locks; LockWaitSec = [double]$Config.Limits.lockWaitSec; SkipMarkers = $SkipMarkers; LuaExtensions = $LuaExtensions; Kinds = $Kinds
         Installed = $byId; Jsfx = $jsById; States = ($States ?? [ordered]@{}); Blocks = @{}; Names = @{}; AddNames = @{}; Launches = 0; LaunchLog = [Collections.Generic.List[object]]::new()
         Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new(); ToolJsfx = $ToolJsfx
+        SourceCopies = @{} # file key -> the checked copy of this round (Copy-HarnessSourceFiles)
+        LearnReads = @{} # variant key -> what the learn launch read back (Invoke-HarnessLearn)
         Retries = [Collections.Generic.List[object]]::new() # launches started once more (see Invoke-HarnessLaunch)
         Started = [Collections.Generic.List[object]]::new() # every process started: Pid, StartUtc
         StillRunning = $null # set when the watchdog could not end a process: Pid, Label, Lock
@@ -257,7 +260,8 @@ function Get-HarnessRunFiles([string]$Work, [string]$Name, [string[]]$Stems = @(
 }
 
 # Writes the project and sets the audio configuration; returns the project path, the path of its (master) render and
-# Stems (track name -> path of its stem), named as Get-HarnessRunFiles says.
+# Stems (track name -> path of its stem), named as Get-HarnessRunFiles says. A track with a file plays the round's
+# checked copy; a file at another rate than -Sr, or with more channels than -Channels, throws before the project is written.
 function New-HarnessRun {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)]$Layout, [int]$Sr = 48000, [int]$Block = 512,
           [string]$Mode = 'offline', [int]$Channels = 2, [string[]]$Bypass = @(), [double]$VolumeScale = 1.0, [int]$OffsetSamples = 0, [switch]$NoFx,
@@ -268,8 +272,20 @@ function New-HarnessRun {
     $stemFiles = $files.Stems
     foreach ($f in @($Wav) + @($stemFiles.get_Values())) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
     $sources = @{}
-    foreach ($t in $Layout.Tracks) { if ($t.Source -and $null -ne $t.Signal) { $sources[$t.Name] = Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples -Spec $t.Signal } }
-    $Text = New-HarnessProjectText -Layout $Layout -Blocks ($Blocks ?? $Ctx.Blocks) -SourceWav (Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples) -Sources $sources -RenderDir $Ctx.Work -RenderName $Name `
+    $lengths = @{}
+    foreach ($t in $Layout.Tracks) {
+        $file = Get-HarnessTrackFile $t
+        # A file plays as it is, in place of the test signal: never shifted (OffsetSamples), checked copy only, and for
+        # every caller (kinds of extensions too) never resampled or mixed down
+        if ($t.Source -and $file -and -not $NoItems) {
+            $copy = Get-HarnessSourceCopy -Ctx $Ctx -File $file
+            if ($copy.File.Rate -ne $Sr) { throw "source $($copy.File.Rel) is at $($copy.File.Rate) Hz and the render runs at $Sr Hz: nothing is resampled" }
+            if ($copy.File.Channels -gt $Channels) { throw "source $($copy.File.Rel) has $($copy.File.Channels) channels and the render $($Channels): nothing is mixed down" }
+            $sources[$t.Name] = $copy.Path; $lengths[$t.Name] = $copy.Length
+        }
+        elseif ($t.Source -and $null -ne $t.Signal) { $sources[$t.Name] = Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples -Spec $t.Signal }
+    }
+    $Text = New-HarnessProjectText -Layout $Layout -Blocks ($Blocks ?? $Ctx.Blocks) -SourceWav (Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples) -Sources $sources -Lengths $lengths -RenderDir $Ctx.Work -RenderName $Name `
         -SampleRate $Sr -Channels $Channels -Mode $Mode -Bypass $Bypass -Seconds $Ctx.Signal.Seconds -VolumeScale $VolumeScale -Stems $Stems -NoFx:$NoFx -NoItems:$NoItems
     Write-HarnessText -Path $Project -Text $Text
     Set-HarnessAudioConfig -Sr $Sr -Block $Block -AnticipativeFx $AnticipativeFx -RunFxWhenStopped $RunFxWhenStopped -InformOfflineState $InformOfflineState
@@ -755,7 +771,8 @@ function Invoke-HarnessScenario {
     if (-not $handler -and -not $ext) { $o = New-HarnessOutcome INCOMPLETE "no handler for kind $($Scenario.kind)" }
     else {
         try {
-            $o = $handler ? (& $handler $Ctx $Scenario) : (& $ext.Run $Ctx $Scenario)
+            $gap = Get-HarnessSourceGap -Ctx $Ctx -Scenario $Scenario
+            $o = $gap ? (New-HarnessOutcome INCOMPLETE $gap) : ($handler ? (& $handler $Ctx $Scenario) : (& $ext.Run $Ctx $Scenario))
             if ($null -eq $o -or $o.Status -cnotin 'PASS', 'FAIL', 'INCOMPLETE') { $o = New-HarnessOutcome INCOMPLETE "the handler of kind $($Scenario.kind) returned no valid outcome" }
         } catch { $o = New-HarnessOutcome INCOMPLETE "the scenario threw: $($_.Exception.Message -replace '\s+', ' ')" }
     }
