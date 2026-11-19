@@ -259,7 +259,10 @@ Measured on REAPER 7.82 (offline render, 48 kHz): with the report on, a 64-sampl
 renders bit-identical to the dry render at block sizes 32 and 2048 (in the master and in stems); with the report
 off, a 16-sample delay renders 16 samples late. In a mix of several tracks where one reports latency, the stems
 were bit-identical to the dry ones but the master differed from the dry master by about -156 dBFS (rounding in the
-compensated sum): give such a scenario a `maxDiffDb`.
+compensated sum): give such a scenario a `maxDiffDb`. These renders used the test signal, which holds no exact zero
+sample. With a [source file](#source-files) that holds digital silence, the active JSFX left values of at most 1.5e-16
+(about -316 dBFS) where the file is exactly 0, and nothing elsewhere; bypassed, it rendered bit-identical
+([validation record](validation/2026-11-19-file-sources.md)).
 
 ## scenarios
 
