@@ -9,10 +9,11 @@
 #   New-HarnessKeep             what one run keeps: <ResultDir>/renders/<run stamp>/, run fields of every manifest line
 #   Save-HarnessKeptRender      after the verdict of a render scenario with keep: moves its own render and stems to
 #                               run<k>/<id>.wav and run<k>/<id>-stem-<track>.wav, never over a file that is there, then
-#                               appends its manifest line (written and flushed at once). The first one claims the
-#                               directory by creating the manifest: a run of the same second finds it and keeps nothing.
+#                               appends its manifest line (written and flushed at once, every string masked). The
+#                               first one checks that renders/<stamp> is under the result directory (real paths) and
+#                               claims it by creating the manifest: a run of the same second finds it and keeps nothing.
 #                               Returns Status and Detail of the row (INCOMPLETE added when something could not be
-#                               kept, FAIL stays FAIL) and the Record.
+#                               kept or a kept file could not be read, FAIL stays FAIL) and the Record.
 #   Move-HarnessKeptFile        one file, only to a place under the result directory, never over another (pure on files)
 #   Get-HarnessKeptFileFacts    a kept file: path, sha256, frames, channels, sampleRate, format, peakDb, nanCount, infCount
 #   Get-HarnessFxFacts          every FX of a layout as rendered: plugin, binary hash, bypass, state, the hash of its
@@ -70,9 +71,12 @@ function New-HarnessKeep([Parameter(Mandatory)][string]$ResultDir, [Parameter(Ma
     [pscustomobject]@{ ResultDir = $ResultDir; Stamp = $Stamp; Rel = "renders/$Stamp"; Dir = $dir; Manifest = (Join-Path $dir 'manifest.jsonl'); Run = $Run; Checked = $false; Refused = ''; Lines = 0 }
 }
 
+# A real path that cannot be read (links that lead round in a circle, nested too deep) proves nothing: refused too.
 function Move-HarnessKeptFile([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To, [Parameter(Mandatory)][string]$ResultDir) {
     $leaf = Split-Path -Leaf $To
-    if (-not (Test-HarnessUnder $To $ResultDir) -or -not (Test-HarnessUnder (Resolve-HarnessRealPath $To) (Resolve-HarnessRealPath $ResultDir))) { return "$leaf would not be under the result directory" }
+    try { $inside = (Test-HarnessUnder $To $ResultDir) -and (Test-HarnessUnder (Resolve-HarnessRealPath $To) (Resolve-HarnessRealPath $ResultDir)) }
+    catch { return "$leaf cannot be shown to be under the result directory: $($_.Exception.Message -replace '\s+', ' ')" }
+    if (-not $inside) { return "$leaf would not be under the result directory" }
     if (Test-Path -LiteralPath $To) { return "$leaf is there already and is never overwritten" }
     try { $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $To); [IO.File]::Move($From, $To, $false) }
     catch { return "$leaf could not be moved there: $($_.Exception.Message -replace '\s+', ' ')" }
@@ -80,16 +84,19 @@ function Move-HarnessKeptFile([Parameter(Mandatory)][string]$From, [Parameter(Ma
 }
 
 # Rel: the path the manifest names the file by ('' when nothing was kept: every field is null then). peakDb is null for
-# a file without a finite sample above zero.
-function Get-HarnessKeptFileFacts([string]$Path, [string]$Rel) {
+# a file without a finite sample above zero. A kept file that cannot be read (a scanner holding it, not a WAV) keeps
+# the fields read so far, and the reason goes to Reasons.
+function Get-HarnessKeptFileFacts([string]$Path, [string]$Rel, [Collections.Generic.List[string]]$Reasons = [Collections.Generic.List[string]]::new()) {
     $f = [ordered]@{ path = $null; sha256 = $null; frames = $null; channels = $null; sampleRate = $null; format = $null; peakDb = $null; nanCount = $null; infCount = $null }
     if (-not $Rel) { return $f }
     $f.path = $Rel
-    $f.sha256 = Get-HarnessSha256 $Path
-    try { $scan = Get-HarnessWavScan $Path } catch { return $f } # not a WAV that can be read: the verdict says why
-    $f.frames = $scan.Info.Frames; $f.channels = $scan.Info.Channels; $f.sampleRate = $scan.Info.Rate; $f.format = $scan.Info.Format
-    $f.peakDb = ($scan.Peak -gt 0) ? [Math]::Round(20 * [Math]::Log10($scan.Peak), 6) : $null
-    $f.nanCount = $scan.Nan; $f.infCount = $scan.Inf
+    try {
+        $f.sha256 = Get-HarnessSha256 $Path
+        $scan = Get-HarnessWavScan $Path
+        $f.frames = $scan.Info.Frames; $f.channels = $scan.Info.Channels; $f.sampleRate = $scan.Info.Rate; $f.format = $scan.Info.Format
+        $f.peakDb = ($scan.Peak -gt 0) ? [Math]::Round(20 * [Math]::Log10($scan.Peak), 6) : $null
+        $f.nanCount = $scan.Nan; $f.infCount = $scan.Inf
+    } catch { $Reasons.Add("$(Split-Path -Leaf $Rel) could not be read: $($_.Exception.Message -replace '\s+', ' ')") }
     $f
 }
 
@@ -132,22 +139,27 @@ function Get-HarnessSourceFacts([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory
         })
 }
 
+# Why nothing of this run can be kept ('' when it can): renders/<stamp> must be under the result directory, links and
+# junctions resolved, before anything is made there, and it is claimed by creating its manifest, which a run started in
+# the same second finds there. Never throws: whatever goes wrong is the reason, for every scenario of the run.
+function Get-HarnessKeepRefusal([Parameter(Mandatory)]$Keep) {
+    try { $inside = Test-HarnessUnder (Resolve-HarnessRealPath $Keep.Dir) (Resolve-HarnessRealPath $Keep.ResultDir) }
+    catch { return "$($Keep.Rel) cannot be shown to be under the result directory: $($_.Exception.Message -replace '\s+', ' ')" }
+    if (-not $inside) { return "$($Keep.Rel) would not be under the result directory" }
+    try { $null = New-Item -ItemType Directory -Force -Path $Keep.Dir; [IO.FileStream]::new($Keep.Manifest, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read).Dispose(); '' }
+    catch { (Test-Path -LiteralPath $Keep.Manifest) ? "$($Keep.Rel)/manifest.jsonl is there already (a run started in the same second)" : "$($Keep.Rel) could not be made: $($_.Exception.Message -replace '\s+', ' ')" }
+}
+
 function Get-HarnessWorse([string]$A, [string]$B) { foreach ($x in 'FAIL', 'INCOMPLETE') { if ($x -cin $A, $B) { return $x } }; 'PASS' }
 
 function Save-HarnessKeptRender {
     param([Parameter(Mandatory)]$Keep, [Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario, [int]$Round = 1, [Parameter(Mandatory)][string]$Status, [string]$Detail = '')
     $s = $Scenario
     try {
-        if (-not $Keep.Checked) {
-            $Keep.Checked = $true
-            if (-not (Test-HarnessUnder (Resolve-HarnessRealPath $Keep.Dir) (Resolve-HarnessRealPath $Keep.ResultDir))) { $Keep.Refused = "$($Keep.Rel) would not be under the result directory" }
-            else {
-                # A run of the same second would share the directory: the manifest is created only if it is not there
-                try { $null = New-Item -ItemType Directory -Force -Path $Keep.Dir; [IO.FileStream]::new($Keep.Manifest, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read).Dispose() }
-                catch { $Keep.Refused = (Test-Path -LiteralPath $Keep.Manifest) ? "$($Keep.Rel)/manifest.jsonl is there already (a run started in the same second)" : "$($Keep.Rel) could not be made: $($_.Exception.Message -replace '\s+', ' ')" }
-            }
-        }
-        $problems = [Collections.Generic.List[string]]::new()
+        # The refusal is set before the claim counts as done: a claim that threw is tried again, never taken as made
+        if (-not $Keep.Checked) { $Keep.Refused = Get-HarnessKeepRefusal $Keep; $Keep.Checked = $true }
+        $problems = [Collections.Generic.List[string]]::new() # what was not kept
+        $unread = [Collections.Generic.List[string]]::new() # what was kept but could not be described
         if ($Keep.Refused) { $problems.Add($Keep.Refused) }
         $stemTracks = @($s.stems | ForEach-Object { $_.Track })
         $files = Get-HarnessRunFiles $Ctx.Work $s.id $stemTracks
@@ -162,26 +174,31 @@ function Save-HarnessKeptRender {
                     $why = Move-HarnessKeptFile -From $p.From -To $dest -ResultDir $Keep.ResultDir
                     if ($why) { $problems.Add($why) } else { $kept = $true; while ($Ctx.Files.Remove($p.From)) { } }
                 }
-                $facts = Get-HarnessKeptFileFacts $dest ($kept ? $keptRel : '')
+                $facts = Get-HarnessKeptFileFacts $dest ($kept ? $keptRel : '') $unread
                 if ($p.Track) { $named = [ordered]@{ track = $p.Track }; foreach ($k in $facts.get_Keys()) { $named[$k] = $facts[$k] }; $facts = $named }
                 $facts
             })
         if ($problems.Count) { $Status = Get-HarnessWorse $Status 'INCOMPLETE'; $Detail += "; not kept: $($problems -join '; ')" }
+        if ($unread.Count) { $Status = Get-HarnessWorse $Status 'INCOMPLETE'; $Detail += "; kept, but $($unread -join '; ')" }
         $scenarioLayout = Get-HarnessLayout $Ctx $s.layout
         $record = [ordered]@{
             schema = 1; runStamp = $Keep.Stamp; round = $Round; scenario = $s.id; baseScenario = ($s.PSObject.Properties['baseId'] ? $s.baseId : $s.id); variant = $null; layout = $s.layout; kind = $s.kind
-            status = $Status; detail = (Hide-HarnessPaths $Detail); output = $out[0]; stems = @($out | Select-Object -Skip 1)
+            status = $Status; detail = $Detail; output = $out[0]; stems = @($out | Select-Object -Skip 1)
             render = [ordered]@{ sr = $s.sr; block = $s.block; mode = $s.mode; channels = ($s.mono ? 1 : 2)
                 host = [ordered]@{ anticipativeFx = [bool]$s.host.AnticipativeFx; runFxWhenStopped = [bool]$s.host.RunFxWhenStopped; informOfflineState = [bool]$s.host.InformOfflineState } }
             sources = (Get-HarnessSourceFacts $Ctx $scenarioLayout); fx = (Get-HarnessFxFacts $Ctx $scenarioLayout @($s.bypass))
         }
         foreach ($k in $Keep.Run.get_Keys()) { $record[$k] = $Keep.Run[$k] }
-        $record = Hide-HarnessFacts $record
+        $record = Hide-HarnessFacts $record # every string of the line, keys too: details carry exception texts, names come from plugins
         if (-not $Keep.Refused) {
             try {
                 $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-HarnessJsonText -Value $record) + "`n")
-                $fs = [IO.FileStream]::new($Keep.Manifest, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
-                try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+                $fs = [IO.FileStream]::new($Keep.Manifest, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+                try {
+                    # A line a write that failed left unfinished (a full disk) stays on a line of its own: this one starts after it
+                    if ($fs.Length -gt 0) { $null = $fs.Seek(-1, [IO.SeekOrigin]::End); if ($fs.ReadByte() -ne 10) { $fs.WriteByte(10) } }
+                    $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true)
+                } finally { $fs.Dispose() }
                 $Keep.Lines++
             } catch { $Status = Get-HarnessWorse $Status 'INCOMPLETE'; $Detail += "; its manifest line could not be written: $($_.Exception.Message -replace '\s+', ' ')" }
         }

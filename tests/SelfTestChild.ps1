@@ -732,14 +732,44 @@ $trackPart = { param([string]$ProjectText, [string]$TrackName) [regex]::Match($P
 $voicePart = & $trackPart $fileRpp 'Voice'
 $copyPath = Join-Path $fileWork "_source-$($voiceSha.Substring(0, 12)).wav"
 $inv = [Globalization.CultureInfo]::InvariantCulture
+# Paths as the project spells them (as given) against paths as a listing spells them (as on disk): equal ignoring case,
+# like the file system
+$samePath = { param([string]$PathA, [string]$PathB) [string]::Equals($PathA, $PathB, [StringComparison]::OrdinalIgnoreCase) }
 Write-Case 'end to end: the project plays the checked copy in the work directory, never the file next to the configuration' $false (
-    [regex]::Match($voicePart, 'FILE "(.*)"').Groups[1].Value -ceq $copyPath -and (Get-FileHash -LiteralPath $copyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $voiceSha -and
-    @(Get-ChildItem -LiteralPath $fileWork -Filter '*.rpp' | Where-Object { [IO.File]::ReadAllText($_.FullName).Contains($srcDir) }).Count -eq 0)
+    (& $samePath ([regex]::Match($voicePart, 'FILE "(.*)"').Groups[1].Value) $copyPath) -and (Get-FileHash -LiteralPath $copyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $voiceSha -and
+    @(Get-ChildItem -LiteralPath $fileWork -Filter '*.rpp' | Where-Object { [IO.File]::ReadAllText($_.FullName).Contains($srcDir, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0)
 Write-Case 'end to end: the item of the file track is as long as the file, the item of the other track as long as the test signal' $false (
     $voicePart -cmatch "\n      LENGTH $([regex]::Escape((Get-HarnessItemLength $voiceFrames 44100).ToString('R', $inv)))\n" -and (& $trackPart $fileRpp 'Pad') -cmatch '\n      LENGTH 0\.5\n')
 $src = @($r.sources)
 Write-Case 'end to end: the result lists the source file: path relative to the configuration, full sha256, frames, channels, sampleRate, format' $false (
     $src.Count -eq 1 -and $src[0].path -ceq 'sources/voice.wav' -and $src[0].sha256 -ceq $voiceSha -and $src[0].frames -eq $voiceFrames -and $src[0].channels -eq 2 -and $src[0].sampleRate -eq 44100 -and $src[0].format -ceq 'pcm24')
+Write-Case 'end to end: a run without keep makes no renders directory and names no manifest' $false (-not (Test-Path -LiteralPath (Join-Path $fileCfg.ResultDir 'renders')) -and $r.PSObject.Properties['manifest'] -and $null -eq $r.manifest)
+# Kinds of extensions get the rule from NewRun: a file is never resampled or mixed down, whatever -Sr and -Channels they
+# ask for (the handler throws, the row is INCOMPLETE). A project without items (transport) never asks for the copy.
+$extConf = Read-HarnessConfig -Path $fileCfg.Config
+$extWork = Join-Path $Work 'ext-newrun'
+$null = New-Item -ItemType Directory -Force -Path $extWork
+$newRunKind = @{ Run = {
+        param($KindCtx, $KindScenario)
+        $null = & $KindCtx.Api.NewRun -Ctx $KindCtx -Name $KindScenario.id -Layout (& $KindCtx.Api.Layout $KindCtx $KindScenario.layout) -Sr $KindScenario.raw['sr'] -Channels $KindScenario.raw['channels'] -NoFx
+        & $KindCtx.Api.Outcome PASS 'project written'
+    } }
+$extCtx = New-HarnessContext -ReaperExe 'stand-in' -WorkDir $extWork -Driver 'x' -Config $extConf -Locks @('Local\x') -Kinds @{ 'x-newrun' = $newRunKind }
+Copy-HarnessSourceFiles -Ctx $extCtx -Sources (Read-HarnessSourceFiles -Config $extConf -Scenarios @($extConf.Scenarios))
+$extRun = { param([string]$RunId, [int]$RunSr, [int]$RunChannels) Invoke-HarnessScenario -Ctx $extCtx -Scenario ([pscustomobject]@{ id = $RunId; kind = 'x-newrun'; layout = 'fileplay'; raw = @{ sr = $RunSr; channels = $RunChannels } }) }
+$at48k = & $extRun 'x-48k' 48000 2
+$atMono = & $extRun 'x-mono' 44100 1
+$atFile = & $extRun 'x-file' 44100 2
+Write-Case "kinds of extensions: NewRun refuses a source file at another rate than the render: INCOMPLETE, no project written ($($at48k.Detail))" $true (
+    $at48k.Status -ceq 'INCOMPLETE' -and $at48k.Detail -ceq 'the scenario threw: source sources/voice.wav is at 44100 Hz and the render runs at 48000 Hz: nothing is resampled' -and -not (Test-Path -LiteralPath (Join-Path $extWork 'x-48k.rpp')))
+Write-Case "kinds of extensions: NewRun refuses a file of two channels in a render of one ($($atMono.Detail))" $true (
+    $atMono.Status -ceq 'INCOMPLETE' -and $atMono.Detail -ceq 'the scenario threw: source sources/voice.wav has 2 channels and the render 1: nothing is mixed down' -and -not (Test-Path -LiteralPath (Join-Path $extWork 'x-mono.rpp')))
+Write-Case "kinds of extensions: at the rate and the channels of the file NewRun writes the project, which plays the checked copy ($($atFile.Detail))" $false (
+    $atFile.Status -ceq 'PASS' -and (Test-Path -LiteralPath (Join-Path $extWork 'x-file.rpp')) -and [IO.File]::ReadAllText((Join-Path $extWork 'x-file.rpp')).Contains($extCtx.SourceCopies['sources/voice.wav'].Path, [StringComparison]::OrdinalIgnoreCase))
+$bareCtx = New-HarnessContext -ReaperExe 'stand-in' -WorkDir $extWork -Driver 'x' -Config $extConf -Locks @('Local\x')
+$bare = try { New-HarnessRun -Ctx $bareCtx -Name 'x-noitems' -Layout $extConf.Layouts['fileplay'] -Sr 48000 -NoFx -NoItems } catch { $_.Exception.Message }
+Write-Case "a project without items (the transport kind) never asks for the copy of a file in its layout, nor for its rate: nothing of it is played ($(if ($bare -is [string]) { $bare }))" $false (
+    $bare -isnot [string] -and (Test-Path -LiteralPath $bare.Project) -and [IO.File]::ReadAllText($bare.Project) -cnotmatch '<SOURCE WAVE')
 $fileRate = 48000
 $fileCfg = & $writeVariant $fileChange
 $fileCfg.ReaperExe = $pwshExe; $fileCfg.ResultDir = Join-Path $Work 'e2e-sources'
@@ -854,7 +884,43 @@ Write-Case "end to end: keep: a kept file is never overwritten (file names ignor
     (& $keepRow 'twin-stem-pad').status -ceq 'INCOMPLETE' -and (& $keepRow 'twin-stem-pad').detail -clike '*; not kept: twin-stem-pad.wav is there already and is never overwritten' -and
     (& $hashOf (& $keptAt 'twin-stem-Pad.wav')) -ceq $twinEntry['stems'][0]['sha256'] -and $twinTwo['status'] -ceq 'INCOMPLETE' -and $null -eq $twinTwo['output']['path'] -and
     (Test-Path -LiteralPath (Join-Path $keepWork 'twin-stem-pad.wav')))
-$badKeep = & $writeVariant { param($c) & $noExt $c; @($c.scenarios | Where-Object { $_.kind -ceq 'device' })[0].keep = $true }
+$drivePath = '[A-Za-z]:[\\/]'
+Write-Case 'end to end: keep: no local path in the manifest or in the result' $false (
+    [Text.UTF8Encoding]::new($false).GetString($manifestBytes) -cnotmatch $drivePath -and (ConvertTo-HarnessJsonText -Value $r -Indent 2) -cnotmatch $drivePath)
+# One kept scenario, judged on its own: the smallest run that keeps something
+$soloChange = {
+    param($c)
+    & $noExt $c
+    $c.layouts = [ordered]@{ solo = [ordered]@{ tracks = @([ordered]@{ name = 'Tone'; source = $true; fx = @(@{ plugin = 'gain' }) }) } }
+    $c.scenarios = @([ordered]@{ id = 'solo'; kind = 'render'; layout = 'solo'; compare = 'none'; keep = $true })
+    $c.negative = @()
+}
+# A reason that holds a local path (renders is a file, so renders/<stamp> cannot be made, and the exception names the
+# manifest by its full path) is masked in the row, in the row's copy of the line, in the result and on the console
+$maskCfg = & $writeVariant $soloChange
+$maskCfg.ReaperExe = $pwshExe; $maskCfg.ResultDir = Join-Path $Work 'e2e-keep-masked'
+$null = New-Item -ItemType Directory -Force -Path $maskCfg.ResultDir
+[IO.File]::WriteAllText((Join-Path $maskCfg.ResultDir 'renders'), 'not a directory')
+$r = Invoke-HarnessSuite @maskCfg -NoNegative -SelfTestHooks $hooks -InformationVariable maskSaid
+$maskRow = @($r.runs[0].scenarios | Where-Object { $_.id -ceq 'solo' })[0]
+$saidText = @($maskSaid | ForEach-Object { [string]$_.MessageData }) -join "`n"
+Write-Case "end to end: keep: a reason that holds a local path is masked in the row, in its copy of the line, in the result and on the console ($($maskRow.detail))" $true (
+    $maskRow.status -ceq 'INCOMPLETE' -and $maskRow.detail -clike '*; not kept: renders/* could not be made: *<path>*' -and $maskRow.facts['kept']['detail'] -ceq $maskRow.detail -and
+    (ConvertTo-HarnessJsonText -Value $r -Indent 2) -cnotmatch $drivePath -and $saidText -clike '*not kept: renders/* could not be made: *<path>*' -and $saidText -cnotmatch $drivePath -and $null -eq $r.manifest)
+# -Repeat 2: one directory for the run, a directory per round in it, a line per round with its number
+$repeatCfg = & $writeVariant $soloChange
+$repeatCfg.ReaperExe = $pwshExe; $repeatCfg.ResultDir = Join-Path $Work 'e2e-keep-repeat'
+$r = Invoke-HarnessSuite @repeatCfg -NoNegative -Repeat 2 -SelfTestHooks $hooks
+$repeatDirs = @(Get-ChildItem -LiteralPath (Join-Path $repeatCfg.ResultDir 'renders') -Directory)
+$repeatStamp = $repeatDirs[0].Name
+$repeatEntries = @([IO.File]::ReadAllLines((Join-Path $repeatDirs[0].FullName 'manifest.jsonl')) | ForEach-Object { ConvertFrom-HarnessJson $_ })
+$repeatRows = @($r.runs | ForEach-Object { @($_.scenarios | Where-Object { $_.id -ceq 'solo' })[0] })
+Write-Case "end to end: keep with -Repeat 2: one directory for the run, run1/ and run2/ in it, one line per round with its number, the result names the manifest ($(@($repeatRows | ForEach-Object { "$($_.status): $($_.detail)" }) -join ' | '))" $false (
+    $r.verdict -ceq 'PASS' -and @($r.runs).Count -eq 2 -and $repeatDirs.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $repeatDirs[0].FullName 'run1/solo.wav')) -and (Test-Path -LiteralPath (Join-Path $repeatDirs[0].FullName 'run2/solo.wav')) -and
+    $repeatEntries.Count -eq 2 -and (@($repeatEntries | ForEach-Object { "$($_['round']):$($_['output']['path'])" }) -join ',') -ceq '1:run1/solo.wav,2:run2/solo.wav' -and
+    @($repeatEntries | Where-Object { $_['runStamp'] -cne $repeatStamp }).Count -eq 0 -and $r.manifest -ceq "renders/$repeatStamp/manifest.jsonl" -and
+    $repeatRows.Count -eq 2 -and $repeatRows[1].facts['kept']['output']['path'] -ceq "renders/$repeatStamp/run2/solo.wav" -and $repeatRows[1].facts['kept']['round'] -eq 2)
+$badKeep =& $writeVariant { param($c) & $noExt $c; @($c.scenarios | Where-Object { $_.kind -ceq 'device' })[0].keep = $true }
 $badKeep.ReaperExe = $pwshExe; $badKeep.ResultDir = Join-Path $Work 'e2e-keep-bad'
 $seenBefore = $seenArgs.Count
 Write-Case 'end to end: keep on a scenario that is not a render is a usage error before REAPER starts' $true (

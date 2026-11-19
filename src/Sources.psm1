@@ -9,8 +9,9 @@
 #       two channels (nothing is mixed down). All problems are one usage error: REAPER is never started. Returns the
 #       files by key (Get-HarnessSourceKey): Rel, Path, Sha256 (full), Frames, Channels, Rate, Format, Length.
 #   Copy-HarnessSourceFiles -Ctx -Sources   each round: every file once into the work directory as _source-<12 hex>.wav,
-#       registered for cleanup, its hash checked against the one taken before the start; REAPER only sees the copy
-#       (it writes peak files next to a source, never into the directory of the configuration)
+#       registered for cleanup, its hash and its header checked against those taken before the start (a copy that fails
+#       is deleted); REAPER only sees the copy (it writes peak files next to a source, never into the directory of the
+#       configuration)
 #   Get-HarnessSourceGap -Ctx -Scenario      why a scenario cannot use its files in this round, or $null
 #   Get-HarnessSourceCopy -Ctx -File         the checked copy of a track's file (throws when there is none)
 #   Get-HarnessItemLength -Frames -Rate      (pure) the item length that holds every frame of a file
@@ -84,13 +85,19 @@ function Read-HarnessSourceFiles {
             }
             if (-not $files.Contains($key)) { continue }
             $f = $files[$key]
-            # Kinds of extensions have no sr of their own: they check the rate themselves
+            # Kinds of extensions have no sr of their own: New-HarnessRun refuses a file at another rate for them
             if ($s.PSObject.Properties['sr'] -and $f.Rate -ne [int]$s.sr) { $bad.Add("$($s.id): source $key is at $($f.Rate) Hz and the scenario runs at $($s.sr) Hz: nothing is resampled") }
             if ($s.PSObject.Properties['mono'] -and $s.mono -and $f.Channels -eq 2) { $bad.Add("$($s.id): source $key has two channels and the scenario renders one (mono): nothing is mixed down") }
         }
     }
     if ($bad.Count) { Stop-Usage ("sources: $($bad.Count) problem(s): " + ($bad -join '; ')) }
     $files
+}
+
+# The header of a file says what the check before the start found: format, channels, rate and frames
+function Test-HarnessSourceHeader([string]$CopyPath, $File) {
+    try { $h = Read-HarnessWavHeader $CopyPath } catch { return $false }
+    $h.Format -ceq $File.Format -and $h.Channels -eq $File.Channels -and $h.Rate -eq $File.Rate -and $h.Frames -eq $File.Frames
 }
 
 function Copy-HarnessSourceFiles {
@@ -105,7 +112,14 @@ function Copy-HarnessSourceFiles {
             try { [IO.File]::Copy($f.Path, $copy, $true); [IO.File]::SetAttributes($copy, [IO.FileAttributes]::Normal) }
             catch { $why = "source file $key could not be copied: $($_.Exception.Message -replace '\s+', ' ')" }
         }
-        if (-not $why -and -not ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-HarnessSha256 $copy) -ceq $f.Sha256)) { $why = "source file $key changed since it was checked" }
+        # The copy is what REAPER plays: its bytes must be the ones hashed before the start, and its header the one checked
+        # then (header and hash were two reads of the file, and a file written over in between would pair them wrongly)
+        if (-not $why -and -not ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-HarnessSha256 $copy) -ceq $f.Sha256 -and (Test-HarnessSourceHeader $copy $f))) { $why = "source file $key changed since it was checked" }
+        if ($why) {
+            # Not left under the name of the content that was checked; another name of that content may still make it
+            Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $copy)) { $null = $Ctx.Files.Remove($copy) }
+        }
         $Ctx.SourceCopies[$key] = [pscustomobject]@{ Path = $copy; Length = $f.Length; Why = $why; File = $f }
     }
 }

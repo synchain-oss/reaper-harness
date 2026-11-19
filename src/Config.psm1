@@ -3,8 +3,8 @@
 # The configuration file (schema 1): strict reading, validation and normalisation.
 #   Read-HarnessConfig -Path <file> [-Kinds <extension kind table>]
 #       reads and validates; returns the normalised configuration (defaults filled in, matrices expanded, built-in
-#       negative cases appended). Any problem throws "USAGE: config: ..." listing every problem: the caller exits
-#       with 64 and REAPER is never started.
+#       negative cases appended; ConfigDir, and FileSha256: the SHA-256 of the bytes that were parsed). Any problem
+#       throws "USAGE: config: ..." listing every problem: the caller exits with 64 and REAPER is never started.
 #   Get-HarnessConfigSpec / ConvertTo-HarnessJsonSchema
 #       the structure as data, and the JSON Schema generated from it (schema/config.schema.json is that output;
 #       the self-test regenerates it and compares, and checks Test-Json agrees with this validator on fixtures)
@@ -879,11 +879,15 @@ function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int
 function Read-HarnessConfig {
     param([Parameter(Mandatory)][string]$Path, [hashtable]$Kinds = @{})
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Stop-Usage "config: file not found: $(Split-Path -Leaf $Path)" }
-    $Text = [IO.File]::ReadAllText($Path)
+    # One read: the hash the run records is the hash of the bytes it parsed (decoded as File.ReadAllText would)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $reader = [IO.StreamReader]::new([IO.MemoryStream]::new($bytes), [Text.Encoding]::UTF8, $true)
+    try { $Text = $reader.ReadToEnd() } finally { $reader.Dispose() }
     try { $Raw = ConvertFrom-HarnessJson $Text } catch { Stop-Usage "config: $($_.Exception.Message)" }
     $result = Test-HarnessConfigData -Raw $Raw -Kinds $Kinds
     if ($result.Problems.Count) { Stop-Usage ("config has $($result.Problems.Count) problem(s): " + ($result.Problems -join '; ')) }
-    $result.Config | Add-Member -NotePropertyName ConfigDir -NotePropertyValue (Split-Path -Parent ([IO.Path]::GetFullPath($Path))) -PassThru
+    $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+    $result.Config | Add-Member -NotePropertyName ConfigDir -NotePropertyValue (Split-Path -Parent ([IO.Path]::GetFullPath($Path))) -PassThru | Add-Member -NotePropertyName FileSha256 -NotePropertyValue $sha -PassThru
 }
 
 # Pure function (no files): structural and cross-reference checks of parsed data. Returns @{ Problems; Config }.

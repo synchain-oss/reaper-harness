@@ -12,7 +12,10 @@ replaced by `<path>`. A path can hold spaces, apostrophes, semicolons and commas
 a character no file name can have, or the end of the line; whatever follows an unquoted path on its line goes with it.
 A single quote is only taken as the closing one when no `\` or `/` comes after it on that line (otherwise it was an
 apostrophe inside a name, and the path goes on).
-Plugin hashes are cut to their first 12 hex digits.
+Plugin hashes are cut to their first 12 hex digits. Two kinds of hash are written in full, because they identify data
+of the user's own and not an installed product: those of the files a run was given (source files, the configuration
+file) and those of the files and project text a run made (kept renders, the plugin block of a kept render). A hash
+says nothing about the content it was taken of.
 
 ## Top level
 
@@ -33,7 +36,7 @@ Plugin hashes are cut to their first 12 hex digits.
 | `extensions` | string[] | registered extension names |
 | `plugins` | object[] | VST3: `id`, `bundle`, `name` (as REAPER shows it), `version`, `classId`, `sha256` (12 hex digits of the binary's hash); JSFX: `id`, `jsfx`, `name`, `sha256` (of the file) |
 | `states` | object[] | the named states of the configuration: `plugin`, `state`, `sha256` (12 hex digits of the hash of the block); never the block itself |
-| `sources` | object[] | the WAV files the picked scenarios play ([CONFIG.md](CONFIG.md#source-files)): `path` (relative to the configuration file, parts joined by `/`), `sha256` (all 64 hex digits: the files are the user's own, not plugins), `frames`, `channels`, `sampleRate`, `format`; empty when there are none |
+| `sources` | object[] | the WAV files the layouts of the picked scenarios name, each once, as checked before the start ([CONFIG.md](CONFIG.md#source-files); a `transport` scenario checks and lists its file without playing it): `path` (relative to the configuration file, parts joined by `/`), `sha256` (all 64 hex digits: the files are the user's own, not plugins), `frames`, `channels`, `sampleRate`, `format`; empty when there are none |
 | `manifest` | string or null | `renders/<run stamp>/manifest.jsonl` when a scenario with `keep` wrote a line ([kept renders](#kept-renders)); null otherwise |
 | `pluginPath` | string | how `vstpath64` was written |
 | `scanShield` | object | `directories`, `files` (scanned outside the private directory), `added`, `replaced`, `removed`, `unshielded` |
@@ -85,29 +88,38 @@ directory. Each line:
 | `scenario`, `baseScenario` | the scenario id, and the id it was written with (before a matrix expanded it) |
 | `variant` | null (reserved) |
 | `layout`, `kind` | the layout and `render` |
-| `status`, `detail` | the outcome of the row, after keeping (paths masked) |
+| `status`, `detail` | the outcome of the row, after keeping: `; not kept: <reason>` when a file could not be moved there, `; kept, but <file> could not be read: <reason>` when a kept file could not be described (its fields stay null from there on); either makes the row INCOMPLETE, a FAIL stays FAIL |
 | `output` | the master: `path` (null when nothing was kept), `sha256` (all 64 hex digits), `frames`, `channels`, `sampleRate`, `format`, `peakDb` (over the finite samples; null when none is above zero), `nanCount`, `infCount` |
 | `stems` | the same per stem, with `track` first |
 | `render` | `sr`, `block`, `mode`, `channels`, `host` (`anticipativeFx`, `runFxWhenStopped`, `informOfflineState`) |
 | `sources` | per source track of the layout: `track`, `file` (as in `sources` of the result) or null, `signal` (`seconds`, `seed`, `noiseDb`, `sine` with `hz` and `db` or null) or null |
-| `fx` | per FX of the layout, track by track in order: `track`, `index` (on the track, from 0), `plugin`, `bundle` (VST3) or `jsfx`, `name` (as REAPER showed it when it was learned), `sha256` (12 hex digits of the binary or the JSFX file), `bypass` (as rendered), `state` and `stateSha256` (12 hex digits) or null, `blockSha256` (all 64 hex digits of the plugin block exactly as written into the project, each line indented by six spaces and ended by a line feed, UTF-8), `params` (per parameter asked for: `name`, `normalized` as asked, `readNormalized` and `readDisplay` as REAPER read them back, text), `pdc` (the latency REAPER reported in samples, null when it reported none) and `pdcReadAt` (`sr` 48000, `block` 512: the learn launch, where it was read, not necessarily the render's settings) |
+| `fx` | per FX of the layout, track by track in order: `track`, `index` (on the track, from 0), `plugin`, `bundle` (VST3) or `jsfx`, `name` (as REAPER showed it when it was learned), `sha256` (12 hex digits of the binary or the JSFX file), `bypass` (as rendered), `state` and `stateSha256` (12 hex digits, as in `states` of the result) or null, `blockSha256` (all 64 hex digits of the plugin block exactly as written into the project, each line indented by six spaces and ended by a line feed, UTF-8: project text the run wrote, which ties the values read back to what was rendered; it is not a hash of a plugin binary), `params` (per parameter asked for: `name`, `normalized` as asked, `readNormalized` and `readDisplay` as REAPER read them back, text), `pdc` (the latency REAPER reported in samples, null when it reported none) and `pdcReadAt` (`sr` 48000, `block` 512: the learn launch, where it was read, not necessarily the render's settings) |
 | `reaper`, `toolVersion`, `toolCommit`, `buildLabel` | as in the result |
-| `config` | `name` (the file name of the configuration) and `sha256` (all 64 hex digits of the file) |
+| `config` | `name` (the file name of the configuration) and `sha256` (all 64 hex digits of the bytes the run read and parsed, not of the file as it is later) |
 
 Everything the harness read back comes from the learn launch of the round: the latency of a plugin can differ at
 the rate and block of a render.
+
+Every string of a line is masked like the rest of a result file (a reason can hold an exception text with a path in
+it, a name comes from the plugin). A line a write that failed left unfinished (a full disk) stays as it is, and the
+next line starts on a line of its own after it; the row of that scenario says its line could not be written. Read the
+manifest line by line and treat a line that does not parse as missing.
 
 ## Example (shortened)
 
 ```json
 {
-  "schema": 1, "tool": "reaper-harness", "config": "my-plugin", "buildLabel": "3f2a9c41b0de-77e10c5a9b13",
+  "schema": 1, "tool": "reaper-harness", "toolVersion": "0.1.0", "toolCommit": "0123456789abcdef0123456789abcdef01234567",
+  "config": "my-plugin", "buildLabel": "3f2a9c41b0de-77e10c5a9b13",
   "startedUtc": "2026-11-01T09:12:44.1234567Z", "reaper": "7.82", "verdict": "PASS", "launches": 31,
   "skipReasons": [], "locks": ["Local\\ReaperHarness-gui"], "extensions": [],
   "plugins": [ { "id": "gain", "bundle": "My Gain.vst3", "name": "VST3: My Gain (Me)", "version": "1.2.0",
                  "classId": "5A1B2C3D4E5F60718293A4B5C6D7E8F9", "sha256": "3f2a9c41b0de" },
                { "id": "delay", "jsfx": "harness-pdc-delay", "name": "JS: reaper-harness PDC delay", "sha256": "9c0e5d27a1f4" } ],
   "states": [ { "plugin": "gain", "state": "quiet", "sha256": "60b1e4d2c7a9" } ],
+  "sources": [ { "path": "audio/voice.wav", "sha256": "38377a01478d702ef0b6b01cfe2b71e3d3a9b2cec162b91e2df5e887de29da2d",
+                 "frames": 2646000, "channels": 2, "sampleRate": 44100, "format": "pcm24" } ],
+  "manifest": "renders/20261101-091244/manifest.jsonl",
   "pluginPath": "system VST3 directories first, the private plugins directory last",
   "scanShield": { "directories": 2, "files": 214, "added": 0, "replaced": 0, "removed": 1, "unshielded": 0 },
   "runs": [ {

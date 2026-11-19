@@ -38,9 +38,10 @@ The checked ini path is pinned into a read-only constant for the rest of the pro
 only come from it, and is checked again right before every start. A lint rule keeps the `-cfgfile` literal in
 exactly one place in the code (`src/Host.psm1`).
 
-`-ResultDir` is written during a run too, so it is refused (exit 64) when it is the default resource directory or below
-it: after expanding links, and by file identity for any other spelling. Nothing else is asked of it: unlike `-CfgDir` it
-may be elsewhere under `%APPDATA%` or on a network drive, because REAPER never runs from it.
+`-ResultDir` is written during a run too (the result file, `work/`, and `renders/` for
+[kept renders](#source-files-and-kept-renders)), so it is refused (exit 64) when it is the default resource directory
+or below it: after expanding links, and by file identity for any other spelling. Nothing else is asked of it: unlike
+`-CfgDir` it may be elsewhere under `%APPDATA%` or on a network drive, because REAPER never runs from it.
 
 Arguments reach REAPER one by one, not as one command line, so a space in a path cannot split it and the private ini
 is always the element right after `-cfgfile`. Before the start, `-ReaperArgs` holding a double quote (a caller still
@@ -189,6 +190,42 @@ REAPER resource directory looks at the scratch profile, not at the real one, so 
   have run already, so exit 64 (nothing was started) would be wrong, and leaving early would skip those checks.
 - Negative cases pass only when the outcome and the reason both match (see [CONFIG.md](CONFIG.md#negative-cases)).
   The built-in ones prove the comparer, the watchdog and the entry guards in every round.
+- Keeping a render never improves its outcome: a file that could not be kept or read makes the row INCOMPLETE, a FAIL
+  stays FAIL, and a render with NaN or Inf is a FAIL that is kept all the same
+  ([below](#source-files-and-kept-renders)).
+
+## Source files and kept renders
+
+A [source file](CONFIG.md#source-files) is a file of yours, and REAPER writes peak files next to whatever it plays. So
+REAPER never sees the file itself:
+
+- its path is resolved like an extension path: relative to the configuration file and inside its directory, links and
+  junctions resolved; an absolute or drive-relative path is a usage error;
+- before REAPER starts, its header is read (not its samples) and its SHA-256 taken; a format, a channel count, a length
+  or a rate it cannot be played at as it is, is a usage error (exit 64) and REAPER is never started;
+- each round copies it into the work directory, and the copy's hash and header must be the ones checked before the
+  start; otherwise the copy is deleted and every scenario that uses the file is INCOMPLETE. Projects name only the copy;
+- `NewRun` refuses a file at another rate than the render or with more channels than it, for the kinds of extensions
+  too: nothing is resampled or mixed down without being said.
+
+[Kept renders](CONFIG.md#keep) are the only files a run leaves in `-ResultDir` besides its result file and `work/`:
+
+- they go to `<ResultDir>/renders/<run stamp>/`, which must be under `-ResultDir` after expanding links and junctions
+  before anything is made in it, and so must each file's place; a real path that cannot be read (links in a circle) is
+  refused the same way. When the directory is refused nothing of the run is kept; when a place is, that file stays in
+  the work directory;
+- the first kept scenario claims that directory by creating its manifest, which must not be there yet: a run started in
+  the same second finds it and keeps nothing;
+- nothing is ever overwritten: a place that is taken leaves the file in the work directory;
+- the manifest is masked like a result file, and names a plugin binary like it, by bundle name and 12 hex digits of
+  its hash; the hashes it gives in full are of data of the run (the kept files, the source files, the configuration,
+  the plugin block as the run wrote it into the project), never of an installed binary;
+- nothing removes these files: delete them when you are done with them.
+
+The version of the harness in the result and the manifest is read from its own `.git` as files: `HEAD`, for a worktree
+the `gitdir:` file and `commondir` (which lead to the main repository, possibly outside the harness's directory), loose
+refs and `packed-refs`. git is never run and nothing is written there; anything unexpected gives null, never an error
+or a path.
 
 ## The build under test is the build that ran
 

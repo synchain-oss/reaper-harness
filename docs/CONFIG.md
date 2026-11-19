@@ -209,14 +209,19 @@ once, and REAPER is never started, when
 - a scenario using it runs at another `sr` (nothing is resampled; a matrix is checked per expanded scenario), or
   renders `mono` while the file has two channels (nothing is mixed down).
 
-Scenarios of extension kinds have no `sr` the harness knows of and are not checked against the rate. Files that only
-scenarios left out by `-Only` use are not read at all.
+Scenarios of extension kinds have no `sr` the harness knows of, so before the start they are not checked against the
+rate; when one of them renders a file at another rate than the render, or with more channels, `NewRun` refuses
+([EXTENDING.md](EXTENDING.md)) and the row is INCOMPLETE: nothing is resampled or mixed down for them either. Files
+that only scenarios left out by `-Only` use are not read at all.
 
 Each round copies every file into its work directory once, as `_source-<first 12 hex digits of its SHA-256>.wav`, and
-checks the copy's SHA-256 against the one taken before the start. REAPER only ever sees the copy (it writes peak files
-next to a source, never into the directory of the configuration file). When the hash differs, every scenario that uses
-the file is INCOMPLETE: `source file <path> changed since it was checked`. The copies are work files: removed after a
-green round unless `-KeepWork` is given.
+checks the copy's SHA-256 and its header (format, channels, rate, frames) against those taken before the start: header
+and hash were two reads of the file, and a file written over in between would pair the facts of one content with the
+hash of another. REAPER only ever sees the copy (it writes peak files next to a source, never into the directory of
+the configuration file). When either differs, the copy is deleted and every scenario that uses the file is
+INCOMPLETE: `source file <path> changed since it was checked`. Another name of the same content still gets a copy of its
+own. A copy is never read-only, whatever the file is. The copies are work files: removed after a green round unless
+`-KeepWork` is given.
 
 The item of a file track starts at 0 and is as long as the file: frames / rate, written with every digit and never
 short of the last frame (when frames / rate times the rate falls short of the frames in floating point, the next
@@ -387,8 +392,11 @@ and every FX with what REAPER read back. A render that failed (no file) still ge
 A kept file is never overwritten: when its place is taken (by another scenario whose id and stem name give the same
 file name, or by a run started in the same second, which finds the manifest there and keeps nothing), the file stays
 in the work directory and the scenario is INCOMPLETE with the reason (a FAIL stays FAIL). The same holds when the
-place would not be under the result directory, links and junctions resolved. A render with NaN or Inf samples keeps
-its FAIL and is kept all the same, its line counting them.
+place would not be under the result directory, links and junctions resolved, or when its real path cannot be read.
+`renders/<run stamp>/` itself is checked that way before anything is made in it: when it fails, nothing of the run is
+kept and no manifest is written. A kept file that cannot be read afterwards (a scanner holding it) stays kept, its line
+is written with what could be read, and the scenario is INCOMPLETE. A render with NaN or Inf samples keeps its FAIL
+and is kept all the same, its line counting them.
 
 ### device
 

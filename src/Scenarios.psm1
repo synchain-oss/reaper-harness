@@ -260,7 +260,8 @@ function Get-HarnessRunFiles([string]$Work, [string]$Name, [string[]]$Stems = @(
 }
 
 # Writes the project and sets the audio configuration; returns the project path, the path of its (master) render and
-# Stems (track name -> path of its stem), named as Get-HarnessRunFiles says.
+# Stems (track name -> path of its stem), named as Get-HarnessRunFiles says. A track with a file plays the round's
+# checked copy; a file at another rate than -Sr, or with more channels than -Channels, throws before the project is written.
 function New-HarnessRun {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)]$Layout, [int]$Sr = 48000, [int]$Block = 512,
           [string]$Mode = 'offline', [int]$Channels = 2, [string[]]$Bypass = @(), [double]$VolumeScale = 1.0, [int]$OffsetSamples = 0, [switch]$NoFx,
@@ -274,8 +275,14 @@ function New-HarnessRun {
     $lengths = @{}
     foreach ($t in $Layout.Tracks) {
         $file = Get-HarnessTrackFile $t
-        # A file plays as it is, in place of the test signal: never shifted (OffsetSamples), checked copy only
-        if ($t.Source -and $file -and -not $NoItems) { $copy = Get-HarnessSourceCopy -Ctx $Ctx -File $file; $sources[$t.Name] = $copy.Path; $lengths[$t.Name] = $copy.Length }
+        # A file plays as it is, in place of the test signal: never shifted (OffsetSamples), checked copy only, and for
+        # every caller (kinds of extensions too) never resampled or mixed down
+        if ($t.Source -and $file -and -not $NoItems) {
+            $copy = Get-HarnessSourceCopy -Ctx $Ctx -File $file
+            if ($copy.File.Rate -ne $Sr) { throw "source $($copy.File.Rel) is at $($copy.File.Rate) Hz and the render runs at $Sr Hz: nothing is resampled" }
+            if ($copy.File.Channels -gt $Channels) { throw "source $($copy.File.Rel) has $($copy.File.Channels) channels and the render $($Channels): nothing is mixed down" }
+            $sources[$t.Name] = $copy.Path; $lengths[$t.Name] = $copy.Length
+        }
         elseif ($t.Source -and $null -ne $t.Signal) { $sources[$t.Name] = Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples -Spec $t.Signal }
     }
     $Text = New-HarnessProjectText -Layout $Layout -Blocks ($Blocks ?? $Ctx.Blocks) -SourceWav (Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples) -Sources $sources -Lengths $lengths -RenderDir $Ctx.Work -RenderName $Name `

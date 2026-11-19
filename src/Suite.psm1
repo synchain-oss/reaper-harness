@@ -290,7 +290,7 @@ function Invoke-HarnessSuite {
         # Kept renders go to renders/<stamp>/ with a manifest; its lines repeat these fields of the run
         $keeper = New-HarnessKeep -ResultDir $ResultDir -Stamp $stamp -Run ([ordered]@{
                 reaper = $pre.ReaperVersion; toolVersion = $tool.version; toolCommit = $tool.commit; buildLabel = $result.buildLabel
-                config = [ordered]@{ name = (Split-Path -Leaf $Config); sha256 = (Get-HarnessSha256 $Config) }
+                config = [ordered]@{ name = (Split-Path -Leaf $Config); sha256 = $conf.FileSha256 } # the bytes that were read, not the file as it is now
             })
         $driver = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../lua/driver.lua'))
         $all = @($picked.Positive) + @($picked.Negative)

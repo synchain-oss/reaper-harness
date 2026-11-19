@@ -45,6 +45,16 @@ function Invoke-WithGuardStub([string]$Inner, [scriptblock]$Stub, [scriptblock]$
     try { & $Action } finally { & $guard { param($n, $s) Set-Item "function:script:$n" $s } $Inner $original }
 }
 
+# The same for the module that holds Command: one function as that module calls it (its own or one it imported) is
+# replaced while Action runs. This reaches failures a real file cannot be made to show on demand (a file a scanner holds
+# right after it was moved).
+function Invoke-WithModuleStub([string]$Command, [string]$Inner, [scriptblock]$Stub, [scriptblock]$Action) {
+    $module = (Get-Command $Command).Module
+    $original = & $module { param($n) (Get-Item "function:$n").ScriptBlock } $Inner
+    & $module { param($n, $s) Set-Item "function:script:$n" $s } $Inner $Stub
+    try { & $Action } finally { & $module { param($n, $s) Set-Item "function:script:$n" $s } $Inner $original }
+}
+
 # Runs Action while a directory of this self-test cannot be listed (a deny entry for everyone, taken away again whatever
 # happens). Denied says whether the listing really failed; where it did not, the caller's case has not run for real.
 # Restored says whether the entry was taken away again: when it was not, the scratch directory cannot be deleted, so the
@@ -1139,6 +1149,14 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     [IO.File]::WriteAllText($badFile, '{ "schema": 1, ')
     & $add 'configuration: a file that is not JSON is a usage error' $true (Test-Usage { Read-HarnessConfig -Path $badFile })
     & $add 'configuration: a missing file is a usage error' $true (Test-Usage { Read-HarnessConfig -Path (Join-Path $Tmp 'none.json') } '*not found*')
+    # The hash a manifest names the configuration by is the hash of the bytes that were parsed (one read; a byte order
+    # mark is read past as before, and is part of the hash)
+    $bomFile = Join-Path $Tmp 'config-bom.json'
+    [IO.File]::WriteAllText($bomFile, $text.Replace('"ext/', '"../fixtures/ext/'), [Text.UTF8Encoding]::new($true))
+    $bomConf = try { Read-HarnessConfig -Path $bomFile -Kinds $extensions.Kinds } catch { $null }
+    & $add 'configuration: Read-HarnessConfig gives the SHA-256 of the bytes it parsed, a byte order mark included' $false (
+        $conf.FileSha256 -ceq (Get-FileHash -LiteralPath $configFile -Algorithm SHA256).Hash.ToLowerInvariant() -and $null -ne $bomConf -and $bomConf.Name -ceq 'fixture' -and
+        $bomConf.FileSha256 -ceq (Get-FileHash -LiteralPath $bomFile -Algorithm SHA256).Hash.ToLowerInvariant() -and [IO.File]::ReadAllBytes($bomFile)[0] -eq 0xEF)
     # Ids and names that are also member names of a dictionary (Keys, Values, Count) are entries like any other
     $named = ConvertFrom-HarnessJson $text
     $named['plugins']['values'] = $named['plugins']['gain']; $named['plugins']['keys'] = $named['plugins']['bus']
@@ -1668,6 +1686,54 @@ function Get-SourceCases([string]$Tmp) {
     $ctx4 = & $newCtx $work2
     & $add 'source copies: a file no check before the start has seen is never used' $true (
         (Get-HarnessSourceGap -Ctx $ctx4 -Scenario $uses) -ceq 'source file audio/chg.wav was not checked before the start' -and $(try { $null = Get-HarnessSourceCopy -Ctx $ctx4 -File 'audio/chg.wav'; $false } catch { $_.Exception.Message -clike '*was not checked before the start*' }))
+    & $add 'source copies: a copy that failed its check is not left under the name of the content that was checked, nor kept for cleanup' $true (
+        -not (Test-Path -LiteralPath (Join-Path $work2 "_source-$($chgFiles['audio/chg.wav'].Sha256.Substring(0, 12)).wav")) -and -not $ctx2.Files.Contains($ctx2.SourceCopies['audio/chg.wav'].Path) -and
+        $ctx2.SourceCopies['audio/v16.wav'].Path -cin $ctx2.Files -and (Test-Path -LiteralPath $ctx2.SourceCopies['audio/v16.wav'].Path))
+    # Header and hash are two reads of the file: a header that is not the one of the bytes hashed (the file was written over
+    # in between) shows in the copy, whose header is read again
+    $f16 = $checked['audio/v16.wav']
+    $stale = [Collections.Specialized.OrderedDictionary]::new()
+    $stale['audio/v16.wav'] = [pscustomobject]@{ Rel = $f16.Rel; Path = $f16.Path; Sha256 = $f16.Sha256; Frames = $f16.Frames + 1; Channels = $f16.Channels; Rate = $f16.Rate; Format = $f16.Format; Length = $f16.Length }
+    $ctx5 = & $newCtx (Join-Path $Tmp 'sources-work5')
+    $null = New-Item -ItemType Directory -Force -Path $ctx5.Work
+    Copy-HarnessSourceFiles -Ctx $ctx5 -Sources $stale
+    & $add 'source copies: the same bytes with another header than the one checked before the start (written over between the two reads) are not used either' $true (
+        $ctx5.SourceCopies['audio/v16.wav'].Why -ceq 'source file audio/v16.wav changed since it was checked' -and @(Get-ChildItem -LiteralPath $ctx5.Work).Count -eq 0 -and $ctx5.Files.Count -eq 0)
+    # Two names of one content share one copy; when the first of them changed, the second still makes it
+    foreach ($n in 'twinA.wav', 'twinB.wav') { Copy-Item -LiteralPath (Join-Path $audio 'v16.wav') -Destination (Join-Path $audio $n) }
+    $twins = & $conf ([ordered]@{ ta = 'audio/twinA.wav'; tb = 'audio/twinB.wav' }) @((& $render 'ua' 'ta' @{ sr = 44100 }), (& $render 'ub' 'tb' @{ sr = 44100 }))
+    $twinFiles = Read-HarnessSourceFiles -Config $twins -Scenarios @($twins.Scenarios)
+    & $wav 'twinA.wav' 44100 1 'pcm16' 999
+    $ctx6 = @{ Work = (Join-Path $Tmp 'sources-work6'); Files = [Collections.Generic.List[string]]::new(); SourceCopies = @{}; Config = $twins; Kinds = @{}; Api = $null }
+    $null = New-Item -ItemType Directory -Force -Path $ctx6.Work
+    Copy-HarnessSourceFiles -Ctx $ctx6 -Sources $twinFiles
+    $tb = $ctx6.SourceCopies['audio/twinB.wav']
+    & $add 'source copies: two names of one content share a copy; when the first has changed since the check, the second still gets its own' $false (
+        $ctx6.SourceCopies['audio/twinA.wav'].Why -ceq 'source file audio/twinA.wav changed since it was checked' -and $null -eq $tb.Why -and (Test-Path -LiteralPath $tb.Path) -and
+        (Get-FileHash -LiteralPath $tb.Path -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $twinFiles['audio/twinB.wav'].Sha256 -and $ctx6.Files.Count -eq 1)
+    # A read-only file of the configuration: its copy can be written over and deleted like any work file
+    $ro = Join-Path $audio 'ro.wav'
+    Copy-Item -LiteralPath (Join-Path $audio 'v24.wav') -Destination $ro
+    [IO.File]::SetAttributes($ro, [IO.FileAttributes]::ReadOnly)
+    $ctx7 = @{ Work = (Join-Path $Tmp 'sources-work7'); Files = [Collections.Generic.List[string]]::new(); SourceCopies = @{}; Config = $null; Kinds = @{}; Api = $null }
+    $null = New-Item -ItemType Directory -Force -Path $ctx7.Work
+    try {
+        $roConf = & $conf ([ordered]@{ ro = 'audio/ro.wav' }) @((& $render 'r' 'ro'))
+        $ctx7.Config = $roConf
+        Copy-HarnessSourceFiles -Ctx $ctx7 -Sources (Read-HarnessSourceFiles -Config $roConf -Scenarios @($roConf.Scenarios))
+        $roCopy = $ctx7.SourceCopies['audio/ro.wav'].Path
+        $roAttributes = [IO.File]::GetAttributes($roCopy)
+    } finally {
+        [IO.File]::SetAttributes($ro, [IO.FileAttributes]::Normal)
+        foreach ($c in @(Get-ChildItem -LiteralPath $ctx7.Work -File)) { [IO.File]::SetAttributes($c.FullName, [IO.FileAttributes]::Normal) }
+    }
+    & $add 'source copies: the copy of a read-only file is not read-only, so the cleanup of a green round deletes it' $false (
+        $null -eq $ctx7.SourceCopies['audio/ro.wav'].Why -and -not ($roAttributes -band [IO.FileAttributes]::ReadOnly))
+    # 600 s is the most a file may be: exactly 600 s is fine, one frame more is not
+    & $wav 'edge.wav' 8000 1 'pcm16' (600 * 8000); & $wav 'over.wav' 8000 1 'pcm16' (600 * 8000 + 1)
+    $edges = & $conf ([ordered]@{ edge = 'audio/edge.wav'; over = 'audio/over.wav' }) @((& $render 'at' 'edge' @{ sr = 8000 }), (& $render 'past' 'over' @{ sr = 8000 }))
+    $msg = try { $null = Read-HarnessSourceFiles -Config $edges -Scenarios @($edges.Scenarios); 'accepted' } catch { $_.Exception.Message }
+    & $add "sources: a file of exactly 600 s is accepted, one frame more is refused ($msg)" $true ($msg -ceq 'USAGE: sources: 1 problem(s): source audio/over.wav is longer than 600 s')
     $cases
 }
 
@@ -1785,6 +1851,78 @@ function Get-RenderCases([string]$Tmp, [string]$RepoRoot) {
     & $add "keep: a run that finds the manifest of its second there already keeps nothing and writes no line: INCOMPLETE, a FAIL stays FAIL ($($k3.Detail))" $true (
         $k3.Status -ceq 'INCOMPLETE' -and $k3.Detail -clike "; not kept: renders/$stamp/manifest.jsonl is there already*" -and $k4.Status -ceq 'FAIL' -and $k4.Detail -clike '*not kept: *' -and
         @([IO.File]::ReadAllLines($manifest)).Count -eq 2 -and (Test-Path -LiteralPath (Join-Path $work 'gone-256-stem-Master.wav')) -and -not (Test-Path -LiteralPath (Join-Path $res "renders/$stamp/run1/gone-256.wav")) -and $ctx.Files.Count -eq 3)
+
+    # renders/ leading out of the result directory through a junction: the directory of the run is checked before anything
+    # is made in it, so nothing (no directory, no manifest, no render) gets there
+    $linkedRes = Join-Path $root 'results-linked'
+    $outside = Join-Path $root 'renders-elsewhere'
+    $null = New-Item -ItemType Directory -Force -Path $linkedRes, $outside
+    $null = New-Item -ItemType Junction -Path (Join-Path $linkedRes 'renders') -Target $outside
+    try {
+        & $mk
+        $kl = Save-HarnessKeptRender -Keep (New-HarnessKeep -ResultDir $linkedRes -Stamp $stamp) -Ctx $ctx -Scenario $sc -Round 1 -Status 'PASS' -Detail 'ok'
+        $leftOutside = @(Get-ChildItem -LiteralPath $outside -Recurse -Force).Count
+    } finally { [IO.Directory]::Delete((Join-Path $linkedRes 'renders')) } # removes the link only
+    & $add "keep: renders/ leading out of the result directory through a junction: nothing is made there, nothing moves, no line is written, INCOMPLETE ($($kl.Detail))" $true (
+        $kl.Status -ceq 'INCOMPLETE' -and $kl.Detail -ceq "ok; not kept: renders/$stamp would not be under the result directory" -and $leftOutside -eq 0 -and
+        (Test-Path -LiteralPath (Join-Path $work 'gone-256-stem-Master.wav')) -and $null -ne $kl.Record -and $null -eq $kl.Record['output']['path'])
+    # Junctions in a circle: a real path that cannot be read proves nothing. At the claim nothing of the run is kept, also
+    # by the scenarios after it; at one place that file stays where it is and the line is still written.
+    $circle = {
+        param([string]$LinkA, [string]$LinkB)
+        $null = New-Item -ItemType Directory -Force -Path $LinkB
+        $null = New-Item -ItemType Junction -Path $LinkA -Target $LinkB
+        [IO.Directory]::Delete($LinkB)
+        $null = New-Item -ItemType Junction -Path $LinkB -Target $LinkA
+    }
+    $loopRes = Join-Path $root 'results-loop'
+    & $circle (Join-Path $loopRes 'renders') (Join-Path $loopRes 'loop')
+    try {
+        $loopKeep = New-HarnessKeep -ResultDir $loopRes -Stamp $stamp
+        $kc = @(foreach ($n in 1, 2) { Save-HarnessKeptRender -Keep $loopKeep -Ctx $ctx -Scenario $sc -Round $n -Status 'PASS' -Detail 'ok' })
+    } finally { foreach ($j in 'renders', 'loop') { [IO.Directory]::Delete((Join-Path $loopRes $j)) } }
+    & $add "keep: renders/ whose real path cannot be read (junctions in a circle) is refused for the whole run: INCOMPLETE, a line for none ($(Hide-HarnessPaths $kc[0].Detail))" $true (
+        @($kc | Where-Object { $_.Status -cne 'INCOMPLETE' -or $_.Detail -cnotlike "ok; not kept: renders/$stamp cannot be shown to be under the result directory: *" }).Count -eq 0 -and
+        (Test-Path -LiteralPath (Join-Path $work 'gone-256-stem-Master.wav')) -and $kc.Count -eq 2)
+    $runLoop = Join-Path $res "renders/$stamp/run7"
+    & $circle $runLoop (Join-Path $res "renders/$stamp/loop7")
+    try { & $mk; $kr = Save-HarnessKeptRender -Keep $keep -Ctx $ctx -Scenario $sc -Round 7 -Status 'PASS' -Detail 'ok' }
+    finally { foreach ($j in $runLoop, (Join-Path $res "renders/$stamp/loop7")) { [IO.Directory]::Delete($j) } }
+    $lr = @([IO.File]::ReadAllLines($manifest))
+    & $add "keep: a place whose real path cannot be read is refused like one outside, and the line is still written ($(Hide-HarnessPaths $kr.Detail))" $true (
+        $kr.Status -ceq 'INCOMPLETE' -and $kr.Detail -clike 'ok; not kept: gone-256.wav cannot be shown to be under the result directory: *; gone-256-stem-Tone.wav cannot be shown to be under the result directory: *' -and
+        $lr.Count -eq 3 -and (ConvertFrom-HarnessJson $lr[2])['round'] -eq 7 -and (Test-Path -LiteralPath (Join-Path $work 'gone-256-stem-Master.wav')))
+    # A kept file whose hash cannot be taken (a scanner holding it right after the move): its line is still written, the
+    # stems after it are still kept, and the row is INCOMPLETE with the reason
+    & $mk
+    $holding = { param([string]$Path) if ($Path -clike '*run3?gone-256.wav') { throw 'the file is in use by another process' }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $kh = Invoke-WithModuleStub 'Save-HarnessKeptRender' 'Get-HarnessSha256' $holding { Save-HarnessKeptRender -Keep $keep -Ctx $ctx -Scenario $sc -Round 3 -Status 'PASS' -Detail 'ok' }
+    $lh = @([IO.File]::ReadAllLines($manifest))
+    $eh = ConvertFrom-HarnessJson $lh[-1]
+    & $add "keep: a kept file that cannot be read keeps its line and the stems after it: INCOMPLETE with the reason ($($kh.Detail))" $true (
+        $kh.Status -ceq 'INCOMPLETE' -and $kh.Detail -ceq 'ok; kept, but gone-256.wav could not be read: the file is in use by another process' -and $lh.Count -eq 4 -and $eh['round'] -eq 3 -and $eh['status'] -ceq 'INCOMPLETE' -and
+        $eh['output']['path'] -ceq 'run3/gone-256.wav' -and $null -eq $eh['output']['sha256'] -and $null -eq $eh['output']['frames'] -and $eh['stems'][0]['path'] -ceq 'run3/gone-256-stem-Tone.wav' -and
+        $eh['stems'][0]['sha256'] -cmatch '^[0-9a-f]{64}$' -and (Test-Path -LiteralPath (Join-Path $res "renders/$stamp/run3/gone-256.wav")) -and -not (Test-Path -LiteralPath (Join-Path $work 'gone-256-stem-Tone.wav')))
+    # Local paths: an exception text in the detail, a name a plugin reported. The line is masked as a whole, and the row's
+    # copy of it with it
+    & $mk
+    $gainVariant = $cfg.Layouts['one'].Tracks[0].Fx[0].Variant
+    $ctx.LearnReads[$gainVariant] = [pscustomobject]@{ Name = 'VST3: G (D:\Plug-ins\G.vst3)'; Pdc = '0'; Params = [ordered]@{}; Sr = 48000; Block = 512 }
+    $km = Save-HarnessKeptRender -Keep $keep -Ctx $ctx -Scenario $sc -Round 4 -Status 'PASS' -Detail "ok; it threw: Could not find a part of the path 'C:\audio work\x.wav'."
+    $ctx.LearnReads.Remove($gainVariant)
+    $lm = @([IO.File]::ReadAllLines($manifest))[-1]
+    $em = ConvertFrom-HarnessJson $lm
+    $rowCopy = ConvertTo-HarnessJsonText -Value (ConvertTo-HarnessKeptFacts $km.Record $keep.Rel)
+    & $add "keep: a local path in a detail or in a name a plugin reported is masked in the manifest line and in the row's copy of it ($($em['detail']); $($em['fx'][0]['name']))" $true (
+        $em['round'] -eq 4 -and $lm -cnotmatch '[A-Za-z]:[\\/]' -and $rowCopy -cnotmatch '[A-Za-z]:[\\/]' -and $em['detail'] -ceq "ok; it threw: Could not find a part of the path '<path>'." -and $em['fx'][0]['name'] -clike 'VST3: G (<path>*' -and
+        $km.Record['detail'] -ceq $em['detail'])
+    # A line a write that failed left unfinished stays as it is, on a line of its own; the next one starts after it
+    [IO.File]::AppendAllText($manifest, '{"schema":1,"cut')
+    & $mk
+    $kn = Save-HarnessKeptRender -Keep $keep -Ctx $ctx -Scenario $sc -Round 5 -Status 'PASS' -Detail 'ok'
+    $ln = @([IO.File]::ReadAllLines($manifest))
+    & $add 'keep: a line an earlier write left unfinished stays on a line of its own, and the next line starts after it' $false (
+        $kn.Status -ceq 'PASS' -and $ln.Count -eq 7 -and $ln[5] -ceq '{"schema":1,"cut' -and $(try { (ConvertFrom-HarnessJson $ln[6])['round'] -eq 5 } catch { $false }))
     $cases
 }
 
@@ -2646,6 +2784,13 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add 'wiring: Invoke-HarnessSuite reads the feed files with the states, before the preflight and before installing anything' $false (
         'Read-HarnessFeeds' -in $suite.Name -and 'Install-HarnessToolJsfx' -in $suite.Name -and (& $at $suite 'Read-HarnessFeeds')[0] -gt (& $at $suite 'Read-HarnessStates')[0] -and (& $at $suite 'Read-HarnessFeeds')[0] -lt (& $at $suite 'Get-HarnessPreflight')[0] -and
         (& $at $suite 'Install-HarnessToolJsfx')[0] -gt (& $at $suite 'Assert-HarnessStateIdentity')[0])
+    $sourcesAt = @(& $at $suite 'Read-HarnessSourceFiles')
+    & $add 'wiring: Invoke-HarnessSuite reads the source files once, after picking the scenarios and reading the feeds, before the preflight, the plugin install and the scan shield' $false (
+        $sourcesAt.Count -eq 1 -and $sourcesAt[0] -gt (& $at $suite 'Select-HarnessScenarios')[0] -and $sourcesAt[0] -gt (& $at $suite 'Read-HarnessFeeds')[0] -and
+        $sourcesAt[0] -lt (& $at $suite 'Get-HarnessPreflight')[0] -and $sourcesAt[0] -lt (& $at $suite 'Install-HarnessPlugins')[0] -and $sourcesAt[0] -lt (& $at $suite 'Update-HarnessScanCache')[0])
+    $suiteText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'src/Suite.psm1'))
+    & $add 'wiring: the manifest names the configuration by the hash of the bytes Read-HarnessConfig parsed; Invoke-HarnessSuite hashes no file of its own' $false (
+        'Get-HarnessSha256' -notin $suite.Name -and $suiteText -cmatch 'config = \[ordered\]@\{ name = \(Split-Path -Leaf \$Config\); sha256 = \$conf\.FileSha256 \}')
     # Below 7.4 the real path resolution meets members that do not exist; both entry points say so up front
     foreach ($script in 'run.ps1', 'doctor.ps1') {
         $wanted = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot $script), [ref]$null, [ref]$null)).ScriptRequirements.RequiredPSVersion
