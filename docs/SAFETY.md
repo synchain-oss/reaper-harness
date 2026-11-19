@@ -204,7 +204,10 @@ REAPER never sees the file itself:
 - before REAPER starts, its header is read (not its samples) and its SHA-256 taken; a format, a channel count, a length
   or a rate it cannot be played at as it is, is a usage error (exit 64) and REAPER is never started;
 - each round copies it into the work directory, and the copy's hash and header must be the ones checked before the
-  start; otherwise the copy is deleted and every scenario that uses the file is INCOMPLETE. Projects name only the copy;
+  start; otherwise, and when the copy cannot be read back, every scenario that uses the file is INCOMPLETE and the rest
+  of the round goes on. A copy whose bytes are not the hashed ones is deleted, whichever names of the same content share
+  it, and every one of them is INCOMPLETE; a name whose own check fails deletes only a copy it made itself. Projects name
+  only the copy;
 - `NewRun` refuses a file at another rate than the render or with more channels than it, for the kinds of extensions
   too: nothing is resampled or mixed down without being said.
 

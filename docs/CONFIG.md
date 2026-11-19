@@ -203,7 +203,7 @@ Before REAPER starts, every file a picked scenario uses (in its layout or in the
 once: its header is read (not its samples) and its SHA-256 taken. A usage error (exit 64) that lists every problem at
 once, and REAPER is never started, when
 
-- the file is not there, is not a WAV file, or its path leaves the directory of the configuration file;
+- the file is not there, cannot be read, is not a WAV file, or its path leaves the directory of the configuration file;
 - it is not pcm16, pcm24 or float32 (what a 32-bit float render carries exactly; pcm32 and float64 are refused);
 - it has other than 1 or 2 channels, holds no samples, or is longer than 600 s;
 - a scenario using it runs at another `sr` (nothing is resampled; a matrix is checked per expanded scenario), or
@@ -218,9 +218,13 @@ Each round copies every file into its work directory once, as `_source-<first 12
 checks the copy's SHA-256 and its header (format, channels, rate, frames) against those taken before the start: header
 and hash were two reads of the file, and a file written over in between would pair the facts of one content with the
 hash of another. REAPER only ever sees the copy (it writes peak files next to a source, never into the directory of
-the configuration file). When either differs, the copy is deleted and every scenario that uses the file is
-INCOMPLETE: `source file <path> changed since it was checked`. Another name of the same content still gets a copy of its
-own. A copy is never read-only, whatever the file is. The copies are work files: removed after a green round unless
+the configuration file). When either differs, or the copy cannot be read back (a scanner holding it right after it was
+written), every scenario that uses the file is INCOMPLETE (`source file <path> changed since it was checked`, `source
+file <path> could not be read back: ...`) and the rest of the round goes on. Two names of the same content share one
+copy. The name that made it deletes it when its own check fails, and another name of that content then makes a copy of
+its own; a later name whose own check fails (its header, or a read) leaves the copy to the names that checked it. When
+the bytes of a shared copy are not the ones hashed any more, the copy is deleted and every name that plays it is
+INCOMPLETE: `the copy of source file <path> changed after it was checked`. A copy is never read-only, whatever the file is. The copies are work files: removed after a green round unless
 `-KeepWork` is given.
 
 The item of a file track starts at 0 and is as long as the file: frames / rate, written with every digit and never
