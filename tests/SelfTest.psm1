@@ -1699,6 +1699,17 @@ function Get-SourceCases([string]$Tmp) {
     Copy-HarnessSourceFiles -Ctx $ctx5 -Sources $stale
     & $add 'source copies: the same bytes with another header than the one checked before the start (written over between the two reads) are not used either' $true (
         $ctx5.SourceCopies['audio/v16.wav'].Why -ceq 'source file audio/v16.wav changed since it was checked' -and @(Get-ChildItem -LiteralPath $ctx5.Work).Count -eq 0 -and $ctx5.Files.Count -eq 0)
+    # A copy whose hash cannot be taken right after it was written (a scanner holding it): only the scenarios that use that
+    # file cannot run; the call does not throw (it runs outside the round's error handling) and the other files are copied
+    $heldName = "_source-$($f16.Sha256.Substring(0, 12)).wav"
+    $held = { param([string]$Path) if ((Split-Path -Leaf $Path) -ceq $heldName) { throw 'the file is in use by another process' }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }.GetNewClosure()
+    $ctx8 = @{ Work = (Join-Path $Tmp 'sources-work8'); Files = [Collections.Generic.List[string]]::new(); SourceCopies = @{}; Config = $good; Kinds = @{}; Api = $null }
+    $null = New-Item -ItemType Directory -Force -Path $ctx8.Work
+    $heldThrew = try { Invoke-WithModuleStub 'Copy-HarnessSourceFiles' 'Get-HarnessSha256' $held { Copy-HarnessSourceFiles -Ctx $ctx8 -Sources $checked }; '' } catch { $_.Exception.Message }
+    & $add "source copies: a copy that cannot be read back makes only its own scenarios INCOMPLETE, the round goes on ($heldThrew)" $true (
+        $heldThrew -ceq '' -and $ctx8.SourceCopies['audio/v16.wav'].Why -ceq 'source file audio/v16.wav could not be read back: the file is in use by another process' -and
+        -not (Test-Path -LiteralPath (Join-Path $ctx8.Work $heldName)) -and -not $ctx8.Files.Contains((Join-Path $ctx8.Work $heldName)) -and
+        $null -eq $ctx8.SourceCopies['audio/v24.wav'].Why -and $null -eq (Get-HarnessSourceGap -Ctx $ctx8 -Scenario @($good.Scenarios | Where-Object id -ceq 's24')[0]) -and $ctx8.Files.Count -eq 2)
     # Two names of one content share one copy; when the first of them changed, the second still makes it
     foreach ($n in 'twinA.wav', 'twinB.wav') { Copy-Item -LiteralPath (Join-Path $audio 'v16.wav') -Destination (Join-Path $audio $n) }
     $twins = & $conf ([ordered]@{ ta = 'audio/twinA.wav'; tb = 'audio/twinB.wav' }) @((& $render 'ua' 'ta' @{ sr = 44100 }), (& $render 'ub' 'tb' @{ sr = 44100 }))

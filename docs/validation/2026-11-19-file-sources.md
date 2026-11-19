@@ -11,6 +11,7 @@ wrong rate, for a plugin that reports latency and for third-party plugins, and w
 | | |
 |---|---|
 | Plugins | `harness-pdc-delay` (the JSFX shipped with the tool, file hash prefix `58d74ae36d7d`); Airwindows Consolidated, VST3, bundle version 1.2026.320, hash prefix `c76102f6d5c3`; ZL Equalizer 2, VST3, bundle version 1.4.2, hash prefix `dc75178195be` |
+| Third-party plugins | the two above, unpacked from their public release packages into the plugin directory given to the runs, only for this check; nothing was installed on the machine, and they say nothing about which plugins a machine has |
 | Host | REAPER 7.82 x64, Dummy Audio device, a private configuration directory, REAPER's default preferences |
 | System | Windows 10 |
 | Harness | the feature branch's commit `a758edf395a1a81004edfc2dc74e96e006272c92`, which every result file and manifest line names as `toolCommit`; the commit that adds these notes changes documents only |

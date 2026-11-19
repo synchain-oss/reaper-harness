@@ -114,7 +114,13 @@ function Copy-HarnessSourceFiles {
         }
         # The copy is what REAPER plays: its bytes must be the ones hashed before the start, and its header the one checked
         # then (header and hash were two reads of the file, and a file written over in between would pair them wrongly)
-        if (-not $why -and -not ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-HarnessSha256 $copy) -ceq $f.Sha256 -and (Test-HarnessSourceHeader $copy $f))) { $why = "source file $key changed since it was checked" }
+        # A copy that cannot be read back (a scanner holding it right after it was written) is a problem of the scenarios
+        # that use it, never of the run: this is called outside the round's own error handling
+        if (-not $why) {
+            try {
+                if (-not ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-HarnessSha256 $copy) -ceq $f.Sha256 -and (Test-HarnessSourceHeader $copy $f))) { $why = "source file $key changed since it was checked" }
+            } catch { $why = "source file $key could not be read back: $($_.Exception.Message -replace '\s+', ' ')" }
+        }
         if ($why) {
             # Not left under the name of the content that was checked; another name of that content may still make it
             Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue

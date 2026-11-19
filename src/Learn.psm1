@@ -29,9 +29,11 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Guard.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Host.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Rpp.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
+
+# The settings of the learn launch; what it reads back (latency included) is read at these
 $script:LearnRate = 48000
 $script:LearnBlock = 512
-Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
 
 function Get-HarnessReaperName($Info) { "VST3: $($Info.Name) ($($Info.Vendor))" }
 
