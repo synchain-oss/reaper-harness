@@ -32,7 +32,7 @@ your own REAPER setup.
 
 | kind | |
 |---|---|
-| `render` | renders a layout (tracks, folders, sends, pan and mute, FX chains with parameters set by name or named plugin states, a test signal or a WAV file of your own per track) and compares it with a dry render, a repeat render or a variant (another block size, render mode, bypass or layout), or judges it on its own: bit-identical, or within a residual, at an expected lag, with peak, silence and per-channel level and balance checks; the master and any track as a stem of its own, kept on request |
+| `render` | renders a layout (tracks, folders, sends, pan and mute, FX chains with parameters set by name or named plugin states, a test signal or a WAV file of your own per track) and compares it with a dry render, a repeat render or a variant (another block size, render mode, bypass or layout), or judges it on its own: bit-identical, or within a residual, at an expected lag, with peak, silence and per-channel level and balance checks; the master and any track as a stem of its own, kept on request; one scenario as many parameter variants (plugin parameters, states, bypass), each a scenario of its own |
 | `device` | the dummy device runs at the configured block size, sample rate and anticipative FX setting; every FX is loaded, not offline, reports the expected latency, reads back its parameters and holds the state it was given |
 | `savereopen` | saving and reopening, once or many times, keeps every FX, parameter and state, and the reopened project renders bit-identically |
 | `instances` | adding and removing instances many times does not grow handles or memory beyond limits |

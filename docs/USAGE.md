@@ -54,15 +54,20 @@ pwsh run.ps1 -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\
 | `-KeepWork` | keep the projects, renders and driver files of green rounds (rounds that are not green are always kept) |
 | `-ReaperExe <path>` | another REAPER |
 
-Each round: the plugin bundles are copied into the private `plugins` directory, the plugin path and the scan
-shield are written, one learn launch proves the private copies are what REAPER loads, then every scenario runs,
-then the negative cases (with a `transport` scenario, its block probe and feed JSFX are copied into the private
-`Effects/reaper-harness/` too). A launch that REAPER's evaluation licence reminder ended is done once more, through
-every guard again ([SAFETY.md](SAFETY.md#dialogs)). The work files of a round go to `<ResultDir>/work/<time>-run<n>/`;
+Once, before the first round: the plugin bundles are copied into the private `plugins` directory and the plugin
+path and the scan shield are written (with a `transport` scenario, its block probe and feed JSFX are copied into the
+private `Effects/reaper-harness/` too). Each round: learning proves the private copies are what REAPER loads and
+learns every plugin setting the scenarios use, in launches of at most `limits.learnBatchSize` settings
+([CONFIG.md](CONFIG.md#limits), one row each); then every scenario runs, then the negative cases. Before the first
+launch one line says how many scenarios and negative cases were picked (after matrix and variant expansion) and how
+many plugin settings are learned in how many launches. **To be measured on real REAPER:** the seconds one learn launch
+of 32 settings takes. A launch that REAPER's evaluation licence reminder ended is done once more, through every guard
+again ([SAFETY.md](SAFETY.md#dialogs)). The work files of a round go to `<ResultDir>/work/<time>-run<n>/`;
 the result file is `<ResultDir>/<time>-<config name>-<build label>.json` ([RESULTS.md](RESULTS.md)). Renders of
 scenarios with `keep` ([CONFIG.md](CONFIG.md#keep)) go to `<ResultDir>/renders/<time>/run<n>/`, with a
 `manifest.jsonl` that describes each of them ([RESULTS.md](RESULTS.md#kept-renders)); they are not work files, and
-nothing removes them.
+nothing removes them. They take room: 180 s of stereo float32 at 48 kHz are about 69 MB, so 200 kept
+[variants](CONFIG.md#variants) of such a file are about 14 GB a round.
 
 While a run is going on, do not use REAPER on the same machine: the run refuses to start next to a running
 `reaper.exe`, but cannot stop you from starting one in the middle. Create one of your skip markers first if you

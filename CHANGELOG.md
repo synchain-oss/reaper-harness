@@ -22,6 +22,24 @@ stays backward compatible or raises that number, and the entry of that version s
   from its `.git` without running git; null when it cannot be read). Both are new fields: `schema` stays 1.
 - The learn launch reads each plugin's latency after its parameters are set and it had a second to settle, no longer
   right after adding it.
+- Parameter variants: `variants` on a `render` scenario renders it once per variant, as `<id>-<variant id>` (after a
+  matrix `<id>-<matrix suffix>-<variant id>`), each with some plugins set otherwise (`fx`: a state, parameters on top
+  of the layout's) or bypassed (`bypass`); `{ "id": "dry", "bypass": true }` is the dry reference as a variant, kept
+  like the others. A scenario with variants must give `compare` (`"none"` to only render). The rows (`facts.variant`,
+  `facts.baseScenario`) and the manifest lines (`variant`, and the display text asked for, `params[].display`) name
+  the variant. Up to 1000 variants per scenario.
+- Learning runs in launches of at most `limits.learnBatchSize` plugin settings (new, default 32, 1 … 256), each a
+  row of its own: `learn` with one launch as before, `learn.1` … `learn.<n>` with several (facts `batch`, `batches`,
+  `learned`; `variants`, `modules` and `binaries` are those of the launch). Each launch proves the binaries of its own
+  plugins; a launch that failed no longer keeps the others from running, and a scenario runs when every setting it
+  needs was learned. Of a launch, only the settings that failed nothing are used (not that of an offline plugin).
+  `learnTimeoutSec` applies to each launch.
+- `expectPdc: "report"`: the latency of such a plugin is recorded (`facts.pdc` of `device`, `savereopen` and
+  `transport` rows), not judged; a missing reading is INCOMPLETE, and so is a kept render whose learn launch did not
+  read it.
+- Behaviour changes: the scenario ids `learn` and `round-error` are refused (they are the ids of rows the tool
+  writes); one plugin setting asked to show two different display texts, anywhere in the configuration, is a usage
+  error (one learned setting has one display text). Configuration and result file stay `schema: 1`.
 
 ## v0.1.0 (2026-11-07)
 
