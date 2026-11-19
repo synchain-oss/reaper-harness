@@ -406,7 +406,7 @@ function Test-HarnessFxReport {
             $Want = $Names[$fx.Plugin]
             if ($Want -and $Facts["${q}name"] -cne $Want) { $bad.Add("${q}name='$($Facts["${q}name"])', expected '$Want'") }
             $pdc = $Plugins[$fx.Plugin].ExpectPdc
-            # -is, not -eq 'report': an integer on the left would convert the text and throw
+            # An integer or the word "report": the type says which (an integer -eq the word is merely false)
             if ($pdc -is [string]) { if ($null -ne $Gaps -and [string]$Facts["${q}pdc"] -cnotmatch '\A[0-9]{1,9}\z') { $Gaps.Add("${q}pdc was not read (the latency of $($fx.Plugin) is only reported)") } }
             elseif ($Facts["${q}pdc"] -ne "$pdc") { $bad.Add("${q}pdc=$($Facts["${q}pdc"]), expected $pdc") }
             $off = ($fx.Bypass -or ('*' -cin $Bypass) -or ($fx.Plugin -cin $Bypass)) ? 'true' : 'false'

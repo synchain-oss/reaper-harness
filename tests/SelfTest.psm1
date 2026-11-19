@@ -1632,6 +1632,14 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     # The keys a scenario needs, joined (the function returns its list as one object)
     $needs = { param($OfConfig, $OfScenario) $k = Get-HarnessScenarioLearnKeys -Config $OfConfig -Scenario $OfScenario; @($k | ForEach-Object { $_.Key }) -join ',' }
     $keysOf = { param($l) @($l.Tracks | ForEach-Object { $_.Fx } | ForEach-Object { $_.Variant }) -join ' ; ' }
+    # The learn entries of scenarios; a throw is an entry naming it, so the cases below fail by name, not the whole group
+    $learnOf = {
+        param($OfConfig, [object[]]$ScenarioList)
+        try { Get-HarnessLearnVariants -Config $OfConfig -Scenarios $ScenarioList }
+        catch { , @([pscustomobject]@{ Key = "threw: $($_.Exception.Message)"; Plugin = ''; State = ''; Params = [ordered]@{}; For = '' }) }
+    }
+    # [For] of each entry with that key ('' when there is none)
+    $forOf = { param([object[]]$Entries, [string]$WantKey) @($Entries | Where-Object { $_.Key -ceq $WantKey } | ForEach-Object { "[$($_.For)]" }) -join ',' }
 
     # Expansion: <id>[-<matrix suffix>]-<variant id>, legs of the matrix outside, the variants inside, in the order written
     $m = & $with { param($c) $s = & $scenario $c 'chain'; $s['compare'] = 'none'; $s['variants'] = @((& $v 'dry' $null $true), (& $v 'as-written'), (& $v 't025' (& $gainP ([ordered]@{ Trim = 0.25 })))) }
@@ -1669,10 +1677,9 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
             foreach ($pn in @($busLayout.Tracks[$t].PSObject.Properties.Name | Where-Object { $_ -cne 'Fx' })) { if (-not [object]::Equals($busLayout.Tracks[$t].$pn, $trim.Tracks[$t].$pn)) { "$t.$pn" } }
         })
     & $add "variants: every property of a track but its FX is that of the layout ($($differ -join ', '))" $false ($differ.Count -eq 0 -and $trim.Tracks.Count -eq 3 -and $trim.Id -ceq 'bus')
-    $learned = Get-HarnessLearnVariants -Config $o.Config -Scenarios @($o.Config.Scenarios | Where-Object { $_.baseId -ceq 'bus' })
+    $learned = & $learnOf $o.Config @($o.Config.Scenarios | Where-Object { $_.baseId -ceq 'bus' })
     & $add 'variants: two variants asking the same setting share one learned entry, first used by the first' $false (
-        @($learned | Where-Object { $_.Key -ceq 'gain|Trim=0.75' }).Count -eq 1 -and @($learned | Where-Object { $_.Key -ceq 'gain|Trim=0.75' })[0].For -ceq 'bus-trim' -and
-        @($learned | Where-Object { $_.Key -ceq 'gain@loud|' })[0].For -ceq 'bus-loud' -and @($learned | Where-Object { $_.Key -ceq 'gain|' })[0].For -ceq '')
+        (& $forOf $learned 'gain|Trim=0.75') -ceq '[bus-trim]' -and (& $forOf $learned 'gain@loud|') -ceq '[bus-loud]' -and (& $forOf $learned 'gain|') -ceq '[]')
     # A file source and an FX of its own bypass flag stay as they are under a variant
     $fb = & $with {
         param($c)
@@ -1686,7 +1693,9 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
         ($fbV.bypass -join ',') -ceq 'gain,bus' -and ((& $byId $fb 'chain-repeat-all').bypass -join ',') -ceq '*')
     $blocks = @{ 'gain|Gain=0.5' = @('<VST "g"', 'G', '>'); 'bus|Trim=0.5' = @('<VST "b"', 'B', '>'); 'bus|' = @('<VST "b0"', 'B0', '>') }
     $rppB = New-HarnessProjectText -Layout $fbV.variantLayout -Blocks $blocks -SourceWav 'S.wav' -Sources @{ Voice = 'V.wav' } -RenderDir 'D' -RenderName 'N' -Bypass @()
-    & $add 'variants: an FX bypassed in the layout and set by a variant is written BYPASS 1 with the block of the variant' $false ($rppB -cmatch '(?s)BYPASS 0 0 0\n      <VST "g".*BYPASS 1 0 0\n      <VST "b"\n')
+    $fbFacts = @((Get-HarnessFxFacts @{ Installed = @{}; Jsfx = @{}; LearnReads = @{}; States = @{}; Blocks = @{} } $fbV.variantLayout @()) | Where-Object { $_.track -ceq $fbV.variantLayout.Tracks[0].Name } | ForEach-Object { "$($_.plugin)=$($_.bypass)" }) -join ','
+    & $add "variants: an FX bypassed in the layout and set by a variant is written BYPASS 1 with the block of the variant, and its manifest line says bypass true ($fbFacts)" $false (
+        $rppB -cmatch '(?s)BYPASS 0 0 0\n      <VST "g".*BYPASS 1 0 0\n      <VST "b"\n' -and $fbFacts -ceq 'gain=False,bus=True')
     # A compare variant without a layout of its own renders the same variant layout and, without its own bypass, the
     # scenario's after expansion; with its own of either it keeps that
     $cv = & $with {
@@ -1706,7 +1715,7 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     $twice = & $with { param($c) $s = & $scenario $c 'chain'; $s['compare'] = 'none'; $s['variants'] = @((& $v 'a'), (& $v 'a')) }
     & $add "variants: a variant id used twice in a scenario of four legs is one problem ($(@($twice.Problems) -join ' | '))" $true (@($twice.Problems | Where-Object { $_ -like "*variant id 'a' is used twice*" }).Count -eq 1)
     $noLayout = try { & $with { param($c) $s = & $scenario $c 'bus'; $s['layout'] = 'nowhere'; & $renderOnly $s; $s['variants'] = @((& $v 'a' (& $gainP ([ordered]@{ Trim = 0.25 })))) } } catch { "threw: $($_.Exception.Message)" }
-    & $add "variants: of a scenario whose layout is not defined only that is said, nothing throws ($(@($noLayout.Problems) -join ' | '))" $true (
+    & $add "variants: of a scenario whose layout is not defined only that is said, nothing throws ($(($noLayout -is [string]) ? $noLayout : (@($noLayout.Problems) -join ' | ')))" $true (
         $noLayout -isnot [string] -and @($noLayout.Problems).Count -eq 1 -and @($noLayout.Problems)[0] -like "*layout 'nowhere' is not defined in layouts*")
     # The displays of one learned setting: merged when one side gives none, refused when two differ (in any order, over
     # the layouts and the variant layouts)
@@ -1717,6 +1726,17 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
         @($dWithout.Problems).Count -eq 0 -and @($dWith.Problems).Count -eq 0 -and (& $entryOf $dWithout 'gain|Gain=0.25').Params['Gain'].Display -ceq '0.25' -and
         (& $entryOf $dWithout 'gain|Gain=0.25').For -ceq 'chain-offline-44100' -and (& $entryOf $dWith 'gain|Gain=0.25').Params['Gain'].Display -ceq '0.25' -and
         $null -eq $dWithout.Config.Layouts['chain'].Tracks[0].Fx[0].Params['Gain'].Display)
+    # The same over the variants of scenarios, in either order
+    $dvMerge = & $with {
+        param($c)
+        $s = & $scenario $c 'bus'; & $renderOnly $s
+        $s['variants'] = @((& $v 'plain' (& $gainP ([ordered]@{ Gain = 0.4 }))), (& $v 'shown' (& $gainP ([ordered]@{ Gain = [ordered]@{ normalized = 0.4; display = '0.40' } }))))
+        $c['scenarios'] += [ordered]@{ id = 'bus-again'; kind = 'render'; layout = 'bus'; compare = 'none'; variants = @((& $v 'shown' (& $gainP ([ordered]@{ Gain = [ordered]@{ normalized = 0.6; display = '0.60' } }))), (& $v 'plain' (& $gainP ([ordered]@{ Gain = 0.6 })))) }
+    }
+    $mergedOf = { param([string]$WantKey) @((& $learnOf $dvMerge.Config @($dvMerge.Config.Scenarios)) | Where-Object { $_.Key -ceq $WantKey } | ForEach-Object { "$($_.For)=$($_.Params['Gain'].Display)" }) -join ',' }
+    & $add "displays: the same over the variants of scenarios, the variant without a display first or second; the variant layouts are not changed ($(& $mergedOf 'gain|Gain=0.4'); $(& $mergedOf 'gain|Gain=0.6'))" $false (
+        @($dvMerge.Problems).Count -eq 0 -and (& $mergedOf 'gain|Gain=0.4') -ceq 'bus-plain=0.40' -and (& $mergedOf 'gain|Gain=0.6') -ceq 'bus-again-shown=0.60' -and
+        $null -eq (& $byId $dvMerge 'bus-plain').variantLayout.Tracks[1].Fx[0].Params['Gain'].Display -and $null -eq (& $byId $dvMerge 'bus-again-plain').variantLayout.Tracks[1].Fx[0].Params['Gain'].Display)
     $dTwoLayouts = & $with { param($c) $c['layouts']['chain']['tracks'][0]['fx'][0]['params']['Gain'] = [ordered]@{ normalized = 0.25; display = '0.3' } }
     $dTwoLater = & $with { param($c) $c['layouts']['routing']['tracks'][2]['fx'][0]['params'] = [ordered]@{ Gain = [ordered]@{ normalized = 0.25; display = '0.3' } } }
     $dVariants = & $with { param($c) $c['scenarios'] += [ordered]@{ id = 'dv'; kind = 'render'; layout = 'states'; compare = 'none' }; $c['scenarios'][-1]['variants'] = @((& $v 'x' (& $gainP ([ordered]@{ Gain = [ordered]@{ normalized = 0.4; display = 'x' } }))), (& $v 'y' (& $gainP ([ordered]@{ Gain = [ordered]@{ normalized = 0.4; display = 'y' } })))) }
@@ -1744,7 +1764,7 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     # One walk: every variant a scenario needs is in exactly one batch, over the fixture and configurations with variants
     $leaks = @(foreach ($r in @($m, $o, $fb, $cv, $dWithout)) {
             $needing = @($r.Config.Scenarios) + @($r.Config.Negative)
-            $planned = Get-HarnessLearnBatches -Variants (Get-HarnessLearnVariants -Config $r.Config -Scenarios $needing) -Size 2
+            $planned = Get-HarnessLearnBatches -Variants (& $learnOf $r.Config $needing) -Size 2
             foreach ($s in $needing) {
                 foreach ($k in @((& $needs $r.Config $s) -split ',' | Where-Object { $_ })) {
                     $in = @($planned | Where-Object { @($_.Entries | Where-Object { $_.Key -ceq $k }).Count })
@@ -3003,6 +3023,20 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add 'wiring: Invoke-HarnessLearn names the learn tracks once and gives the same names to the learn project and to the check of the saved one' $false (
         @(& $at $learnCalls 'Get-HarnessLearnTrackNames').Count -eq 1 -and (& $at $learnCalls 'Get-HarnessLearnTrackNames')[0] -lt (& $at $learnCalls 'New-HarnessLearnProjectText')[0] -and
         ((& $namesArg 'New-HarnessLearnProjectText') -join ',') -ceq '$learnNames' -and ((& $namesArg 'Test-HarnessLearnReport') -join ',') -ceq '$learnNames')
+    # expectPdc is an integer or the word "report", and its type says which: an equality with the word would only hold
+    # because PowerShell takes a word that does not convert to an integer as unequal, so no source compares with it
+    $reportWord = @(foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1')) {
+            $fileAst = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
+            $fileAst.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.BinaryExpressionAst] -and [string]$node.Operator -cin 'Ieq', 'Ceq', 'Ine', 'Cne' -and
+                    @(@($node.Left, $node.Right) | Where-Object { $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $_.Value -ceq 'report' }).Count -gt 0
+                }, $true) | ForEach-Object { "$($f.Name): $($_.Extent.Text)" }
+        })
+    $fxReportAst = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Scenarios.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-HarnessFxReport' }, $true)
+    $typeTests = @($fxReportAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.BinaryExpressionAst] -and [string]$node.Operator -cin 'Is', 'IsNot' -and $node.Right.Extent.Text -ceq '[string]' }, $true))
+    & $add "wiring: whether a latency is only reported is told by the type of expectPdc (Test-HarnessFxReport tests it); no source compares with the word 'report' ($($reportWord -join ' | '))" $false (
+        $reportWord.Count -eq 0 -and $typeTests.Count -eq 1)
     $hostCalls = & $callsIn (Join-Path $RepoRoot 'src/Host.psm1') 'Invoke-HarnessHost'
     & $add 'wiring: Invoke-HarnessHost builds the command line from Get-HarnessCfgArgument (which checks the directory again)' $false ('Get-HarnessCfgArgument' -in $hostCalls.Name)
     # REAPER cannot run here, so only the text of the driver can be looked at: the sampler waits for this mark, and with
