@@ -233,8 +233,11 @@ change of the built-in negative cases apply to their own internal layout only.
 included. `transport` places no items (what reaches the tested track comes through its input): a file in its layout is
 checked and listed like any other, and not played. `instances` has no layout.
 
-**Not yet measured:** what REAPER makes of a file of one channel on a track of a two-channel render is to be taken
-from the validation record ([validation/](validation/)) once a run on REAPER has measured it.
+A file of one channel on a track of a two-channel render comes out on both channels, equal to each other and to the
+file: measured on REAPER 7.82 (offline render, 48 kHz, a track with no FX at pan centre and volume 1, REAPER's default
+project settings), the left and the right channel were sample-identical to each other and to the pcm24 samples of the
+file, 0.00 dB from it, with no pan-law attenuation; with `mono: true` the one-channel render was identical to the file
+too ([validation record](validation/2026-11-19-file-sources.md)). Other pan positions were not measured.
 
 The result lists each file with its full SHA-256 ([RESULTS.md](RESULTS.md#top-level)).
 
