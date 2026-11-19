@@ -183,8 +183,9 @@ local steps = {}
 -- holding a state block; entry n is on track n whatever its name; job.fx: list of { name = the name to add
 -- it by, preloaded = true when the track already holds it, params = { { name, value, display? } ... } }; job.saveAs.
 -- Reported per entry n (1-based): fx<n>_idx (-1 = REAPER could not add it, or the state block did not load),
--- fx<n>_name, fx<n>_ident, fx<n>_pdc, fx<n>_offline, fx<n>_nparams, and per parameter k:
--- fx<n>_p<k>=<normalized read back> or missing, fx<n>_p<k>_display=<text read back>.
+-- fx<n>_name, fx<n>_ident, fx<n>_offline, fx<n>_nparams, and per parameter k:
+-- fx<n>_p<k>=<normalized read back> or missing, fx<n>_p<k>_display=<text read back>; fx<n>_pdc once every
+-- parameter is set (a latency can depend on them).
 function steps.learn()
     if job.project then
         openAndWait(job.project)
@@ -192,6 +193,7 @@ function steps.learn()
         reaper.Main_OnCommand(40023, 0) -- File: New project
         wait(0.5)
     end
+    local added = {}
     for n, e in ipairs(job.fx) do
         local track = reaper.GetTrack(0, n - 1)
         if not track then
@@ -211,7 +213,7 @@ function steps.learn()
             local _, name = reaper.TrackFX_GetFXName(track, idx, "")
             put(key .. "name", name)
             put(key .. "ident", named(track, idx, "fx_ident"))
-            put(key .. "pdc", named(track, idx, "pdc"))
+            added[n] = { track = track, idx = idx }
             put(key .. "offline", reaper.TrackFX_GetOffline(track, idx))
             put(key .. "nparams", reaper.TrackFX_GetNumParams(track, idx))
             for k, prm in ipairs(e.params or {}) do
@@ -227,6 +229,7 @@ function steps.learn()
         end
     end
     wait(1.0)
+    for n, a in pairs(added) do put("fx" .. n .. "_pdc", named(a.track, a.idx, "pdc")) end
     reaper.Main_SaveProjectEx(0, job.saveAs, 0)
     wait(0.5)
     put("saved", reaper.file_exists(job.saveAs))

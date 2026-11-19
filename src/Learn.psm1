@@ -19,7 +19,8 @@
 #   Get-HarnessLearnTrackNames the learn project's track names: a template state on its template track's name (pure)
 #   Get-HarnessReaperName     "VST3: <Name> (<Vendor>)" from moduleinfo
 #   Test-HarnessLearnReport   the driver's report and the saved project against what was asked (pure)
-#   Invoke-HarnessLearn       the launch itself; fills Ctx.Blocks and Ctx.Names
+#   Invoke-HarnessLearn       the launch itself; fills Ctx.Blocks, Ctx.Names and Ctx.LearnReads (what REAPER read back
+#                             per variant, at the learn settings: 48000 Hz, block 512)
 #   Get-HarnessModuleCheck    the module proof over every launch of the round (pure over Ctx.LaunchLog)
 
 Set-StrictMode -Version Latest
@@ -28,6 +29,8 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Guard.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Host.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Rpp.psm1') -ErrorAction Stop
+$script:LearnRate = 48000
+$script:LearnBlock = 512
 Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
 
 function Get-HarnessReaperName($Info) { "VST3: $($Info.Name) ($($Info.Vendor))" }
@@ -90,7 +93,8 @@ function Split-HarnessFxIdent([string]$Ident) {
 # the driver's key=value table; Saved is Get-HarnessFxBlocks of the saved project; TrackNames the names the learn
 # project gave the tracks (learn-<n> where missing); SameFile (a, b) decides whether two paths are one file (default
 # Test-HarnessSameFile). Returns @{ Fail; Foreign; Blocks (variant key -> lines); Names (id -> name REAPER shows);
-# AddNames (id -> name to add it by) }.
+# AddNames (id -> name to add it by); Reads (variant key -> Name, Pdc, Params (name -> Read, Display) as reported, and
+# the Sr and Block they were read at) }.
 function Test-HarnessLearnReport {
     param([Parameter(Mandatory)][object[]]$Variants, [Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Jsfx = @{}, [System.Collections.IDictionary]$States = @{},
           [Parameter(Mandatory)][hashtable]$Report, $Saved, [string[]]$TrackNames = @(), [scriptblock]$SameFile)
@@ -100,6 +104,7 @@ function Test-HarnessLearnReport {
     $blocks = @{}
     $names = @{}
     $addNames = @{}
+    $reads = @{}
     for ($n = 1; $n -le $Variants.Count; $n++) {
         $v = $Variants[$n - 1]
         $js = $Jsfx.ContainsKey($v.Plugin) ? $Jsfx[$v.Plugin] : $null
@@ -126,10 +131,12 @@ function Test-HarnessLearnReport {
             }
         }
         $i = 0
+        $readParams = [ordered]@{}
         foreach ($pn in $v.Params.get_Keys()) {
             $i++
             $why = Test-HarnessParamValue $Report["${k}p$i"] $Report["${k}p${i}_display"] $v.Params[$pn]
             if ($why) { $fail.Add("$label parameter '$pn' $why") }
+            $readParams[$pn] = [pscustomobject]@{ Read = $Report["${k}p$i"]; Display = $Report["${k}p${i}_display"] }
         }
         $track = ($TrackNames.Count -ge $n -and $TrackNames[$n - 1]) ? $TrackNames[$n - 1] : "learn-$n"
         $list = @(($null -ne $Saved -and $Saved.Contains($track)) ? $Saved[$track] : @())
@@ -148,8 +155,9 @@ function Test-HarnessLearnReport {
             }
         }
         $blocks[$v.Key] = $list[0].Lines
+        $reads[$v.Key] = [pscustomobject]@{ Name = $Report["${k}name"]; Pdc = $Report["${k}pdc"]; Params = $readParams; Sr = $script:LearnRate; Block = $script:LearnBlock }
     }
-    [pscustomobject]@{ Fail = $fail.ToArray(); Foreign = $foreign.ToArray(); Blocks = $blocks; Names = $names; AddNames = $addNames }
+    [pscustomobject]@{ Fail = $fail.ToArray(); Foreign = $foreign.ToArray(); Blocks = $blocks; Names = $names; AddNames = $addNames; Reads = $reads }
 }
 
 # The learn launch. Returns an outcome (Status PASS / FAIL / INCOMPLETE, Detail, Facts) and fills Ctx.Blocks and
@@ -171,7 +179,7 @@ function Invoke-HarnessLearn {
             @{ name = ($js ? $js.AddName : (Get-HarnessReaperName $Ctx.Installed[$v.Plugin].Info)); preloaded = [bool]$v.State
                params = @(foreach ($pn in $v.Params.get_Keys()) { @{ name = $pn; value = [double]$v.Params[$pn].Normalized } }) }
         })
-    Set-HarnessAudioConfig -Sr 48000 -Block 512
+    Set-HarnessAudioConfig -Sr $script:LearnRate -Block $script:LearnBlock
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name 'learn' -Step learn -Job @{ fx = $fx; saveAs = $saveAs; project = $project } -TimeoutSec ([double]$Ctx.Limits.learnTimeoutSec)
     $expected = @{}
     foreach ($row in $Ctx.Installed.get_Values()) { $expected[$row.BinaryLeaf] = $row.Binary }
@@ -193,7 +201,7 @@ function Invoke-HarnessLearn {
         $unseen = @($mod.Binaries.get_Keys() | Where-Object { $mod.Binaries[$_] -eq 'Unseen' })
         return New-HarnessOutcome INCOMPLETE "the module list never showed $($unseen -join ', ') loaded, so the private copy is not proven" $facts
     }
-    foreach ($k in $check.Blocks.get_Keys()) { $Ctx.Blocks[$k] = $check.Blocks[$k] }
+    foreach ($k in $check.Blocks.get_Keys()) { $Ctx.Blocks[$k] = $check.Blocks[$k]; $Ctx.LearnReads[$k] = $check.Reads[$k] }
     foreach ($k in $check.Names.get_Keys()) { $Ctx.Names[$k] = $check.Names[$k]; $Ctx.AddNames[$k] = $check.AddNames[$k] }
     $proof = ($mod.Verdict -ceq 'NoBinary') ? 'no plugin binary to check (only JSFX), each JSFX found at its private path (fx_ident)' : 'every tested binary loaded from the private copy (module list and fx_ident)'
     New-HarnessOutcome PASS "$($Variants.Count) plugin variants learned; $proof" $facts

@@ -325,6 +325,7 @@ Renders the layout and compares the render with a reference.
 | `energyRatioDb` | `"A/B"` → `[min, max]`: RMS of channel A minus RMS of channel B of the test render, in dB |
 | `rmsChangeDb` | channel → `[min, max]`: RMS of the test render minus RMS of the reference, per channel, in dB |
 | `stems` | tracks rendered as files of their own, see [stems](#stems) |
+| `keep` | `true`: keep the render and its stems under `renders/` of the result directory, see [keep](#keep) |
 
 The pass criteria are fields of the scenario itself, not a nested object: in negative cases `expect` names the
 expected outcome. Both renders must be readable, comparable (same rate and channel count) and free of NaN and Inf
@@ -370,6 +371,24 @@ fader and pan.
 
 There is no switch for bypassing an FX in the middle of a render; render two layouts (or the same layout with and
 without `bypass`) and compare them instead.
+
+### keep
+
+`"keep": true` on a `render` scenario (on no other kind, and not in negative cases: usage errors) keeps what it
+rendered. After its verdict, whatever the verdict, its render moves out of the work directory to
+`<result directory>/renders/<run stamp>/run<round>/<id>.wav` and each stem to `<id>-stem-<track>.wav` next to it;
+the references (dry, first, variant) are not kept. A scenario of a matrix keeps each expanded scenario under its own
+id. The run stamp is the one of the work directories (`yyyyMMdd-HHmmss`), shared by all rounds of a run.
+
+Each kept scenario appends one line to `renders/<run stamp>/manifest.jsonl` as soon as it is done (the format is in
+[RESULTS.md](RESULTS.md#kept-renders)): what the files are, how they were rendered, what each source track played,
+and every FX with what REAPER read back. A render that failed (no file) still gets its line, with nothing moved.
+
+A kept file is never overwritten: when its place is taken (by another scenario whose id and stem name give the same
+file name, or by a run started in the same second, which finds the manifest there and keeps nothing), the file stays
+in the work directory and the scenario is INCOMPLETE with the reason (a FAIL stays FAIL). The same holds when the
+place would not be under the result directory, links and junctions resolved. A render with NaN or Inf samples keeps
+its FAIL and is kept all the same, its line counting them.
 
 ### device
 

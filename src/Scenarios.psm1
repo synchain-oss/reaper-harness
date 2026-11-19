@@ -98,6 +98,7 @@ function New-HarnessContext {
         Installed = $byId; Jsfx = $jsById; States = ($States ?? [ordered]@{}); Blocks = @{}; Names = @{}; AddNames = @{}; Launches = 0; LaunchLog = [Collections.Generic.List[object]]::new()
         Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new(); ToolJsfx = $ToolJsfx
         SourceCopies = @{} # file key -> the checked copy of this round (Copy-HarnessSourceFiles)
+        LearnReads = @{} # variant key -> what the learn launch read back (Invoke-HarnessLearn)
         Retries = [Collections.Generic.List[object]]::new() # launches started once more (see Invoke-HarnessLaunch)
         Started = [Collections.Generic.List[object]]::new() # every process started: Pid, StartUtc
         StillRunning = $null # set when the watchdog could not end a process: Pid, Label, Lock

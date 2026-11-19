@@ -59,7 +59,10 @@ shield are written, one learn launch proves the private copies are what REAPER l
 then the negative cases (with a `transport` scenario, its block probe and feed JSFX are copied into the private
 `Effects/reaper-harness/` too). A launch that REAPER's evaluation licence reminder ended is done once more, through
 every guard again ([SAFETY.md](SAFETY.md#dialogs)). The work files of a round go to `<ResultDir>/work/<time>-run<n>/`;
-the result file is `<ResultDir>/<time>-<config name>-<build label>.json` ([RESULTS.md](RESULTS.md)).
+the result file is `<ResultDir>/<time>-<config name>-<build label>.json` ([RESULTS.md](RESULTS.md)). Renders of
+scenarios with `keep` ([CONFIG.md](CONFIG.md#keep)) go to `<ResultDir>/renders/<time>/run<n>/`, with a
+`manifest.jsonl` that describes each of them ([RESULTS.md](RESULTS.md#kept-renders)); they are not work files, and
+nothing removes them.
 
 While a run is going on, do not use REAPER on the same machine: the run refuses to start next to a running
 `reaper.exe`, but cannot stop you from starting one in the middle. Create one of your skip markers first if you

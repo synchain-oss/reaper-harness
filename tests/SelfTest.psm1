@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:Src = Join-Path $PSScriptRoot '../src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Report', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Report', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $PSScriptRoot 'TempDir.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'FakeReaper.psm1') -ErrorAction Stop
 
@@ -1457,6 +1457,19 @@ function Get-LearnCases([string]$Tmp, [string]$RepoRoot) {
     $ok = & $check (& $report) (& $savedOf)
     & $add 'learn report: everything as asked: no failure, nothing foreign, one block per variant' $false ($ok.Fail.Count -eq 0 -and $ok.Foreign.Count -eq 0 -and $ok.Blocks.Count -eq 2 -and $ok.Blocks['gain|g'][0] -like '<VST "VST3: Fixture Gain*')
     $mut = { param([scriptblock]$Edit) $rep = & $report; & $Edit $rep; & $check $rep (& $savedOf) }
+    $read = (& $mut { param($r) $r.fx1_pdc = '32'; $r.fx2_pdc = '0' }).Reads
+    $gr = $read['gain|g']
+    & $add 'learn report: what REAPER read back is kept per variant: its name, latency, each parameter as read and as shown, and the rate and block it was read at' $false (
+        $read.Count -eq 2 -and $gr.Name -ceq 'VST3: Fixture Gain (Fixture Audio)' -and $gr.Pdc -ceq '32' -and $gr.Params['Gain'].Read -ceq '0.500000000' -and $gr.Params['Gain'].Display -ceq '0.50' -and
+        $gr.Sr -eq 48000 -and $gr.Block -eq 512 -and $read['bus|'].Pdc -ceq '0' -and $read['bus|'].Params.Count -eq 0)
+    # The driver reads the latency of each learned plugin once its parameters are set and it had time to settle
+    $learnStep = [regex]::Match([IO.File]::ReadAllText((Join-Path $RepoRoot 'lua/driver.lua')), '(?s)
+function steps\.learn\(\).*?
+end
+').Value
+    $settle = $learnStep.LastIndexOf('wait(1.0)')
+    & $add 'driver: the learn step reads each latency after every parameter is set and the plugins had time to settle' $false (
+        $settle -gt $learnStep.IndexOf('"_display"') -and $learnStep.IndexOf('"_pdc"') -gt $settle -and $learnStep.IndexOf('"_pdc"') -lt $learnStep.IndexOf('Main_SaveProjectEx') -and -not $learnStep.Contains('key .. "pdc"'))
     & $add 'learn report: a plugin that could not be added (index -1) is a failure naming it' $true (@((& $mut { param($r) $r.fx2_idx = '-1' }).Fail -match '^bus could not be added').Count -eq 1)
     & $add 'learn report: another plugin matched the name (TrackFX_AddByName is loose) is a failure' $true (@((& $mut { param($r) $r.fx1_name = 'VST3: Fixture Gain Pro (Fixture Audio)' }).Fail -match 'another plugin matched').Count -eq 1)
     & $add 'learn report: an offline FX is a failure' $true (@((& $mut { param($r) $r.fx2_offline = 'true' }).Fail -match 'offline').Count -eq 1)
@@ -1655,6 +1668,123 @@ function Get-SourceCases([string]$Tmp) {
     $ctx4 = & $newCtx $work2
     & $add 'source copies: a file no check before the start has seen is never used' $true (
         (Get-HarnessSourceGap -Ctx $ctx4 -Scenario $uses) -ceq 'source file audio/chg.wav was not checked before the start' -and $(try { $null = Get-HarnessSourceCopy -Ctx $ctx4 -File 'audio/chg.wav'; $false } catch { $_.Exception.Message -clike '*was not checked before the start*' }))
+    $cases
+}
+
+# ---------------------------------------------------------------- kept renders
+function Get-RenderCases([string]$Tmp, [string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $root = Join-Path $Tmp 'kept-renders'
+    $put = { param([string]$FileRel, [string]$FileText) $p = Join-Path $root $FileRel; $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p); [IO.File]::WriteAllText($p, $FileText) }
+    $c1 = '0123456789abcdef0123456789abcdef01234567'
+    $c2 = 'fedcba9876543210fedcba9876543210fedcba98'
+    # The commit of the harness, read from .git without running git
+    & $put 'detached/.git/HEAD' "$c1`n"
+    & $put 'loose/.git/HEAD' "ref: refs/heads/main`n"; & $put 'loose/.git/refs/heads/main' "$c2`n"
+    & $put 'packed/.git/HEAD' "ref: refs/heads/feat/x`n"
+    & $put 'packed/.git/packed-refs' "# pack-refs with: peeled fully-peeled sorted`n$c1 refs/heads/other`n$c2 refs/heads/feat/x`n^$c1`n"
+    & $put 'main/.git/HEAD' "ref: refs/heads/main`n"; & $put 'main/.git/refs/heads/topic' "$c1`n"
+    & $put 'main/.git/worktrees/w/HEAD' "ref: refs/heads/topic`n"; & $put 'main/.git/worktrees/w/commondir' "../..`n"
+    & $put 'wt/.git' "gitdir: $(Join-Path $root 'main/.git/worktrees/w')`n"
+    & $put 'wt-rel/.git' "gitdir: ../main/.git/worktrees/w`n"
+    $commit = { param([string]$DirRel) Get-HarnessGitCommit (Join-Path $root $DirRel) }
+    & $add 'tool commit: a detached HEAD, a branch as a loose ref and a branch only in packed-refs are read without running git' $false (
+        (& $commit 'detached') -ceq $c1 -and (& $commit 'loose') -ceq $c2 -and (& $commit 'packed') -ceq $c2)
+    & $add 'tool commit: a worktree (.git is a gitdir: file, absolute or relative) finds its branch through commondir' $false ((& $commit 'wt') -ceq $c1 -and (& $commit 'wt-rel') -ceq $c1)
+    & $put 'g-head/.git/HEAD' "not a ref`n"
+    & $put 'g-upper/.git/HEAD' "$($c1.ToUpperInvariant())`n"
+    & $put 'g-short/.git/HEAD' "$($c1.Substring(1))`n"
+    & $put 'g-noref/.git/HEAD' "ref: refs/heads/gone`n"
+    & $put 'g-escape/.git/HEAD' "ref: refs/../../../detached/.git/HEAD`n"
+    & $put 'g-badref/.git/HEAD' "ref: refs/heads/main`n"; & $put 'g-badref/.git/refs/heads/main' "$($c1.Substring(2)) and more`n"
+    & $put 'g-badpack/.git/HEAD' "ref: refs/heads/main`n"; & $put 'g-badpack/.git/packed-refs' "$($c1.ToUpperInvariant()) refs/heads/main`n"
+    & $put 'g-file/.git' "nonsense`n"
+    & $put 'g-gone/.git' "gitdir: ../nowhere/.git`n"
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $root 'g-none')
+    $got = @(foreach ($g in 'g-head', 'g-upper', 'g-short', 'g-noref', 'g-escape', 'g-badref', 'g-badpack', 'g-file', 'g-gone', 'g-none') { try { $v = & $commit $g; if ($null -ne $v) { "${g}: $v" } } catch { "${g} threw" } })
+    & $add "tool commit: anything unexpected gives null, never an error or a path ($($got -join ', '))" $true ($got.Count -eq 0)
+    $tv = Get-HarnessToolVersion
+    & $add "tool version: one constant, and the commit of this checkout or null ($($tv.version), $($tv.commit))" $false (
+        $tv.version -ceq '0.1.0' -and ($null -eq $tv.commit -or $tv.commit -cmatch '^[0-9a-f]{40}$') -and $tv.commit -ceq (Get-HarnessGitCommit $RepoRoot))
+
+    # Moving one file: only under the result directory, never over another file
+    $res = Join-Path $root 'results'
+    $null = New-Item -ItemType Directory -Force -Path $res
+    $w1 = Join-Path $root 'w1.wav'; [IO.File]::WriteAllText($w1, 'first')
+    $dest = Join-Path $res 'renders/s/run1/a.wav'
+    $m1 = Move-HarnessKeptFile -From $w1 -To $dest -ResultDir $res
+    & $add 'keep: a render moves to its place under the result directory, the directories made on the way' $false ($null -eq $m1 -and -not (Test-Path -LiteralPath $w1) -and [IO.File]::ReadAllText($dest) -ceq 'first')
+    $w2 = Join-Path $root 'w2.wav'; [IO.File]::WriteAllText($w2, 'second')
+    $m2 = Move-HarnessKeptFile -From $w2 -To $dest -ResultDir $res
+    & $add "keep: a file already at the place is never overwritten: the reason names it, both files stay as they were ($m2)" $true (
+        $m2 -ceq 'a.wav is there already and is never overwritten' -and [IO.File]::ReadAllText($dest) -ceq 'first' -and [IO.File]::ReadAllText($w2) -ceq 'second')
+    $m3 = Move-HarnessKeptFile -From $w2 -To (Join-Path $res '../escaped.wav') -ResultDir $res
+    $elsewhere = Join-Path $root 'elsewhere'
+    $null = New-Item -ItemType Directory -Force -Path $elsewhere
+    $link = Join-Path $res 'renders/linked'
+    $null = New-Item -ItemType Junction -Path $link -Target $elsewhere
+    try { $m4 = Move-HarnessKeptFile -From $w2 -To (Join-Path $link 'run1/b.wav') -ResultDir $res } finally { [IO.Directory]::Delete($link) } # removes the link only
+    & $add "keep: a place outside the result directory, by its path or through a junction, is refused and nothing moves ($m3; $m4)" $true (
+        $m3 -ceq 'escaped.wav would not be under the result directory' -and $m4 -ceq 'b.wav would not be under the result directory' -and (Test-Path -LiteralPath $w2) -and
+        -not (Test-Path -LiteralPath (Join-Path $root 'escaped.wav')) -and @(Get-ChildItem -LiteralPath $elsewhere -Recurse).Count -eq 0)
+
+    # What a kept file is said to be
+    $kf = Join-Path $root 'facts.wav'
+    [HarnessWav]::Write($kf, 48000, 2, 'float32', $false, [double[]]@(0.5, -0.25, [double]::NaN, 0, [double]::PositiveInfinity, [double]::NegativeInfinity))
+    $f = Get-HarnessKeptFileFacts $kf 'run1/facts.wav'
+    $silent = Join-Path $root 'silent.wav'
+    [HarnessWav]::Write($silent, 44100, 1, 'pcm16', $false, [double[]]::new(10))
+    $sf = Get-HarnessKeptFileFacts $silent 'run1/silent.wav'
+    $nf = Get-HarnessKeptFileFacts (Join-Path $root 'not-there.wav') ''
+    & $add 'keep: a kept file is described by its header and its samples: peak over the finite samples, NaN and Inf counted; silence has no peak; nothing kept, nothing known' $false (
+        $f.path -ceq 'run1/facts.wav' -and $f.sha256 -ceq (Get-FileHash -LiteralPath $kf -Algorithm SHA256).Hash.ToLowerInvariant() -and $f.frames -eq 3 -and $f.channels -eq 2 -and $f.sampleRate -eq 48000 -and
+        $f.format -ceq 'float32' -and [Math]::Abs($f.peakDb - 20 * [Math]::Log10(0.5)) -lt 1e-5 -and $f.nanCount -eq 1 -and $f.infCount -eq 2 -and
+        $null -eq $sf.peakDb -and $sf.nanCount -eq 0 -and $sf.infCount -eq 0 -and $sf.frames -eq 10 -and $sf.format -ceq 'pcm16' -and @($nf.get_Values() | Where-Object { $null -ne $_ }).Count -eq 0)
+
+    # One scenario kept: with no render, with its render and stem, and by a run of the same second
+    $raw = [ordered]@{
+        schema = 1; name = 'keep'; plugins = [ordered]@{ gain = [ordered]@{ bundle = 'G.vst3' } }
+        layouts = [ordered]@{ one = [ordered]@{ tracks = @([ordered]@{ name = 'Tone'; source = $true; fx = @([ordered]@{ plugin = 'gain' }) }) } }
+        scenarios = @([ordered]@{ id = 'gone'; kind = 'render'; layout = 'one'; keep = $true; stems = @('Tone'); matrix = [ordered]@{ block = @(256) } })
+    }
+    $cr = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson (ConvertTo-HarnessJsonText -Value $raw))
+    $cfg = $cr.Config | Add-Member -NotePropertyName ConfigDir -NotePropertyValue $root -PassThru
+    $work = Join-Path $root 'work'
+    $null = New-Item -ItemType Directory -Force -Path $work
+    $ctx = New-HarnessContext -ReaperExe 'stand-in' -WorkDir $work -Driver 'x' -Config $cfg -Locks @('Local\x')
+    $sc = @($cfg.Scenarios)[0]
+    $stamp = '20260101-000000'
+    $keep = New-HarnessKeep -ResultDir $res -Stamp $stamp -Run ([ordered]@{ reaper = '7.0'; toolVersion = '0.1.0' })
+    $manifest = Join-Path $res "renders/$stamp/manifest.jsonl"
+    $k1 = Save-HarnessKeptRender -Keep $keep -Ctx $ctx -Scenario $sc -Round 1 -Status 'FAIL' -Detail 'the render failed'
+    $l1 = @([IO.File]::ReadAllLines($manifest))
+    $e1 = ConvertFrom-HarnessJson $l1[0]
+    & $add 'keep: no render file: nothing moves, the status stays, and the manifest gets its line at once, saying how the scenario ended and the id it was written with' $false (
+        $e1['scenario'] -ceq 'gone-256' -and $e1['baseScenario'] -ceq 'gone' -and $e1['render']['block'] -eq 256 -and $k1.Status -ceq 'FAIL' -and $k1.Detail -ceq 'the render failed' -and $l1.Count -eq 1 -and $e1['status'] -ceq 'FAIL' -and $e1['detail'] -ceq 'the render failed' -and $e1['round'] -eq 1 -and
+        $null -eq $e1['output']['path'] -and $e1['stems'][0]['track'] -ceq 'Tone' -and $null -eq $e1['stems'][0]['path'] -and $e1['reaper'] -ceq '7.0' -and
+        @(Get-ChildItem -LiteralPath (Join-Path $res "renders/$stamp") -Recurse -File).Count -eq 1)
+    $mk = { foreach ($n in 'gone-256-stem-Master.wav', 'gone-256-stem-Tone.wav', '_dry-48000-2.wav') { $p = Join-Path $work $n; [HarnessWav]::Write($p, 48000, 2, 'float32', $false, [double[]]@(0.25, 0.25)); if (-not $ctx.Files.Contains($p)) { $ctx.Files.Add($p) } } }
+    & $mk
+    $k2 = Save-HarnessKeptRender -Keep $keep -Ctx $ctx -Scenario $sc -Round 2 -Status 'PASS' -Detail 'ok'
+    $l2 = @([IO.File]::ReadAllLines($manifest))
+    $e2 = ConvertFrom-HarnessJson $l2[1]
+    $keptMaster = Join-Path $res "renders/$stamp/run2/gone-256.wav"
+    & $add 'keep: the master of a render with stems is kept as run<k>/<id>.wav, its stems as run<k>/<id>-stem-<track>.wav; they leave the files a green round deletes, a reference stays' $false (
+        $k2.Status -ceq 'PASS' -and (Test-Path -LiteralPath $keptMaster) -and (Test-Path -LiteralPath (Join-Path $res "renders/$stamp/run2/gone-256-stem-Tone.wav")) -and
+        -not (Test-Path -LiteralPath (Join-Path $work 'gone-256-stem-Master.wav')) -and $ctx.Files.Count -eq 1 -and $ctx.Files[0] -clike '*_dry-48000-2.wav' -and (Test-Path -LiteralPath $ctx.Files[0]) -and
+        $l2.Count -eq 2 -and $e2['round'] -eq 2 -and $e2['output']['path'] -ceq 'run2/gone-256.wav' -and $e2['output']['sha256'] -ceq (Get-FileHash -LiteralPath $keptMaster -Algorithm SHA256).Hash.ToLowerInvariant() -and
+        $e2['stems'][0]['path'] -ceq 'run2/gone-256-stem-Tone.wav')
+    $rowFacts = ConvertTo-HarnessKeptFacts $k2.Record $keep.Rel
+    & $add 'keep: the row repeats the line with its paths relative to the result directory, the line itself unchanged' $false (
+        $rowFacts['output']['path'] -ceq "renders/$stamp/run2/gone-256.wav" -and $rowFacts['stems'][0]['path'] -ceq "renders/$stamp/run2/gone-256-stem-Tone.wav" -and $k2.Record['output']['path'] -ceq 'run2/gone-256.wav')
+    & $mk
+    $again = New-HarnessKeep -ResultDir $res -Stamp $stamp
+    $k3 = Save-HarnessKeptRender -Keep $again -Ctx $ctx -Scenario $sc -Round 1 -Status 'PASS'
+    $k4 = Save-HarnessKeptRender -Keep $again -Ctx $ctx -Scenario $sc -Round 1 -Status 'FAIL'
+    & $add "keep: a run that finds the manifest of its second there already keeps nothing and writes no line: INCOMPLETE, a FAIL stays FAIL ($($k3.Detail))" $true (
+        $k3.Status -ceq 'INCOMPLETE' -and $k3.Detail -clike "; not kept: renders/$stamp/manifest.jsonl is there already*" -and $k4.Status -ceq 'FAIL' -and $k4.Detail -clike '*not kept: *' -and
+        @([IO.File]::ReadAllLines($manifest)).Count -eq 2 -and (Test-Path -LiteralPath (Join-Path $work 'gone-256-stem-Master.wav')) -and -not (Test-Path -LiteralPath (Join-Path $res "renders/$stamp/run1/gone-256.wav")) -and $ctx.Files.Count -eq 3)
     $cases
 }
 
@@ -2603,7 +2733,7 @@ function Invoke-HarnessSelfTest {
         $env:APPDATA = $fakeRoam # from here on every "default resource directory" is the fake one; the child inherits it
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
-            { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot }, { Get-SourceCases $scratch },
+            { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot }, { Get-SourceCases $scratch }, { Get-RenderCases $scratch $RepoRoot },
             { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )

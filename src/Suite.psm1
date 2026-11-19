@@ -33,6 +33,7 @@ Import-Module (Join-Path $PSScriptRoot 'Extensions.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'States.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Transport.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Sources.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Renders.psm1') -ErrorAction Stop
 
 $script:LabelPattern = '^[0-9A-Za-z._-]{1,40}$'
 
@@ -258,14 +259,15 @@ function Invoke-HarnessSuite {
     $picked = Select-HarnessScenarios -Config $conf -Only $Only -NoNegative:$NoNegative # nothing picked: usage error, nothing started
     # A source file of a picked scenario that is not there, not usable or at another rate: usage error
     $sourceFiles = Read-HarnessSourceFiles -Config $conf -Scenarios (@($picked.Positive) + @($picked.Negative))
+    $tool = Get-HarnessToolVersion
     $pre = Get-HarnessPreflight -ReaperExe $ReaperExe -PluginDir $PluginDir -Config $conf -SkipMarkers $SkipMarker -ExtensionPreflight $ext.Preflight
     $Shas = [ordered]@{}
     foreach ($id in $pre.Plugins.get_Keys()) { $Shas[$id] = $pre.Plugins[$id].Sha256 }
     $result = [ordered]@{
-        schema = 1; tool = 'reaper-harness'; config = $conf.Name; buildLabel = ($BuildLabel ? $BuildLabel : (Get-HarnessDefaultLabel $Shas))
+        schema = 1; tool = 'reaper-harness'; toolVersion = $tool.version; toolCommit = $tool.commit; config = $conf.Name; buildLabel = ($BuildLabel ? $BuildLabel : (Get-HarnessDefaultLabel $Shas))
         startedUtc = [DateTime]::UtcNow.ToString('o'); reaper = $pre.ReaperVersion; verdict = 'SKIPPED'; launches = 0
         skipReasons = @($pre.Reasons | ForEach-Object { Hide-HarnessPaths $_ }); locks = $locks; extensions = @($ext.Modules)
-        plugins = @(); states = @(); sources = @($sourceFiles.get_Values() | ForEach-Object { ConvertTo-HarnessSourceFact $_ }); pluginPath = $null; scanShield = $null; runs = @(); error = $null
+        plugins = @(); states = @(); sources = @($sourceFiles.get_Values() | ForEach-Object { ConvertTo-HarnessSourceFact $_ }); manifest = $null; pluginPath = $null; scanShield = $null; runs = @(); error = $null
     }
     if ($pre.Reasons.Count) { return [pscustomobject]$result }
     $infos = [ordered]@{}
@@ -285,6 +287,11 @@ function Invoke-HarnessSuite {
         $shield = Update-HarnessScanCache -Keep @($installed | ForEach-Object { $_.Bundle })
         $result.scanShield = [ordered]@{ directories = $shield.Dirs; files = $shield.Scanned; added = $shield.Added; replaced = $shield.Replaced; removed = $shield.Removed; unshielded = $shield.Unshielded }
         $stamp = [DateTime]::Now.ToString('yyyyMMdd-HHmmss')
+        # Kept renders go to renders/<stamp>/ with a manifest; its lines repeat these fields of the run
+        $keeper = New-HarnessKeep -ResultDir $ResultDir -Stamp $stamp -Run ([ordered]@{
+                reaper = $pre.ReaperVersion; toolVersion = $tool.version; toolCommit = $tool.commit; buildLabel = $result.buildLabel
+                config = [ordered]@{ name = (Split-Path -Leaf $Config); sha256 = (Get-HarnessSha256 $Config) }
+            })
         $driver = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../lua/driver.lua'))
         $all = @($picked.Positive) + @($picked.Negative)
         $toolJsfx = @($all | Where-Object { $_.kind -ceq 'transport' }).Count ? (Install-HarnessToolJsfx) : @{}
@@ -324,8 +331,20 @@ function Invoke-HarnessSuite {
                     else { $o = Invoke-HarnessScenario -Ctx $ctx -Scenario $s }
                     $row = [ordered]@{ id = $s.id; kind = $s.kind; status = $o.Status; seconds = $o.Seconds; detail = (Hide-HarnessPaths $o.Detail) }
                     if ($o.PSObject.Properties['Facts']) { $row.facts = Hide-HarnessFacts $o.Facts }
+                    $shown = $o
+                    if ($s.kind -ceq 'render' -and $s.keep) {
+                        # Whatever the verdict: its render and stems move out of the work directory, a line goes into the manifest
+                        $kept = Save-HarnessKeptRender -Keep $keeper -Ctx $ctx -Scenario $s -Round $k -Status $o.Status -Detail $o.Detail
+                        $shown = $kept
+                        $row.status = $kept.Status; $row.detail = Hide-HarnessPaths $kept.Detail
+                        if ($kept.Record) {
+                            if (-not ($row.Contains('facts') -and $row.facts -is [System.Collections.IDictionary])) { $row.facts = [ordered]@{} }
+                            $row.facts['kept'] = ConvertTo-HarnessKeptFacts $kept.Record $keeper.Rel
+                        }
+                        if ($keeper.Lines) { $result.manifest = "$($keeper.Rel)/manifest.jsonl" }
+                    }
                     $rows.Add($row)
-                    Write-HarnessLine ("  [{0}] {1}  {2} s  {3}" -f $o.Status, $s.id, $o.Seconds, $o.Detail)
+                    Write-HarnessLine ("  [{0}] {1}  {2} s  {3}" -f $shown.Status, $s.id, $o.Seconds, $shown.Detail)
                 }
                 foreach ($s in $picked.Negative) {
                     $skip = ($NotRun -and (Test-HarnessNeedsLearn $s)) ? $NotRun : ''

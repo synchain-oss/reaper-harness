@@ -20,6 +20,8 @@ Plugin hashes are cut to their first 12 hex digits.
 |---|---|---|
 | `schema` | integer | `1`; changes when a field changes meaning or goes away |
 | `tool` | string | `reaper-harness` |
+| `toolVersion` | string | the version of the harness (`0.1.0`) |
+| `toolCommit` | string or null | the commit the harness ran from (40 hex digits), read from its own `.git` without running git: a `.git` directory or a `gitdir:` file (a worktree), `HEAD` as a commit or as a branch found as a loose ref or in `packed-refs`; null for anything else (no `.git`, an unusual layout). Changes not committed are not detected: the commit does not prove the code was exactly that |
 | `config` | string | `name` of the configuration |
 | `buildLabel` | string | `-BuildLabel`, or derived from the plugin hashes: up to five plugins their hash prefixes joined by `-`, more plugins the first 12 hex digits of one hash over all of them |
 | `startedUtc` | string | ISO 8601 |
@@ -32,6 +34,7 @@ Plugin hashes are cut to their first 12 hex digits.
 | `plugins` | object[] | VST3: `id`, `bundle`, `name` (as REAPER shows it), `version`, `classId`, `sha256` (12 hex digits of the binary's hash); JSFX: `id`, `jsfx`, `name`, `sha256` (of the file) |
 | `states` | object[] | the named states of the configuration: `plugin`, `state`, `sha256` (12 hex digits of the hash of the block); never the block itself |
 | `sources` | object[] | the WAV files the picked scenarios play ([CONFIG.md](CONFIG.md#source-files)): `path` (relative to the configuration file, parts joined by `/`), `sha256` (all 64 hex digits: the files are the user's own, not plugins), `frames`, `channels`, `sampleRate`, `format`; empty when there are none |
+| `manifest` | string or null | `renders/<run stamp>/manifest.jsonl` when a scenario with `keep` wrote a line ([kept renders](#kept-renders)); null otherwise |
 | `pluginPath` | string | how `vstpath64` was written |
 | `scanShield` | object | `directories`, `files` (scanned outside the private directory), `added`, `replaced`, `removed`, `unshielded` |
 | `runs` | object[] | one per round |
@@ -63,10 +66,36 @@ Plugin hashes are cut to their first 12 hex digits.
 | `status` | string | `PASS`, `FAIL` or `INCOMPLETE` |
 | `seconds` | number | |
 | `detail` | string | one line; for renders the comparer line (`identical= lag= maxdiff= head= frames= channels= rate= format= nonfinite= peak=`, then `rms=` and `nan= inf=` when they apply), then ` \| stem <track>: <its line>` per stem, then ` \| report <plugin>.<field>=<end> (+<growth>)` when the render is judged by a report; `device` and `savereopen` end with `states saved back unchanged: <plugin> <state> <sha256>, ...` when the layout has states; `transport`: one part per state, joined by ` \| ` ([CONFIG.md](CONFIG.md#transport)) |
-| `facts` | object | some kinds only; `learn`: `variants`, `modules` (`Proven`, `Foreign` or `Unseen`; `NoBinary` when every plugin is a JSFX, so there is no binary to prove), `binaries` (file name → `Private` / `Foreign` / `Unseen`), `states` (the states learned: `plugin`, `state`, `sha256`); `transport`: `track`, `runFxWhenStopped`, `runFxAfterStopMs` (REAPER's `runafterstop` as read), `settleSamples` (as used), `feed` (`source`: the file or `test signal`, `sha256`, `channels`; null without a feed), `states` (per state `name`, `transport`, `arm`, `monitor`, `windowSamples`, `status` (`PASS`, `FAIL`, `INCOMPLETE` or `recorded`), `problems`, and the numbers (none when the state was not observed): `clock`, `clock_samples`, `blocks`, `samples`, `silent`, `signal`, `left`, `right`, `equal`, `fed`, `fed_samples`, `playstate`, `arm`, `monitor`, `monitoring`; `win_open` and `win_closed` with `windows`; `report` with a report: plugin → field → `start`, `end`, `delta`); `render` judged by a report: `report`, the same |
+| `facts` | object | some kinds only; `learn`: `variants`, `modules` (`Proven`, `Foreign` or `Unseen`; `NoBinary` when every plugin is a JSFX, so there is no binary to prove), `binaries` (file name → `Private` / `Foreign` / `Unseen`), `states` (the states learned: `plugin`, `state`, `sha256`); `transport`: `track`, `runFxWhenStopped`, `runFxAfterStopMs` (REAPER's `runafterstop` as read), `settleSamples` (as used), `feed` (`source`: the file or `test signal`, `sha256`, `channels`; null without a feed), `states` (per state `name`, `transport`, `arm`, `monitor`, `windowSamples`, `status` (`PASS`, `FAIL`, `INCOMPLETE` or `recorded`), `problems`, and the numbers (none when the state was not observed): `clock`, `clock_samples`, `blocks`, `samples`, `silent`, `signal`, `left`, `right`, `equal`, `fed`, `fed_samples`, `playstate`, `arm`, `monitor`, `monitoring`; `win_open` and `win_closed` with `windows`; `report` with a report: plugin → field → `start`, `end`, `delta`); `render` judged by a report: `report`, the same; `render` with `keep`: `kept`, its line of the manifest with the paths relative to the result directory ([kept renders](#kept-renders)) |
 
 Negative rows also have `negative` (true), `builtin`, `expected` (the expected outcome) and `observed`; their
 `status` is PASS only when the observed outcome and the reason both match the case.
+
+## Kept renders
+
+A run whose scenarios have `keep` ([CONFIG.md](CONFIG.md#keep)) writes `<ResultDir>/renders/<run stamp>/`:
+`run<round>/<id>.wav` and `run<round>/<id>-stem-<track>.wav`, and `manifest.jsonl`, UTF-8 without BOM, one JSON
+object per line, appended and flushed when each kept scenario is done. Paths in a line are relative to the manifest's
+directory. Each line:
+
+| field | |
+|---|---|
+| `schema` | `1`; changes when a field changes meaning or goes away |
+| `runStamp`, `round` | the run stamp (`yyyyMMdd-HHmmss`, the one of the work directories) and the round, from 1 |
+| `scenario`, `baseScenario` | the scenario id, and the id it was written with (before a matrix expanded it) |
+| `variant` | null (reserved) |
+| `layout`, `kind` | the layout and `render` |
+| `status`, `detail` | the outcome of the row, after keeping (paths masked) |
+| `output` | the master: `path` (null when nothing was kept), `sha256` (all 64 hex digits), `frames`, `channels`, `sampleRate`, `format`, `peakDb` (over the finite samples; null when none is above zero), `nanCount`, `infCount` |
+| `stems` | the same per stem, with `track` first |
+| `render` | `sr`, `block`, `mode`, `channels`, `host` (`anticipativeFx`, `runFxWhenStopped`, `informOfflineState`) |
+| `sources` | per source track of the layout: `track`, `file` (as in `sources` of the result) or null, `signal` (`seconds`, `seed`, `noiseDb`, `sine` with `hz` and `db` or null) or null |
+| `fx` | per FX of the layout, track by track in order: `track`, `index` (on the track, from 0), `plugin`, `bundle` (VST3) or `jsfx`, `name` (as REAPER showed it when it was learned), `sha256` (12 hex digits of the binary or the JSFX file), `bypass` (as rendered), `state` and `stateSha256` (12 hex digits) or null, `blockSha256` (all 64 hex digits of the plugin block exactly as written into the project, each line indented by six spaces and ended by a line feed, UTF-8), `params` (per parameter asked for: `name`, `normalized` as asked, `readNormalized` and `readDisplay` as REAPER read them back, text), `pdc` (the latency REAPER reported in samples, null when it reported none) and `pdcReadAt` (`sr` 48000, `block` 512: the learn launch, where it was read, not necessarily the render's settings) |
+| `reaper`, `toolVersion`, `toolCommit`, `buildLabel` | as in the result |
+| `config` | `name` (the file name of the configuration) and `sha256` (all 64 hex digits of the file) |
+
+Everything the harness read back comes from the learn launch of the round: the latency of a plugin can differ at
+the rate and block of a render.
 
 ## Example (shortened)
 

@@ -106,7 +106,7 @@ function Copy-HarnessSourceFiles {
             catch { $why = "source file $key could not be copied: $($_.Exception.Message -replace '\s+', ' ')" }
         }
         if (-not $why -and -not ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-HarnessSha256 $copy) -ceq $f.Sha256)) { $why = "source file $key changed since it was checked" }
-        $Ctx.SourceCopies[$key] = [pscustomobject]@{ Path = $copy; Length = $f.Length; Why = $why }
+        $Ctx.SourceCopies[$key] = [pscustomobject]@{ Path = $copy; Length = $f.Length; Why = $why; File = $f }
     }
 }
 
