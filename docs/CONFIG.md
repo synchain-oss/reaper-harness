@@ -224,8 +224,9 @@ file <path> could not be read back: ...`) and the rest of the round goes on. Two
 copy. The name that made it deletes it when its own check fails, and another name of that content then makes a copy of
 its own; a later name whose own check fails (its header, or a read) leaves the copy to the names that checked it. When
 the bytes of a shared copy are not the ones hashed any more, the copy is deleted and every name that plays it is
-INCOMPLETE: `the copy of source file <path> changed after it was checked`. A copy is never read-only, whatever the file is. The copies are work files: removed after a green round unless
-`-KeepWork` is given.
+INCOMPLETE: `the copy of source file <path> changed after it was checked`; a later name of that content makes a copy of
+its own. A copy is never read-only, whatever the file is. The copies are work files: removed after a green round
+unless `-KeepWork` is given.
 
 The item of a file track starts at 0 and is as long as the file: frames / rate, written with every digit and never
 short of the last frame (when frames / rate times the rate falls short of the frames in floating point, the next

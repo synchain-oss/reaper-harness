@@ -139,7 +139,7 @@ function Copy-HarnessSourceFiles {
             # Not left under the name of the content that was checked; another name of that content may still make it
             Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
             if (-not (Test-Path -LiteralPath $copy)) { $null = $Ctx.Files.Remove($copy) }
-            if (-not $made) {
+            if ($copyChanged) {
                 foreach ($other in @($Ctx.SourceCopies.get_Keys())) {
                     $c = $Ctx.SourceCopies[$other]
                     if ($c.Path -ceq $copy -and -not $c.Why) { $c.Why = "the copy of source file $other changed after it was checked" }
