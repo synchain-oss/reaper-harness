@@ -1727,6 +1727,40 @@ function Get-SourceCases([string]$Tmp) {
     & $add "source copies: a shared copy stays for the name that made and checked it when the other name's check fails ($($later.Why))" $true (
         $sharedReads.Value -eq 2 -and $pairKeys.Count -eq 2 -and $null -eq $first.Why -and (Test-Path -LiteralPath $first.Path) -and $ctx9.Files.Contains($first.Path) -and $ctx9.Files.Count -eq 1 -and
         $later.Path -ceq $first.Path -and $later.Why -ceq "source file $($pairKeys[1]) could not be read back: the file is in use by another process" -and $null -eq (Get-HarnessSourceGap -Ctx $ctx9 -Scenario $firstSc))
+    # The bytes of a shared copy that are not the checked ones any more (another hash on the second name's read) are wrong
+    # for every name that plays them: the copy goes, and so does the first name's use of it
+    $swapReads = [ref]0
+    $swapped = { param([string]$Path) if ((Split-Path -Leaf $Path) -ceq $sharedName) { $swapReads.Value++; if ($swapReads.Value -ge 2) { return ('0' * 64) } }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }.GetNewClosure()
+    $ctx10 = @{ Work = (Join-Path $Tmp 'sources-work10'); Files = [Collections.Generic.List[string]]::new(); SourceCopies = @{}; Config = $pair; Kinds = @{}; Api = $null }
+    $null = New-Item -ItemType Directory -Force -Path $ctx10.Work
+    Invoke-WithModuleStub 'Copy-HarnessSourceFiles' 'Get-HarnessSha256' $swapped { Copy-HarnessSourceFiles -Ctx $ctx10 -Sources $pairFiles }
+    $first10 = $ctx10.SourceCopies[$pairKeys[0]]; $later10 = $ctx10.SourceCopies[$pairKeys[1]]
+    & $add "source copies: a shared copy whose bytes are not the checked ones any more is taken from every name that plays it ($($first10.Why); $($later10.Why))" $true (
+        $swapReads.Value -eq 2 -and $first10.Why -ceq "the copy of source file $($pairKeys[0]) changed after it was checked" -and $later10.Why -ceq "the copy of source file $($pairKeys[1]) changed after it was checked" -and
+        -not (Test-Path -LiteralPath $first10.Path) -and $ctx10.Files.Count -eq 0 -and (Get-HarnessSourceGap -Ctx $ctx10 -Scenario $firstSc) -ceq $first10.Why)
+    # A third name of that content, after the copy was taken away from the first two, makes and checks a copy of its own
+    foreach ($n in 'trioE.wav', 'trioF.wav', 'trioG.wav') { Copy-Item -LiteralPath (Join-Path $audio 'v16.wav') -Destination (Join-Path $audio $n) }
+    $trio = & $conf ([ordered]@{ te = 'audio/trioE.wav'; tf = 'audio/trioF.wav'; tg = 'audio/trioG.wav' }) @((& $render 'ue' 'te' @{ sr = 44100 }), (& $render 'uf' 'tf' @{ sr = 44100 }), (& $render 'ug' 'tg' @{ sr = 44100 }))
+    $trioFiles = Read-HarnessSourceFiles -Config $trio -Scenarios @($trio.Scenarios)
+    $trioKeys = @($trioFiles.get_Keys())
+    $trioReads = [ref]0
+    $swapOnce = { param([string]$Path) if ((Split-Path -Leaf $Path) -ceq $sharedName) { $trioReads.Value++; if ($trioReads.Value -eq 2) { return ('0' * 64) } }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }.GetNewClosure()
+    $ctx11 = @{ Work = (Join-Path $Tmp 'sources-work11'); Files = [Collections.Generic.List[string]]::new(); SourceCopies = @{}; Config = $trio; Kinds = @{}; Api = $null }
+    $null = New-Item -ItemType Directory -Force -Path $ctx11.Work
+    Invoke-WithModuleStub 'Copy-HarnessSourceFiles' 'Get-HarnessSha256' $swapOnce { Copy-HarnessSourceFiles -Ctx $ctx11 -Sources $trioFiles }
+    $trioCopies = @($trioKeys | ForEach-Object { $ctx11.SourceCopies[$_] })
+    $trioScenario = { param([string]$Key) @($trio.Scenarios | Where-Object { (Get-HarnessScenarioSourceKeys $trio $_) -ccontains $Key })[0] }
+    & $add "source copies: after a shared copy was taken away, a later name of that content makes and checks its own ($(@($trioCopies | ForEach-Object { if ($_.Why) { $_.Why } else { 'ok' } }) -join '; '))" $false (
+        $trioReads.Value -eq 3 -and $trioKeys.Count -eq 3 -and $trioCopies[0].Why -ceq "the copy of source file $($trioKeys[0]) changed after it was checked" -and
+        $trioCopies[1].Why -ceq "the copy of source file $($trioKeys[1]) changed after it was checked" -and $null -eq $trioCopies[2].Why -and (Test-Path -LiteralPath $trioCopies[2].Path) -and
+        $ctx11.Files.Count -eq 1 -and $ctx11.Files.Contains($trioCopies[2].Path) -and $null -eq (Get-HarnessSourceGap -Ctx $ctx11 -Scenario (& $trioScenario $trioKeys[2])) -and
+        $null -ne (Get-HarnessSourceGap -Ctx $ctx11 -Scenario (& $trioScenario $trioKeys[0])))
+    # Before the start, header and hash are two reads of the file: a file that cannot be read for its hash is one more problem
+    # of the one usage error, not an error of its own
+    $lockedSource = { param([string]$Path) if ((Split-Path -Leaf $Path) -ceq 'v16.wav') { throw 'the file is in use by another process' }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $lockedMsg = try { $null = Invoke-WithModuleStub 'Read-HarnessSourceFiles' 'Get-HarnessSha256' $lockedSource { Read-HarnessSourceFiles -Config $good -Scenarios $picked }; 'accepted' } catch { $_.Exception.Message }
+    & $add "sources: a file that cannot be read for its hash after its header is one more problem of the usage error ($lockedMsg)" $true (
+        $lockedMsg -clike 'USAGE: sources: *' -and $lockedMsg -clike '*source audio/v16.wav cannot be used: the file is in use by another process*')
     # Two names of one content share one copy; when the first of them changed, the second still makes it
     foreach ($n in 'twinA.wav', 'twinB.wav') { Copy-Item -LiteralPath (Join-Path $audio 'v16.wav') -Destination (Join-Path $audio $n) }
     $twins = & $conf ([ordered]@{ ta = 'audio/twinA.wav'; tb = 'audio/twinB.wav' }) @((& $render 'ua' 'ta' @{ sr = 44100 }), (& $render 'ub' 'tb' @{ sr = 44100 }))

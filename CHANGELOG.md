@@ -8,7 +8,8 @@ stays backward compatible or raises that number, and the entry of that version s
 
 - A track can play a WAV file of your own instead of the test signal (`layouts.<id>.tracks[].file`): pcm16, pcm24 or
   float32, 1 or 2 channels, at the rate of every scenario that uses it. It is checked before REAPER starts, copied into
-  the work directory each round (the copy's hash and header checked again), never resampled or mixed down (by the
+  the work directory each round (the copy's hash and header checked again; a copy that cannot be read back or whose
+  bytes changed takes out only the scenarios that play it), never resampled or mixed down (by the
   kinds of extensions neither), and listed with its SHA-256 in the result file (`sources`). Configuration and result
   file stay `schema: 1`.
 - `keep: true` on a `render` scenario keeps its render and stems under `renders/<run stamp>/run<round>/` of the

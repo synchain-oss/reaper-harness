@@ -69,6 +69,7 @@ function Read-HarnessSourceFiles {
         foreach ($key in (Get-HarnessScenarioSourceKeys $Config $s)) {
             if (-not $files.Contains($key) -and -not $unusable.Contains($key)) {
                 $why = @()
+                $hash = $null
                 try {
                     $path = Resolve-HarnessExtensionPath -ConfigDir $Config.ConfigDir -Relative $key -What 'source'
                     $w = Read-HarnessWavHeader $path
@@ -76,10 +77,13 @@ function Read-HarnessSourceFiles {
                     if ($w.Channels -notin 1, 2) { $why += "has $($w.Channels) channels: 1 or 2 are accepted" }
                     if ($w.Frames -lt 1) { $why += 'holds no samples' }
                     elseif ($w.Frames / [double]$w.Rate -gt $script:MaxSeconds) { $why += "is longer than $($script:MaxSeconds) s" }
+                    # In the same guard: a file that cannot be read between its header and its hash is one more problem of the
+                    # usage error, not an error of its own
+                    if (-not $why.Count) { $hash = Get-HarnessSha256 $path }
                 } catch { $why = @("cannot be used: $($_.Exception.Message -replace '^(USAGE|WAV): ', '')") }
                 if ($why.Count) { $null = $unusable.Add($key); $bad.Add("source $key $($why -join ', ')"); continue }
                 $files[$key] = [pscustomobject]@{
-                    Rel = $key; Path = $path; Sha256 = (Get-HarnessSha256 $path); Frames = $w.Frames; Channels = $w.Channels; Rate = $w.Rate; Format = $w.Format
+                    Rel = $key; Path = $path; Sha256 = $hash; Frames = $w.Frames; Channels = $w.Channels; Rate = $w.Rate; Format = $w.Format
                     Length = (Get-HarnessItemLength $w.Frames $w.Rate)
                 }
             }
@@ -118,17 +122,29 @@ function Copy-HarnessSourceFiles {
         # then (header and hash were two reads of the file, and a file written over in between would pair them wrongly)
         # A copy that cannot be read back (a scanner holding it right after it was written) is a problem of the scenarios
         # that use it, never of the run: this is called outside the round's own error handling
+        $copyChanged = $false # the bytes of the copy itself are not the ones checked (gone, or another hash)
         if (-not $why) {
             try {
-                if (-not ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-HarnessSha256 $copy) -ceq $f.Sha256 -and (Test-HarnessSourceHeader $copy $f))) { $why = "source file $key changed since it was checked" }
+                if (-not ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-HarnessSha256 $copy) -ceq $f.Sha256)) {
+                    $copyChanged = $true
+                    $why = if ($made) { "source file $key changed since it was checked" } else { "the copy of source file $key changed after it was checked" }
+                } elseif (-not (Test-HarnessSourceHeader $copy $f)) { $why = "source file $key changed since it was checked" }
             } catch { $why = "source file $key could not be read back: $($_.Exception.Message -replace '\s+', ' ')" }
         }
-        # Only the name that made the copy deletes it: a copy an earlier name made and checked is what that name plays, and a
-        # later name that fails its own check (its header, or a read that failed) cannot take it away from it
-        if ($why -and $made) {
+        # Only the name that made the copy deletes it for its own failure: a copy an earlier name made and checked is what that
+        # name plays, and a later name that fails its own check (its header, or a read that failed) cannot take it away from it.
+        # When the bytes of a shared copy are not the checked ones any more, they are wrong for every name that plays them: the
+        # copy goes, and so does every earlier name's use of it
+        if ($why -and ($made -or $copyChanged)) {
             # Not left under the name of the content that was checked; another name of that content may still make it
             Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
             if (-not (Test-Path -LiteralPath $copy)) { $null = $Ctx.Files.Remove($copy) }
+            if ($copyChanged) {
+                foreach ($other in @($Ctx.SourceCopies.get_Keys())) {
+                    $c = $Ctx.SourceCopies[$other]
+                    if ($c.Path -ceq $copy -and -not $c.Why) { $c.Why = "the copy of source file $other changed after it was checked" }
+                }
+            }
         }
         $Ctx.SourceCopies[$key] = [pscustomobject]@{ Path = $copy; Length = $f.Length; Why = $why; File = $f }
     }
