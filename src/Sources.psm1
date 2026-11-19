@@ -107,8 +107,10 @@ function Copy-HarnessSourceFiles {
         $f = $Sources[$key]
         $copy = Join-Path $Ctx.Work "_source-$($f.Sha256.Substring(0, 12)).wav"
         $why = $null
+        $made = $false
         if (-not $Ctx.Files.Contains($copy)) { # two names of the same content share one copy
             $Ctx.Files.Add($copy)
+            $made = $true
             try { [IO.File]::Copy($f.Path, $copy, $true); [IO.File]::SetAttributes($copy, [IO.FileAttributes]::Normal) }
             catch { $why = "source file $key could not be copied: $($_.Exception.Message -replace '\s+', ' ')" }
         }
@@ -121,7 +123,9 @@ function Copy-HarnessSourceFiles {
                 if (-not ((Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-HarnessSha256 $copy) -ceq $f.Sha256 -and (Test-HarnessSourceHeader $copy $f))) { $why = "source file $key changed since it was checked" }
             } catch { $why = "source file $key could not be read back: $($_.Exception.Message -replace '\s+', ' ')" }
         }
-        if ($why) {
+        # Only the name that made the copy deletes it: a copy an earlier name made and checked is what that name plays, and a
+        # later name that fails its own check (its header, or a read that failed) cannot take it away from it
+        if ($why -and $made) {
             # Not left under the name of the content that was checked; another name of that content may still make it
             Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
             if (-not (Test-Path -LiteralPath $copy)) { $null = $Ctx.Files.Remove($copy) }

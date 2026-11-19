@@ -1710,6 +1710,23 @@ function Get-SourceCases([string]$Tmp) {
         $heldThrew -ceq '' -and $ctx8.SourceCopies['audio/v16.wav'].Why -ceq 'source file audio/v16.wav could not be read back: the file is in use by another process' -and
         -not (Test-Path -LiteralPath (Join-Path $ctx8.Work $heldName)) -and -not $ctx8.Files.Contains((Join-Path $ctx8.Work $heldName)) -and
         $null -eq $ctx8.SourceCopies['audio/v24.wav'].Why -and $null -eq (Get-HarnessSourceGap -Ctx $ctx8 -Scenario @($good.Scenarios | Where-Object id -ceq 's24')[0]) -and $ctx8.Files.Count -eq 2)
+    # Two names of one content share one copy: when the check of the second name fails (here its read of the copy), the
+    # copy the first name made and checked stays, and only the second name's scenarios cannot run
+    foreach ($n in 'pairC.wav', 'pairD.wav') { Copy-Item -LiteralPath (Join-Path $audio 'v16.wav') -Destination (Join-Path $audio $n) }
+    $pair = & $conf ([ordered]@{ pc = 'audio/pairC.wav'; pd = 'audio/pairD.wav' }) @((& $render 'uc' 'pc' @{ sr = 44100 }), (& $render 'ud' 'pd' @{ sr = 44100 }))
+    $pairFiles = Read-HarnessSourceFiles -Config $pair -Scenarios @($pair.Scenarios)
+    $pairKeys = @($pairFiles.get_Keys())
+    $sharedName = "_source-$($f16.Sha256.Substring(0, 12)).wav"
+    $sharedReads = [ref]0
+    $second = { param([string]$Path) if ((Split-Path -Leaf $Path) -ceq $sharedName) { $sharedReads.Value++; if ($sharedReads.Value -ge 2) { throw 'the file is in use by another process' } }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }.GetNewClosure()
+    $ctx9 = @{ Work = (Join-Path $Tmp 'sources-work9'); Files = [Collections.Generic.List[string]]::new(); SourceCopies = @{}; Config = $pair; Kinds = @{}; Api = $null }
+    $null = New-Item -ItemType Directory -Force -Path $ctx9.Work
+    Invoke-WithModuleStub 'Copy-HarnessSourceFiles' 'Get-HarnessSha256' $second { Copy-HarnessSourceFiles -Ctx $ctx9 -Sources $pairFiles }
+    $first = $ctx9.SourceCopies[$pairKeys[0]]; $later = $ctx9.SourceCopies[$pairKeys[1]]
+    $firstSc = @($pair.Scenarios | Where-Object { (Get-HarnessScenarioSourceKeys $pair $_) -ccontains $pairKeys[0] })[0]
+    & $add "source copies: a shared copy stays for the name that made and checked it when the other name's check fails ($($later.Why))" $true (
+        $sharedReads.Value -eq 2 -and $pairKeys.Count -eq 2 -and $null -eq $first.Why -and (Test-Path -LiteralPath $first.Path) -and $ctx9.Files.Contains($first.Path) -and $ctx9.Files.Count -eq 1 -and
+        $later.Path -ceq $first.Path -and $later.Why -ceq "source file $($pairKeys[1]) could not be read back: the file is in use by another process" -and $null -eq (Get-HarnessSourceGap -Ctx $ctx9 -Scenario $firstSc))
     # Two names of one content share one copy; when the first of them changed, the second still makes it
     foreach ($n in 'twinA.wav', 'twinB.wav') { Copy-Item -LiteralPath (Join-Path $audio 'v16.wav') -Destination (Join-Path $audio $n) }
     $twins = & $conf ([ordered]@{ ta = 'audio/twinA.wav'; tb = 'audio/twinB.wav' }) @((& $render 'ua' 'ta' @{ sr = 44100 }), (& $render 'ub' 'tb' @{ sr = 44100 }))
