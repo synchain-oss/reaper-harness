@@ -64,7 +64,8 @@ function Get-HarnessFolderFlags([object[]]$Tracks) {
 # "<VST ..." or "<JS ...", last line ">"). Bypass: plugin ids whose FX are written bypassed ('*' = every FX) on top
 # of the layout's own bypass flags. NoFx: leave every FX out (the dry reference). VolumeScale: multiplies the volume
 # of the source tracks (a built-in negative case uses 0.5). Sources: track name -> signal file for tracks with a
-# signal of their own (the others get SourceWav). Stems: track names rendered as stems: the render then writes
+# signal of their own or a file (the others get SourceWav). Lengths: track name -> item length in seconds for tracks
+# that play a file (the others get Seconds). Stems: track names rendered as stems: the render then writes
 # <RenderName>-stem-<track>.wav per stem and <RenderName>-stem-Master.wav (REAPER's "master mix + stems of selected
 # tracks"; Get-HarnessRunFiles in Scenarios.psm1 expects these names). NoItems: no track plays anything (the transport
 # kind: what a track gets comes through its input).
@@ -74,6 +75,7 @@ function New-HarnessProjectText {
         [hashtable]$Blocks = @{},
         [Parameter(Mandatory)][string]$SourceWav,
         [hashtable]$Sources = @{},
+        [hashtable]$Lengths = @{},
         [Parameter(Mandatory)][string]$RenderDir,
         [Parameter(Mandatory)][string]$RenderName,
         [int]$SampleRate = 48000,
@@ -134,7 +136,7 @@ function New-HarnessProjectText {
         if ($t.Source -and -not $NoItems) {
             & $add '    <ITEM'
             & $add '      POSITION 0'
-            & $add "      LENGTH $(Format-Number $Seconds)"
+            & $add "      LENGTH $(Format-Number ($Lengths.ContainsKey($t.Name) ? $Lengths[$t.Name] : $Seconds))"
             & $add '      <SOURCE WAVE'
             & $add "        FILE $(ConvertTo-RppString ($Sources.ContainsKey($t.Name) ? $Sources[$t.Name] : $SourceWav))"
             & $add '      >'

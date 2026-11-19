@@ -32,6 +32,7 @@ Import-Module (Join-Path $PSScriptRoot 'Learn.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Extensions.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'States.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Transport.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Sources.psm1') -ErrorAction Stop
 
 $script:LabelPattern = '^[0-9A-Za-z._-]{1,40}$'
 
@@ -255,6 +256,8 @@ function Invoke-HarnessSuite {
     $states = Read-HarnessStates -Config $conf # a template or state file that does not hold the block: usage error
     Read-HarnessFeeds -Config $conf # a feed file that is not there, not a WAV or at another rate: usage error
     $picked = Select-HarnessScenarios -Config $conf -Only $Only -NoNegative:$NoNegative # nothing picked: usage error, nothing started
+    # A source file of a picked scenario that is not there, not usable or at another rate: usage error
+    $sourceFiles = Read-HarnessSourceFiles -Config $conf -Scenarios (@($picked.Positive) + @($picked.Negative))
     $pre = Get-HarnessPreflight -ReaperExe $ReaperExe -PluginDir $PluginDir -Config $conf -SkipMarkers $SkipMarker -ExtensionPreflight $ext.Preflight
     $Shas = [ordered]@{}
     foreach ($id in $pre.Plugins.get_Keys()) { $Shas[$id] = $pre.Plugins[$id].Sha256 }
@@ -262,7 +265,7 @@ function Invoke-HarnessSuite {
         schema = 1; tool = 'reaper-harness'; config = $conf.Name; buildLabel = ($BuildLabel ? $BuildLabel : (Get-HarnessDefaultLabel $Shas))
         startedUtc = [DateTime]::UtcNow.ToString('o'); reaper = $pre.ReaperVersion; verdict = 'SKIPPED'; launches = 0
         skipReasons = @($pre.Reasons | ForEach-Object { Hide-HarnessPaths $_ }); locks = $locks; extensions = @($ext.Modules)
-        plugins = @(); states = @(); pluginPath = $null; scanShield = $null; runs = @(); error = $null
+        plugins = @(); states = @(); sources = @($sourceFiles.get_Values() | ForEach-Object { ConvertTo-HarnessSourceFact $_ }); pluginPath = $null; scanShield = $null; runs = @(); error = $null
     }
     if ($pre.Reasons.Count) { return [pscustomobject]$result }
     $infos = [ordered]@{}
@@ -298,6 +301,7 @@ function Invoke-HarnessSuite {
             if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
             if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
             if ($SelfTestHooks['Stopper']) { $ctx.Stopper = $SelfTestHooks['Stopper'] }
+            Copy-HarnessSourceFiles -Ctx $ctx -Sources $sourceFiles
             $sw = [Diagnostics.Stopwatch]::StartNew()
             $rows = [Collections.Generic.List[object]]::new()
             $NotRun = ''

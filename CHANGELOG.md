@@ -4,6 +4,13 @@ What each version of reaper-harness changed. Before 1.0 the command line may cha
 configuration file and the result file are versioned on their own by their `schema` number: a change to either format
 stays backward compatible or raises that number, and the entry of that version says how to migrate.
 
+## Unreleased
+
+- A track can play a WAV file of your own instead of the test signal (`layouts.<id>.tracks[].file`): pcm16, pcm24 or
+  float32, 1 or 2 channels, at the rate of every scenario that uses it. It is checked before REAPER starts, copied into
+  the work directory each round and listed with its SHA-256 in the result file (`sources`). Configuration and result
+  file stay `schema: 1`.
+
 ## v0.1.0 (2026-11-07)
 
 The first preview release. Configuration `schema: 1`, result file `schema: 1`.

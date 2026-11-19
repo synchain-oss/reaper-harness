@@ -31,6 +31,7 @@ Plugin hashes are cut to their first 12 hex digits.
 | `extensions` | string[] | registered extension names |
 | `plugins` | object[] | VST3: `id`, `bundle`, `name` (as REAPER shows it), `version`, `classId`, `sha256` (12 hex digits of the binary's hash); JSFX: `id`, `jsfx`, `name`, `sha256` (of the file) |
 | `states` | object[] | the named states of the configuration: `plugin`, `state`, `sha256` (12 hex digits of the hash of the block); never the block itself |
+| `sources` | object[] | the WAV files the picked scenarios play ([CONFIG.md](CONFIG.md#source-files)): `path` (relative to the configuration file, parts joined by `/`), `sha256` (all 64 hex digits: the files are the user's own, not plugins), `frames`, `channels`, `sampleRate`, `format`; empty when there are none |
 | `pluginPath` | string | how `vstpath64` was written |
 | `scanShield` | object | `directories`, `files` (scanned outside the private directory), `added`, `replaced`, `removed`, `unshielded` |
 | `runs` | object[] | one per round |

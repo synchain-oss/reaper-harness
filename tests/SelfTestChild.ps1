@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) # the parent decodes UTF-8
 
 $src = Join-Path $RepoRoot 'src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Scenarios', 'Learn', 'Extensions', 'States', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $RepoRoot 'tests/FakeReaper.psm1') -ErrorAction Stop
 
 function Write-Case([string]$Label, [bool]$Bad, [bool]$Passed) { Write-Output ("RESULT`t{0}`t{1}`t{2}" -f [int]$Bad, [int]$Passed, $Label) }
@@ -702,6 +702,50 @@ $jsLearn = @($r.runs[0].scenarios)[0]
 Write-Case 'end to end: a configuration of only a JSFX learns without a module proof: learn PASS, its facts say there was no plugin binary, the round PASS' $false (
     $r.verdict -ceq 'PASS' -and $jsLearn.id -ceq 'learn' -and $jsLearn.status -ceq 'PASS' -and $jsLearn.facts.modules -ceq 'NoBinary' -and $jsLearn.facts.binaries.get_Count() -eq 0 -and
     $jsLearn.detail -clike '*no plugin binary to check (only JSFX)*' -and $r.runs[0].moduleCheck.status -ceq 'PASS' -and $r.runs[0].moduleCheck.detail -clike 'no plugin binary to check*' -and @($r.plugins).Count -eq 1)
+
+# A WAV file of the configuration as the source of a track: checked before the start, copied into the work directory,
+# its item as long as the file to the last frame; at another rate a usage error before REAPER starts
+$srcDir = Join-Path $Work 'sources'
+$null = New-Item -ItemType Directory -Force -Path $srcDir
+$voiceFrames = 30000
+while (($voiceFrames / 44100.0) * 44100 -ge $voiceFrames) { $voiceFrames++ } # a length frames / rate would cut short
+$voiceWav = Join-Path $srcDir 'voice.wav'
+[HarnessWav]::Write($voiceWav, 44100, 2, 'pcm24', $false, [HarnessWav]::Signal(44100, 2, $voiceFrames / 44100.0, 5, -12, 0, -20, 0))
+$voiceSha = (Get-FileHash -LiteralPath $voiceWav -Algorithm SHA256).Hash.ToLowerInvariant()
+$fileRate = 44100
+$fileChange = {
+    param($c)
+    & $noExt $c
+    $c.layouts.fileplay = [ordered]@{ tracks = @([ordered]@{ name = 'Voice'; source = $true; file = 'sources/voice.wav'; fx = @(@{ plugin = 'gain' }) }, [ordered]@{ name = 'Pad'; source = $true; signal = @{ seed = 3 } }) }
+    $c.scenarios = @([ordered]@{ id = 'file-play'; kind = 'render'; layout = 'fileplay'; sr = $fileRate; stems = @('Voice', 'Pad') })
+    $c.negative = @()
+}
+$fileCfg = & $writeVariant $fileChange
+$fileCfg.ReaperExe = $pwshExe; $fileCfg.ResultDir = Join-Path $Work 'e2e-sources'
+$r = Invoke-HarnessSuite @fileCfg -NoNegative -KeepWork -SelfTestHooks $hooks
+$fileRow = @($r.runs[0].scenarios | Where-Object { $_.id -ceq 'file-play' })[0]
+Write-Case "end to end: a track playing a WAV file of the configuration: PASS, and the render is as long as the file, to its last frame ($($fileRow.detail))" $false (
+    $r.verdict -ceq 'PASS' -and $fileRow.status -ceq 'PASS' -and $fileRow.detail -clike "identical=yes lag=0 * frames=$voiceFrames/$voiceFrames *")
+$fileWork = @(Get-ChildItem -LiteralPath (Join-Path $fileCfg.ResultDir 'work') -Directory)[-1].FullName
+$fileRpp = [IO.File]::ReadAllText((Join-Path $fileWork 'file-play.rpp'))
+$trackPart = { param([string]$ProjectText, [string]$TrackName) [regex]::Match($ProjectText, "(?s)  <TRACK\n    NAME `"$TrackName`"\n.*?\n  >\n").Value }
+$voicePart = & $trackPart $fileRpp 'Voice'
+$copyPath = Join-Path $fileWork "_source-$($voiceSha.Substring(0, 12)).wav"
+$inv = [Globalization.CultureInfo]::InvariantCulture
+Write-Case 'end to end: the project plays the checked copy in the work directory, never the file next to the configuration' $false (
+    [regex]::Match($voicePart, 'FILE "(.*)"').Groups[1].Value -ceq $copyPath -and (Get-FileHash -LiteralPath $copyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $voiceSha -and
+    @(Get-ChildItem -LiteralPath $fileWork -Filter '*.rpp' | Where-Object { [IO.File]::ReadAllText($_.FullName).Contains($srcDir) }).Count -eq 0)
+Write-Case 'end to end: the item of the file track is as long as the file, the item of the other track as long as the test signal' $false (
+    $voicePart -cmatch "\n      LENGTH $([regex]::Escape((Get-HarnessItemLength $voiceFrames 44100).ToString('R', $inv)))\n" -and (& $trackPart $fileRpp 'Pad') -cmatch '\n      LENGTH 0\.5\n')
+$src = @($r.sources)
+Write-Case 'end to end: the result lists the source file: path relative to the configuration, full sha256, frames, channels, sampleRate, format' $false (
+    $src.Count -eq 1 -and $src[0].path -ceq 'sources/voice.wav' -and $src[0].sha256 -ceq $voiceSha -and $src[0].frames -eq $voiceFrames -and $src[0].channels -eq 2 -and $src[0].sampleRate -eq 44100 -and $src[0].format -ceq 'pcm24')
+$fileRate = 48000
+$fileCfg = & $writeVariant $fileChange
+$fileCfg.ReaperExe = $pwshExe; $fileCfg.ResultDir = Join-Path $Work 'e2e-sources'
+$seenBefore = $seenArgs.Count
+Write-Case 'end to end: a source file at another rate than its scenario is a usage error before REAPER starts' $true (
+    (Test-Throws { $null = Invoke-HarnessSuite @fileCfg -NoNegative -SelfTestHooks $hooks } 'USAGE: sources: 1 problem(s): file-play: source sources/voice.wav is at 44100 Hz and the scenario runs at 48000 Hz: nothing is resampled') -and $seenArgs.Count -eq $seenBefore)
 
 # A feed file of the configuration: installed as it is, named with its hash; at another rate a usage error
 $feedWav = Join-Path $Work 'feeds\voice.wav'

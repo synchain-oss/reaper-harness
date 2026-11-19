@@ -96,6 +96,7 @@ function New-HarnessSpec {
             name       = (SStr $script:TrackNamePattern)
             source     = (SBool -Doc 'the track carries the test signal')
             signal     = (SObj ([ordered]@{ seed = (SInt 0 4294967295); noiseDb = (SNum -200 0); sine = $sine }) -Doc 'this track''s signal: each field given replaces the one of the top-level signal')
+            file       = (SStr $relPath.pattern -Doc 'a WAV file the track plays instead of the test signal (pcm16, pcm24 or float32, 1 or 2 channels, at the scenario''s rate), relative to the configuration file; only on a source track, not with signal')
             folder     = (SBool -Doc 'a REAPER folder (bus) track; its children are the following tracks that name it as parent')
             parent     = (SStr $script:TrackNamePattern -Doc 'name of the folder track this track belongs to')
             volume     = (SNum 0 4 -Doc 'linear track volume')
@@ -167,6 +168,7 @@ function New-HarnessSpec {
     $renderProps.report = SRef reportExpect
     $renderProps.host = SRef host
     $renderProps.matrix = SRef matrix
+    $renderProps.keep = SBool -Doc 'keep the render (and its stems) under renders/ of the result directory, with a line in its manifest'
     $p = & $common 'render'; foreach ($e in $renderProps.GetEnumerator()) { $p[$e.Key] = $e.Value }
     $Kinds.render = SObj $p @('id', 'kind', 'layout')
     $p = & $common 'device'; foreach ($e in ([ordered]@{ layout = (SStr $script:IdPattern); sr = $rate; block = $block; host = (SRef host); matrix = (SRef deviceMatrix) }).GetEnumerator()) { $p[$e.Key] = $e.Value }
@@ -208,11 +210,11 @@ function New-HarnessSpec {
 $script:Spec = New-HarnessSpec
 function Get-HarnessConfigSpec { $script:Spec }
 
-# Negative variant of a kind: the same fields without matrix, plus expect and expectDetail (both required).
+# Negative variant of a kind: the same fields without matrix and keep, plus expect and expectDetail (both required).
 function Get-NegativeKindSpec([string]$Kind) {
     $k = $script:Spec.Kinds[$Kind]
     $Props = [ordered]@{}
-    foreach ($e in $k.props.GetEnumerator()) { if ($e.Key -cne 'matrix') { $Props[$e.Key] = $e.Value } }
+    foreach ($e in $k.props.GetEnumerator()) { if ($e.Key -cnotin 'matrix', 'keep') { $Props[$e.Key] = $e.Value } }
     $Props.expect = SStr -Enum $script:Expectable
     $Props.expectDetail = SStr -Doc 'regex (.NET, case sensitive) the outcome detail must match'
     SObj $Props (@($k.req) + 'expect', 'expectDetail')
@@ -453,7 +455,7 @@ function Get-HarnessBuiltinNegatives {
 function New-CriteriaDefaults { [ordered]@{ maxDiffDb = $null; lag = 0; peakMaxDb = $null; notSilent = $false; rmsDb = $null; energyRatioDb = $null; rmsChangeDb = $null } }
 function New-RenderDefaults {
     $d = New-CriteriaDefaults
-    $d.stems = @(); $d.report = [ordered]@{}; $d.host = (New-HostDefaults); $d.mutate = $null
+    $d.stems = @(); $d.report = [ordered]@{}; $d.host = (New-HostDefaults); $d.mutate = $null; $d.keep = $false
     $d
 }
 function New-HostDefaults { [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $true; InformOfflineState = $true } }
@@ -600,9 +602,11 @@ function ConvertTo-Layout([string]$Id, $Raw, $Plugins, $Signal, $Problems) {
         $track = [pscustomobject]@{
             Name = $Name; Source = [bool]$t.source; Signal = (ConvertTo-TrackSignal (Get-Or $t 'signal' $null) $Signal); Folder = [bool](Get-Or $t 'folder' $false); Parent = $parent
             Volume = [double](Get-Or $t 'volume' 1.0); Pan = [double](Get-Or $t 'pan' 0.0); Mute = [bool](Get-Or $t 'mute' $false); MasterSend = [bool](Get-Or $t 'masterSend' $true)
-            Sends = $sends; Fx = $fxList.ToArray(); Depth = $open.Count
+            Sends = $sends; Fx = $fxList.ToArray(); Depth = $open.Count; File = [string](Get-Or $t 'file' '')
         }
         if ($track.Signal -and -not $track.Source) { $Problems.Add("${Path}: signal is given but the track carries no signal (source is false)") }
+        if ($track.File -and -not $track.Source) { $Problems.Add("${Path}: file is given but the track carries no signal (source is false)") }
+        if ($track.File -and $track.Signal) { $Problems.Add("${Path}: file and signal are both given: a track plays a file or a test signal, not both") }
         $names[$Name] = $track
         $tracks.Add($track)
         if ($track.Folder) { $open.Add($Name) }
@@ -653,7 +657,7 @@ function Find-RoutingCycle([object[]]$Nodes) {
 function Get-HarnessDryLayout {
     [pscustomobject]@{
         Id = '@dry'; Plugins = @()
-        Tracks = @([pscustomobject]@{ Name = 'Dry'; Source = $true; Signal = $null; Folder = $false; Parent = ''; Volume = 1.0; Pan = 0.0; Mute = $false; MasterSend = $true; Sends = @(); Fx = @(); Depth = 0 })
+        Tracks = @([pscustomobject]@{ Name = 'Dry'; Source = $true; Signal = $null; Folder = $false; Parent = ''; Volume = 1.0; Pan = 0.0; Mute = $false; MasterSend = $true; Sends = @(); Fx = @(); Depth = 0; File = '' })
     }
 }
 
@@ -796,6 +800,7 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
             $o.report = ConvertTo-ReportCriteria (Get-Or $Raw 'report' $null) "$Path.report" $PluginTable $layout $Problems
             if ($o.report.get_Count() -and $o.host.RunFxWhenStopped) { $Problems.Add("$Path.report: judging a render by a report needs host.runFxWhenStopped false: with it on, the plugin also runs in real time before and after the render") }
             $o.mutate = $null
+            $o.keep = [bool](Get-Or $Raw 'keep' $false)
         }
         'device' { }
         'savereopen' {
@@ -915,7 +920,8 @@ function Test-HarnessConfigData {
                 foreach ($axis in $item['matrix'].get_Keys()) { if ($item.Contains($axis)) { $Problems.Add("${Path}: '$axis' is given both directly and in matrix") } }
                 if ($item['matrix'].get_Count() -eq 0) { $Problems.Add("${Path}.matrix: needs at least one of mode, sr, block (device and transport: sr, block)") }
             }
-            foreach ($expanded in (Expand-Matrix $item)) { $all.Add((ConvertTo-Scenario $expanded $Path ($section -eq 'negative') $Layouts $Plugins $Limits $Problems $Kinds)) }
+            # baseId: the id as written, before matrix expansion
+            foreach ($expanded in (Expand-Matrix $item)) { $all.Add((ConvertTo-Scenario $expanded $Path ($section -eq 'negative') $Layouts $Plugins $Limits $Problems $Kinds | Add-Member -NotePropertyName baseId -NotePropertyValue ([string]$item['id']) -PassThru)) }
         }
     }
     $seen = @{}

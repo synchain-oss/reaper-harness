@@ -160,6 +160,7 @@ A layout is a list of tracks in project order.
 | `name` | yes | unique within the layout; no double quotes or control characters |
 | `source` | yes | the track carries the test signal |
 | `signal` | | this track's own signal: `seed`, `noiseDb`, `sine` replace the top-level ones; only on a `source` track |
+| `file` | | a WAV file the track plays instead of the test signal, relative to the configuration file; only on a `source` track and not together with `signal` (see [source files](#source-files)) |
 | `folder` | | a REAPER folder (bus) track |
 | `parent` | | name of the folder track above this one; children follow their folder directly |
 | `volume` | | linear track volume 0 … 4, default 1 |
@@ -192,6 +193,45 @@ itself and a loop (sends and folder feeds that lead back to a track) are usage e
 Measured on REAPER 7.82 (offline render, 48 kHz, REAPER's default preferences): a muted track renders silence as a
 stem and sends nothing, through post-fader, pre-fader and pre-FX sends alike. Pan is REAPER's default for stereo
 tracks (balance: the far channel is scaled, -0.5 halves the right channel, 6.02 dB below the left).
+
+### source files
+
+`"file": "audio/voice.wav"` on a `source` track plays that file instead of the test signal. The path follows the
+rules of extension paths: relative to the configuration file and inside its directory, links and junctions resolved.
+
+Before REAPER starts, every file a picked scenario uses (in its layout or in the layout it compares with) is checked
+once: its header is read (not its samples) and its SHA-256 taken. A usage error (exit 64) that lists every problem at
+once, and REAPER is never started, when
+
+- the file is not there, is not a WAV file, or its path leaves the directory of the configuration file;
+- it is not pcm16, pcm24 or float32 (what a 32-bit float render carries exactly; pcm32 and float64 are refused);
+- it has other than 1 or 2 channels, holds no samples, or is longer than 600 s;
+- a scenario using it runs at another `sr` (nothing is resampled; a matrix is checked per expanded scenario), or
+  renders `mono` while the file has two channels (nothing is mixed down).
+
+Scenarios of extension kinds have no `sr` the harness knows of and are not checked against the rate. Files that only
+scenarios left out by `-Only` use are not read at all.
+
+Each round copies every file into its work directory once, as `_source-<first 12 hex digits of its SHA-256>.wav`, and
+checks the copy's SHA-256 against the one taken before the start. REAPER only ever sees the copy (it writes peak files
+next to a source, never into the directory of the configuration file). When the hash differs, every scenario that uses
+the file is INCOMPLETE: `source file <path> changed since it was checked`. The copies are work files: removed after a
+green round unless `-KeepWork` is given.
+
+The item of a file track starts at 0 and is as long as the file: frames / rate, written with every digit and never
+short of the last frame (when frames / rate times the rate falls short of the frames in floating point, the next
+larger number is written). The items of the other source tracks keep the length of the test signal
+(`signal.seconds`); a project renders as long as its longest item. A file is played as it is: the shift and the volume
+change of the built-in negative cases apply to their own internal layout only.
+
+`render`, `device` and `savereopen` play the file wherever they would play the test signal, the dry reference
+included. `transport` places no items (what reaches the tested track comes through its input): a file in its layout is
+checked and listed like any other, and not played. `instances` has no layout.
+
+**Not yet measured:** what REAPER makes of a file of one channel on a track of a two-channel render is to be taken
+from the validation record ([validation/](validation/)) once a run on REAPER has measured it.
+
+The result lists each file with its full SHA-256 ([RESULTS.md](RESULTS.md#top-level)).
 
 ## JSFX
 
