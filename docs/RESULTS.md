@@ -14,8 +14,8 @@ A single quote is only taken as the closing one when no `\` or `/` comes after i
 apostrophe inside a name, and the path goes on).
 Plugin hashes are cut to their first 12 hex digits. Two kinds of hash are written in full, because they identify data
 of the user's own and not an installed product: those of the files a run was given (source files, the configuration
-file) and those of the files and project text a run made (kept renders, the plugin block of a kept render). A hash
-says nothing about the content it was taken of.
+file) and those of the files and project text a run made (kept renders, the plugin block of a kept render or of a
+parameter listing). A hash says nothing about the content it was taken of.
 
 ## Top level
 
@@ -42,6 +42,7 @@ says nothing about the content it was taken of.
 | `scanShield` | object | `directories`, `files` (scanned outside the private directory), `added`, `replaced`, `removed`, `unshielded` |
 | `runs` | object[] | one per round |
 | `error` | string or null | why the run stopped on an unexpected error (paths masked); null otherwise |
+| `listing` | object or null | the parameter listing of `run.ps1 -List params` ([parameter listing](#parameter-listing)); null for any other run |
 
 ## A round (`runs[]`)
 
@@ -64,7 +65,7 @@ says nothing about the content it was taken of.
 
 | field | type | |
 |---|---|---|
-| `id` | string | scenario id, after matrix and variant expansion; `learn` for the learn launch (first, when any scenario needs it), `learn.1` … `learn.<n>` when learning took several launches ([`learnBatchSize`](CONFIG.md#limits)), one row each; `round-error` (kind `internal`, last) when the round stopped on an unexpected error. A scenario that did not run for want of learned blocks says why and names the learn row: `not run: learning the plugin blocks it needs did not succeed (see the learn.2 row)` |
+| `id` | string | scenario id, after matrix and variant expansion; `learn` for the learn launch (first, when any scenario needs it), `learn.1` … `learn.<n>` when learning took several launches ([`learnBatchSize`](CONFIG.md#limits)), one row each; `params` (last) in a [parameter listing](#parameter-listing); `round-error` (kind `internal`, last) when the round stopped on an unexpected error. A scenario that did not run for want of learned blocks says why and names the learn row: `not run: learning the plugin blocks it needs did not succeed (see the learn.2 row)` |
 | `kind` | string | |
 | `status` | string | `PASS`, `FAIL` or `INCOMPLETE` |
 | `seconds` | number | |
@@ -93,7 +94,7 @@ directory. Each line:
 | `stems` | the same per stem, with `track` first |
 | `render` | `sr`, `block`, `mode`, `channels`, `host` (`anticipativeFx`, `runFxWhenStopped`, `informOfflineState`) |
 | `sources` | per source track of the layout: `track`, `file` (as in `sources` of the result) or null, `signal` (`seconds`, `seed`, `noiseDb`, `sine` with `hz` and `db` or null) or null |
-| `fx` | per FX of the layout, track by track in order: `track`, `index` (on the track, from 0), `plugin`, `bundle` (VST3) or `jsfx`, `name` (as REAPER showed it when it was learned), `sha256` (12 hex digits of the binary or the JSFX file), `bypass` (as rendered), `state` and `stateSha256` (12 hex digits, as in `states` of the result) or null, `blockSha256` (all 64 hex digits of the plugin block exactly as written into the project, each line indented by six spaces and ended by a line feed, UTF-8: project text the run wrote, which ties the values read back to what was rendered; it is not a hash of a plugin binary), `params` (per parameter asked for, the variant's on top of the layout's: `name`, `normalized` and `display` as asked (`display` null when not given), `readNormalized` and `readDisplay` as REAPER read them back, text), `pdc` (the latency REAPER reported in samples, null when it reported none) and `pdcReadAt` (`sr` 48000, `block` 512: the learn launch, where it was read, not necessarily the render's settings) |
+| `fx` | per FX of the layout, track by track in order: `track`, `index` (on the track, from 0), `plugin`, `bundle` (VST3) or `jsfx`, `name` (as REAPER showed it when it was learned), `sha256` (12 hex digits of the binary or the JSFX file), `bypass` (as rendered), `state` and `stateSha256` (12 hex digits, as in `states` of the result) or null, `blockSha256` (all 64 hex digits of the plugin block exactly as written into the project, each line indented by six spaces and ended by a line feed, UTF-8: project text the run wrote, which ties the values read back to what was rendered; it is not a hash of a plugin binary; a [parameter listing](#parameter-listing) of the same plugin, as learned, has the same one), `params` (per parameter asked for, the variant's on top of the layout's: `name`, `normalized` and `display` as asked (`display` null when not given), `readNormalized` and `readDisplay` as REAPER read them back, text), `pdc` (the latency REAPER reported in samples, null when it reported none) and `pdcReadAt` (`sr` 48000, `block` 512: the learn launch, where it was read, not necessarily the render's settings) |
 | `reaper`, `toolVersion`, `toolCommit`, `buildLabel` | as in the result |
 | `config` | `name` (the file name of the configuration) and `sha256` (all 64 hex digits of the bytes the run read and parsed, not of the file as it is later) |
 
@@ -107,6 +108,28 @@ Every string of a line is masked like the rest of a result file (a reason can ho
 it, a name comes from the plugin). A line a write that failed left unfinished (a full disk) stays as it is, and the
 next line starts on a line of its own after it; the row of that scenario says its line could not be written. Read the
 manifest line by line and treat a line that does not parse as missing.
+
+## Parameter listing
+
+A listing (`run.ps1 -List params`, [USAGE.md](USAGE.md#listing-parameters)) writes its result file as
+`<yyyyMMdd-HHmmss>-<config name>-<build label>-list-params.json`. Its one round has the `learn` row and a `params` row
+(kind `params`, `facts`: `plugins`, `listed`, `params`, `sweeps`, `notFound`), and `listing` holds:
+
+| field | |
+|---|---|
+| `kind` | `params` |
+| `values` | the values of the sweep, null without one |
+| `readAt` | `sr` 48000, `block` 512: the learn launch, where everything was read |
+| `plugins` | per plugin of the configuration (or of `-ListPlugin`), in its order: `id`, `bundle` (VST3) or `jsfx`, `sha256` (12 hex digits), `name` (as REAPER shows it), `class` (`name`, `vendor`, `cid` from `moduleinfo.json`; null for a JSFX), `classFrom` (`moduleinfo`, null for a JSFX), `version`, `status`, `listed`, `why` (null when there is nothing to say), `blockSha256` (the hash of its block as learned, like `blockSha256` of a kept render, [below](#kept-renders)), `pdc` (the latency REAPER reported at the learn launch), `nparams` (the count the learn step read), `paramCount` (the parameters listed), `hostBy` (`ident` and / or `names`: how REAPER's own parameters were told), `params`, `sweeps`, `notFound` (swept names the plugin does not have) |
+| `plugins[].params[]` | `index` (from 0), `name`, `normalized`, `display`, `ident` (REAPER's identifier, null when it gives none), `sameNameAs` (the index of the first parameter of that name, null for the first), `host` (one of REAPER's own), `exact` (the name has no control character and is valid UTF-8), `masked` (a path in the name or display text was masked), `settable`, `displayUsable` (the display text is exact, at most 128 characters and has no path), `problem` (why it could not be read cleanly, null otherwise) |
+| `plugins[].sweeps[]` | `name`, `index` (the parameter learning sets for that name), `values[]`: `normalized` (as asked), `readNormalized` and `display` (as REAPER read them back), `displayUsable` |
+
+A plugin is PASS when it was listed cleanly and every swept name was found, FAIL when a swept name is not one of its
+parameters, and INCOMPLETE when it was not listed (`why`: its learn entry did not pass, the count of its parameters
+changed while it was read, an instance to sweep could not be added or was not the plugin learned, the driver stopped
+with an error) or some of its parameters could not be read cleanly (they are listed all the same, each with its
+`problem`). The `params` row is the worst of them; with no plugin to list it is INCOMPLETE. Names and display texts
+come from the plugin and are masked like any text of a result file.
 
 ## Example (shortened)
 

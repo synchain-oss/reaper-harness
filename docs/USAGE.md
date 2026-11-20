@@ -37,6 +37,59 @@ pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Config my-plugin.json -PluginDir 
 never starts REAPER: REAPER found (`-ReaperExe`, default `%ProgramFiles%\REAPER (x64)\reaper.exe`), every bundle with
 a readable `moduleinfo.json` and a Windows binary, no other `reaper.exe` running, no skip marker present.
 
+### Listing parameters
+
+To write `params` and `variants` ([CONFIG.md](CONFIG.md#variants)) you need the exact names of a plugin's parameters
+and the normalized values that give the display texts you want. `run.ps1 -List params` reads them from REAPER:
+
+```powershell
+pwsh run.ps1 -List params -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\build\VST3 -ResultDir D:\reaper-harness\results
+pwsh run.ps1 -List params -ListPlugin eq -ListParam "Band 1 Gain" -ListValues 0,0.5,1 -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\build\VST3 -ResultDir D:\reaper-harness\results
+```
+
+A listing is a run of one round that starts REAPER once, under every guard of a run (the private configuration
+directory, the GUI locks, the module check, the default resource directory listed before and after): it installs the
+plugins of the configuration (or those `-ListPlugin` names), adds each on a track of its own and saves the project as
+learning does, then reads every parameter of each: its index, name, normalized value, display text and REAPER's
+identifier. No scenario and no negative case runs. `doctor.ps1` still never starts REAPER. The configuration must be
+complete and valid, layouts and scenarios included, though none of them runs; a minimal one:
+
+```json
+{
+  "schema": 1,
+  "name": "my-eq-listing",
+  "plugins": { "eq": { "bundle": "My EQ.vst3" } },
+  "layouts": { "one": { "tracks": [ { "name": "Voice", "source": true, "fx": [ { "plugin": "eq" } ] } ] } },
+  "scenarios": [ { "id": "device", "kind": "device", "layout": "one" } ]
+}
+```
+
+The console shows the `learn` and `params` rows and a line per plugin
+(`eq: 214 parameters (3 of them REAPER's own, 205 settable), 3 names used more than once`); the result file is
+`<time>-<config name>-<build label>-list-params.json`, with the listing in its `listing` field
+([RESULTS.md](RESULTS.md#parameter-listing)).
+
+A sweep (`-ListParam` for one name, `-ListParamFile` for up to 32) sets each named parameter, on an instance of its
+own added for it with every other parameter at its default, to each value of `-ListValues` (default
+`0,0.25,0.5,0.75,1`) and reads back the value REAPER took and the display text it shows. To turn that into `params`,
+use the name as the key, a value's `readNormalized` as `normalized` and its `display` as `display` (when
+`displayUsable`). With every other parameter at its default, a value can read otherwise in a chain where parameters
+depend on each other; learning reads every setting back, and says so when it does not take.
+
+Some parameters cannot go into `params`, and `settable` is false for them:
+
+- a name used by more than one parameter: learning sets the first of them, so the others have `sameNameAs` (the index
+  of the first) and are not settable;
+- REAPER's own parameters: REAPER adds `Bypass`, `Wet` and `Delta` at the end of every plugin (identifiers `:bypass`,
+  `:wet`, `:delta`); they are `host` and are set through `bypass` of a variant, not through `params`. Without
+  identifiers, the last three are taken as REAPER's when they are named exactly so (`hostBy` says which rule applied);
+- a name longer than 128 characters or with a control character, a name or display text with a path in it (masked),
+  and a parameter that could not be read cleanly (`problem`).
+
+Listing and sweeps run in the learn launch, within `limits.learnTimeoutSec` ([CONFIG.md](CONFIG.md#limits)): raise it
+for a plugin with thousands of parameters or a large sweep. How long a listing takes on REAPER has not been measured
+yet.
+
 ## 4. Run
 
 ```powershell
@@ -53,6 +106,11 @@ pwsh run.ps1 -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\
 | `-ExtraGuiLock <Local\name>` | repeatable; GUI locks to take in addition to `Local\ReaperHarness-gui` before every launch |
 | `-KeepWork` | keep the projects, renders and driver files of green rounds (rounds that are not green are always kept) |
 | `-ReaperExe <path>` | another REAPER |
+| `-List params` | list the parameters of the plugins instead of testing ([listing parameters](#listing-parameters)); with it `-Only`, `-NoNegative` and `-Repeat` are usage errors, and without it every other `-List...` option is |
+| `-ListPlugin <ids>` | the plugins to list, ids separated by commas; default: every plugin of the configuration |
+| `-ListParam <name>` | the exact name of one parameter to sweep; needs exactly one plugin in `-ListPlugin` |
+| `-ListParamFile <file>` | the names of 1 to 32 parameters to sweep, one a line (UTF-8); instead of `-ListParam` |
+| `-ListValues <values>` | the normalized values of a sweep, separated by commas: 1 to 101, each from 0 to 1 and given once; default `0,0.25,0.5,0.75,1` |
 
 Once, before the first round: the plugin bundles are copied into the private `plugins` directory and the plugin
 path and the scan shield are written (with a `transport` scenario, its block probe and feed JSFX are copied into the
@@ -83,6 +141,9 @@ need to.
 | 2 | INCOMPLETE: some row could not run or could not be checked, the run stopped on an unexpected error, or the result file of anything but a FAIL could not be written; this is never a PASS |
 | 3 | SKIPPED: the suite did not run (the reasons are printed and in the result file) |
 | 64 | refused by a guard, or a usage error (including any problem in the configuration); nothing was started |
+
+A listing (`-List params`) exits like a run: 0 when every plugin was listed cleanly, 1 when a swept name is not a
+parameter of the plugin or learning failed, 2 when a plugin could not be listed or read cleanly.
 
 `doctor.ps1` exits 0 when ready, 2 when the check itself stopped on an unexpected error, 3 when `run.ps1` would be SKIPPED, 64 when refused.
 

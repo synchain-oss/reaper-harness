@@ -44,6 +44,9 @@ pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Init
 # 检查配置文件和本机（不会启动 REAPER）
 pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Config my-plugin.json -PluginDir D:\build\VST3
 
+# 列出插件的参数（启动一次 REAPER，不跑场景）
+pwsh run.ps1 -List params -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\build\VST3 -ResultDir D:\reaper-harness\results
+
 # 运行
 pwsh run.ps1 -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\build\VST3 -ResultDir D:\reaper-harness\results
 

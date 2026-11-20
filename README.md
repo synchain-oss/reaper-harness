@@ -57,6 +57,9 @@ pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Init
 # check a configuration and the machine (never starts REAPER)
 pwsh doctor.ps1 -CfgDir D:\reaper-harness\cfg -Config my-plugin.json -PluginDir D:\build\VST3
 
+# list the parameters of the plugins (one REAPER launch, no scenario run)
+pwsh run.ps1 -List params -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\build\VST3 -ResultDir D:\reaper-harness\results
+
 # run
 pwsh run.ps1 -Config my-plugin.json -CfgDir D:\reaper-harness\cfg -PluginDir D:\build\VST3 -ResultDir D:\reaper-harness\results
 
