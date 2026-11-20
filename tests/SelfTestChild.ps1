@@ -576,8 +576,9 @@ Write-Case 'entry script: a usage error exits 64 and the console shows no path' 
 $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'doctor.ps1'), '-Config', $pathInConfig.Config)
 Write-Case 'doctor: a usage error exits 64 and the console shows no path' $true ($u.Exit -eq 64 -and $u.Out -clike "USAGE: extension path '<path>' must be relative*" -and $u.Out -cnotlike '*my files*')
 # A parameter listing asked for wrongly through run.ps1: 64 before anything starts, so no result file and no work directory
-$listUsage = Join-Path $Work 'list-usage'
-$listArgs = @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $configFile, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir, '-ResultDir', $listUsage, '-ReaperExe', (Join-Path $Work 'no-reaper.exe'))
+# (each in a result directory of its own, so one that wrongly runs does not turn the next red)
+$listArgs = { param([string]$ListResults) @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $configFile, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir, '-ResultDir', $ListResults, '-ReaperExe', (Join-Path $Work 'no-reaper.exe')) }
+$listCase = 0
 $listNames = Join-Path $Work 'list-names.txt'
 [IO.File]::WriteAllText($listNames, "Gain`n")
 $listWrong = [ordered]@{
@@ -591,10 +592,13 @@ $listWrong = [ordered]@{
     '-ListPlugin naming a plugin the configuration lacks' = @('-List', 'params', '-ListPlugin', 'nope')
 }
 foreach ($wrong in $listWrong.GetEnumerator()) {
-    $u = Invoke-Native -Exe $pwshExe -Arguments ($listArgs + $wrong.Value)
+    $listCase++
+    $listUsage = Join-Path $Work "list-usage-$listCase"
+    $u = Invoke-Native -Exe $pwshExe -Arguments ((& $listArgs $listUsage) + $wrong.Value)
     Write-Case "entry script: $($wrong.Key) exits 64 with USAGE, no result file and no work directory" $true ($u.Exit -eq 64 -and $u.Out -clike 'USAGE: *' -and -not (Test-Path -LiteralPath $listUsage))
 }
-$u = Invoke-Native -Exe $pwshExe -Arguments ($listArgs + @('-List', 'params', '-ListPlugin', 'gain', '-ListParam', 'Gain', '-ListValues', '0,0.5,1'))
+$listUsage = Join-Path $Work 'list-usage-sweep'
+$u = Invoke-Native -Exe $pwshExe -Arguments ((& $listArgs $listUsage) + @('-List', 'params', '-ListPlugin', 'gain', '-ListParam', 'Gain', '-ListValues', '0,0.5,1'))
 $written = @(Get-ChildItem -LiteralPath $listUsage -Filter '*.json' -ErrorAction SilentlyContinue)
 $skippedListing = try { (ConvertFrom-HarnessJson ([IO.File]::ReadAllText($written[0].FullName)))['listing'] } catch { $null }
 Write-Case "entry script: -List params with a sweep given as run.ps1 options gets as far as the preflight: SKIPPED without reaper.exe, a result file named -list-params.json with an empty listing" $false (
