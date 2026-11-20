@@ -1428,6 +1428,11 @@ function Get-PluginCases([string]$Tmp, [string]$RepoRoot) {
     Move-Item -LiteralPath "$bin.away" -Destination $bin
     Rename-Item -LiteralPath (Join-Path $plugins 'Fixture Bus.vst3') -NewName 'Other.vst3'
     & $add 'preflight: a configured bundle missing from the plugin directory is a reason' $true ((& $pre).Reasons -match 'bundle Fixture Bus.vst3 not found')
+    # A listing checks only the plugins it lists (-PluginIds): a bundle it was not asked about does not skip it
+    $preFor = { param([string[]]$Ids) Get-HarnessPreflight -ReaperExe $pwshExe -PluginDir $plugins -Config $conf -PluginIds $Ids }
+    $gainOnly = & $preFor @('gain', 'delay')
+    & $add "preflight: -PluginIds checks those plugins only: another plugin's missing bundle is no reason then, and is one when that plugin is asked for ($((& $mine $gainOnly) -join '; '))" $true (
+        @(& $mine $gainOnly).Count -eq 0 -and (@($gainOnly.Plugins.get_Keys()) -join ',') -ceq 'gain' -and @((& $preFor @('bus')).Reasons -match '^plugin bus: bundle Fixture Bus\.vst3 not found').Count -eq 1)
     Rename-Item -LiteralPath (Join-Path $plugins 'Other.vst3') -NewName 'Fixture Bus.vst3'
     $marker = Join-Path $Tmp 'MARKER'
     Set-Content -LiteralPath $marker -Value x
@@ -1963,6 +1968,9 @@ function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
         (Test-Usage { & $req (& $nameFile (& $utf8 "a`nb`na`n")) } '*name 3 to sweep is given twice*') -and (Test-Usage { & $req (& $nameFile (& $utf8 "a`n`nb`n")) } '*name 2 to sweep is empty*') -and
         (Test-Usage { & $req (& $nameFile (& $utf8 "`n")) } '*(found 0)') -and (Test-Usage { & $req (& $nameFile ([byte[]](0x61, 0xFF, 0x0A))) } '*cannot be read as UTF-8*') -and
         @((& $req (& $nameFile (& $utf8 ((@(1..32 | ForEach-Object { "p$_" }) -join "`n") + "`n")))).Params).Count -eq 32)
+    & $add 'list request: -ListParamFile of up to 64 KiB is read; a larger one is a usage error' $true (
+        ((& $req (& $nameFile (& $utf8 ('a' + ("`n" * 65535))))).Params -join '|') -ceq 'a' -and
+        (Test-Usage { & $req (& $nameFile (& $utf8 ('a' + ("`n" * 65536)))) } 'USAGE: -ListParamFile: the file is larger than 64 KiB'))
     & $add 'list request: -ListParamFile that is not there is a usage error that does not repeat the path' $true (Test-Usage { & $req @{ List = 'params'; ListPlugin = 'gain'; ListParamFile = (Join-Path $Tmp 'no-such-names.txt') } } 'USAGE: -ListParamFile: no such file')
 
     # What the driver reports of a listing (Read-HarnessParamListing): three parameters, two of them of the same name
@@ -1999,19 +2007,22 @@ function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
     $noValue = & $bad1 { param($r) $r.Remove('fx1_l1_value') }
     $high = & $bad1 { param($r) $r.fx1_l1_value = '1.200000000' }
     $word = & $bad1 { param($r) $r.fx1_l1_value = 'nan' }
+    $below = & $bad1 { param($r) $r.fx1_l1_value = '-0.100000000' }
     $noDisplay = & $bad1 { param($r) $r.Remove('fx1_l1_display') }
     $inexact = & $bad1 { param($r) $r.fx1_l1_exact = 'false' }
     $perParam = { param($x, [string]$Like) [bool]($x.P -and -not $x.Res.Problem -and $x.Res.Unclean -eq 1 -and $x.P.problem -clike $Like -and -not $x.P.settable -and $x.Res.Params[0].settable) }
-    & $add 'listing: a value that is missing, above 1 or not a number is a problem of that parameter only: written, not settable, counted as unclean' $true (
-        (& $perParam $noValue 'its value is not a number from 0 to 1') -and (& $perParam $high 'its value*') -and (& $perParam $word 'its value*') -and $null -eq $noValue.P.normalized)
+    & $add 'listing: a value that is missing, below 0, above 1 or not a number is a problem of that parameter only: written, not settable, counted as unclean' $true (
+        (& $perParam $noValue 'its value is not a number from 0 to 1') -and (& $perParam $high 'its value*') -and (& $perParam $word 'its value*') -and (& $perParam $below 'its value*') -and
+        $null -eq $noValue.P.normalized -and $null -eq $below.P.normalized)
     & $add 'listing: a display text that is missing is a problem of that parameter only' $true ((& $perParam $noDisplay 'it has no display text') -and $null -eq $noDisplay.P.display -and -not $noDisplay.P.displayUsable)
     & $add 'listing: a name that is not exact (a control character, or not UTF-8) is a problem of that parameter only' $true ((& $perParam $inexact '*control character or is not UTF-8') -and -not $inexact.P.exact)
     $long = & $read (& $base @((& $one 0 ('n' * 129)), (& $one 1 ('n' * 128))))
     & $add 'listing: a name longer than a configuration takes (129 characters) is not settable, and nothing else is said of it' $true (
         -not $long.Problem -and -not $long.Params[0].settable -and $null -eq $long.Params[0].problem -and -not $long.Params[0].masked -and $long.Params[0].exact -and $long.Params[1].settable)
     $pathName = & $read (& $base @((& $one 0 'Out D:\mixes\a.wav'), (& $one 1 'Level' '0.5' 'from //server/x'), (& $one 2 'Gain')))
-    & $add 'listing: a name or a display text with a path in it is masked (and so not settable, its display not usable)' $true (
-        $pathName.Params[0].masked -and -not $pathName.Params[0].settable -and $pathName.Params[1].masked -and -not $pathName.Params[1].settable -and -not $pathName.Params[1].displayUsable -and
+    & $add 'listing: a name or a display text with a path in it is masked and not settable; a display text with a path is not usable, one next to a name with a path is' $true (
+        $pathName.Params[0].masked -and -not $pathName.Params[0].settable -and $pathName.Params[0].displayUsable -and
+        $pathName.Params[1].masked -and -not $pathName.Params[1].settable -and -not $pathName.Params[1].displayUsable -and
         -not $pathName.Params[2].masked -and $pathName.Params[2].settable)
     $hostIdent = & $read (& $base @((& $one 0 'Gain'), (& $one 1 'Wet' '1.000000000' '100.0' ':wet')))
     & $add "listing: a parameter whose ident starts with ':' is REAPER's own, not settable ($($hostIdent.HostBy -join ','))" $true (
@@ -2041,8 +2052,16 @@ function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
         ($swOk.NotFound -join ',') -ceq 'Volume')
     $swMut = { param([scriptblock]$Edit) $r = & $sweepRep; & $Edit $r; & $read $r $sw }
     & $add 'listing: an instance to sweep that was not added is a problem of the whole listing' $true (& $whole (& $swMut { param($r) $r.fx1_s1_idx = '-1' }) "the instance to sweep 'Gain' could not be added (index '-1')")
-    & $add 'listing: a swept value that was not read back is a problem of the whole listing' $true (
-        (& $whole (& $swMut { param($r) $r.Remove('fx1_s1_v2') }) "*'Gain': value 2 was not read back") -and (& $whole (& $swMut { param($r) $r.Remove('fx1_s1_v1_display') }) '*value 1 was not read back'))
+    & $add 'listing: a swept value that was not read back, or read back outside 0..1, is a problem of the whole listing' $true (
+        (& $whole (& $swMut { param($r) $r.Remove('fx1_s1_v2') }) "*'Gain': value 2 was not read back") -and (& $whole (& $swMut { param($r) $r.Remove('fx1_s1_v1_display') }) '*value 1 was not read back') -and
+        (& $whole (& $swMut { param($r) $r.fx1_s1_v2 = '1.500000000' }) "*'Gain': value 2 was not read back") -and (& $whole (& $swMut { param($r) $r.fx1_s1_v1 = '-0.500000000' }) "*'Gain': value 1 was not read back"))
+    & $add 'listing: an instance to sweep that reports no parameter index for a name is a problem of the whole listing' $true (
+        & $whole (& $swMut { param($r) $r.Remove('fx1_s1_index') }) "the instance to sweep 'Gain' has no parameter index")
+    $swShown = & $swMut { param($r) $r.fx1_s1_v1_display = 'at //server/x'; $r.fx1_s1_v2_dexact = 'false' }
+    $swLong = & $swMut { param($r) $r.fx1_s1_v1_display = ('d' * 129); $r.fx1_s1_v2_display = ('d' * 128) }
+    $usable = { param($res) try { @($res.Sweeps[0]['values'] | ForEach-Object { [string]$_.displayUsable }) -join ',' } catch { 'no sweep' } }
+    & $add "listing: a swept display text is usable only when it is exact, at most 128 characters long and has no path in it ($(& $usable $swShown); $(& $usable $swLong); $(& $usable $swOk))" $true (
+        -not $swShown.Problem -and -not $swLong.Problem -and (& $usable $swShown) -ceq 'False,False' -and (& $usable $swLong) -ceq 'False,True' -and (& $usable $swOk) -ceq 'True,True')
     & $add 'listing: an instance to sweep with another name is not the plugin that was learned: a problem of the whole listing' $true (& $whole (& $swMut { param($r) $r.fx1_s1_name = 'VST3: Fixture Gain Pro (Fixture Audio)' }) "*'Gain' was added as 'VST3: Fixture Gain Pro*")
     & $add 'listing: an instance to sweep loaded from another binary, or of another class, is not the plugin that was learned' $true (
         (& $whole (& $swMut { param($r) $r.fx1_s1_ident = "S:\VST3\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3<1234567890{$cid" }) '*is not the plugin that was learned*') -and
@@ -2093,6 +2112,8 @@ function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
     & $add "listing row: a swept name the plugin does not have is a FAIL naming it ($($notFoundRow.Detail))" $true (
         $notFoundRow.Status -ceq 'FAIL' -and $notFoundRow.Detail -ceq "gain: no parameter named 'Volume' in gain" -and ($notFoundRow.Facts.notFound -join ',') -ceq 'Volume' -and
         ($notFoundRow.Listing['values'] -join ',') -ceq '0,1' -and $notFoundRow.Listing['plugins'][0]['status'] -ceq 'FAIL' -and $notFoundRow.Listing['plugins'][0]['sweeps'].Count -eq 1)
+    & $add "listing row: the line of a plugin says how many parameters were swept, at how many values ($($notFoundRow.Lines[0]))" $false (
+        $notFoundRow.Lines[0] -ceq 'gain: 3 parameters (0 of them REAPER''s own, 2 settable), 1 name used more than once, 1 swept at 2 values')
     $notRead = Get-HarnessParamListing -Ctx (& $ctxOf @{ 'gain|' = $ok; 'delay|' = $jsOk }) -Request $request -NotRead 'not listed: the round stopped'
     & $add 'listing row: before anything is read every plugin is not listed, for that reason' $true (
         $notRead.Status -ceq 'INCOMPLETE' -and @($notRead.Listing['plugins'] | Where-Object { $_['listed'] -or $_['why'] -cne 'not listed: the round stopped' }).Count -eq 0 -and $null -eq $notRead.Listing['values'])
@@ -3264,6 +3285,11 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add "wiring: the listing and the learn launch are called only by Invoke-HarnessSuite, inside the round ($(@($listCallers | Sort-Object -Unique) -join ', '))" $false (
         (@($listCallers | Sort-Object -Unique) -join ',') -ceq 'Get-HarnessParamListing<-Suite.psm1:Invoke-HarnessSuite,Invoke-HarnessLearn<-Suite.psm1:Invoke-HarnessSuite' -and
         $snaps.Count -eq 2 -and $inRound.Count -eq 3 -and $inRound -notcontains $false)
+    # The block hash of a kept render's manifest and of a listing is computed in one place, so the two cannot drift apart
+    $shaCallers = @(& $callers @('Get-HarnessBlockTextSha') | Sort-Object -Unique)
+    $ownHash = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1' | Where-Object { $_.Name -cne 'Rpp.psm1' -and [IO.File]::ReadAllText($_.FullName) -cmatch 'HashData\([^\r\n]*Get-HarnessBlockText\b' } | ForEach-Object { $_.Name })
+    & $add "wiring: a kept render's manifest and a listing take the block hash from one helper, Get-HarnessBlockTextSha ($($shaCallers -join ', '))" $false (
+        ($shaCallers -join ',') -ceq 'Get-HarnessBlockTextSha<-Learn.psm1:Get-HarnessParamListing,Get-HarnessBlockTextSha<-Renders.psm1:Get-HarnessFxFacts' -and $ownHash.Count -eq 0)
     $scriptStarts = & $callers @('Invoke-HarnessLuaStep', 'Invoke-HarnessLaunch', 'Invoke-HarnessLaunchOnce', 'Invoke-HarnessHost', 'Invoke-HarnessLearn')
     & $add "wiring: run.ps1 and doctor.ps1 start no REAPER and no step themselves ($(@($scriptStarts | Where-Object { $_ -cmatch '<-(run|doctor)\.ps1:' }) -join ', '))" $false (
         @($scriptStarts | Where-Object { $_ -cmatch '<-(run|doctor)\.ps1:' }).Count -eq 0)
