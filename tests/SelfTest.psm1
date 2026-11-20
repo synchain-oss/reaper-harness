@@ -1721,6 +1721,11 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     $noLayout = try { & $with { param($c) $s = & $scenario $c 'bus'; $s['layout'] = 'nowhere'; & $renderOnly $s; $s['variants'] = @((& $v 'a' (& $gainP ([ordered]@{ Trim = 0.25 })))) } } catch { "threw: $($_.Exception.Message)" }
     & $add "variants: of a scenario whose layout is not defined only that is said, nothing throws ($(($noLayout -is [string]) ? $noLayout : (@($noLayout.Problems) -join ' | ')))" $true (
         $noLayout -isnot [string] -and @($noLayout.Problems).Count -eq 1 -and @($noLayout.Problems)[0] -like "*layout 'nowhere' is not defined in layouts*")
+    # The tool's own dry layout is no layout of the configuration: a scenario with variants cannot name it, so its
+    # variants are never dropped without a word
+    $dryLayout = try { & $with { param($c) $s = & $scenario $c 'bus'; $s['layout'] = '@dry'; & $renderOnly $s; $s['variants'] = @((& $v 'a')) } } catch { "threw: $($_.Exception.Message)" }
+    & $add "variants: a scenario with variants that names the tool's own dry layout is a usage error, nothing throws ($(($dryLayout -is [string]) ? $dryLayout : (@($dryLayout.Problems) -join ' | ')))" $true (
+        $dryLayout -isnot [string] -and @($dryLayout.Problems).Count -ge 1 -and @($dryLayout.Problems | Where-Object { $_ -clike '*@dry*' }).Count -eq @($dryLayout.Problems).Count)
     # The displays of one learned setting: merged when one side gives none, refused when two differ (in any order, over
     # the layouts and the variant layouts)
     $dWithout = & $with { param($c) $c['layouts']['chain']['tracks'][0]['fx'][0]['params']['Gain'] = 0.25 } # chain (no display) is used before bus (0.25)
