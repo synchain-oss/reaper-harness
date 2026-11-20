@@ -26,12 +26,17 @@
 #   Invoke-HarnessLearn       the launch of one batch; fills Ctx.Blocks, Ctx.Names and Ctx.LearnReads (what REAPER read
 #                             back per variant, at the learn settings: 48000 Hz, block 512) with what it committed
 #   Get-HarnessModuleCheck    the module proof over every launch of the round (pure over Ctx.LaunchLog)
+# A parameter listing (run.ps1 -List params) rides on the learn launch of the plugins it lists: after the save, the
+# driver reads every parameter of each learned instance, and sweeps the parameters asked for on a fresh instance each.
+#   Read-HarnessParamListing  what the driver reported of one entry's listing and sweeps (pure)
+#   Get-HarnessParamListing   the params row and the listing of the result, from what the launch committed
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Guard.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Host.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Config.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Rpp.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
 
@@ -268,9 +273,12 @@ function Get-HarnessLearnVerdict {
 # 'foreign' (a tested binary from outside the private copy: nothing more is learned, and nothing that needs learning runs),
 # 'launch' (the launch was blocked or could not be ended: a skip marker, a busy lock, StillRunning; no later batch is
 # started) or ''. What Get-HarnessLearnVerdict commits goes into Ctx.Blocks, Ctx.LearnReads, Ctx.Names and Ctx.AddNames,
-# also when the row is FAIL for other entries.
+# also when the row is FAIL for other entries. WithListing: the driver also lists the parameters of every entry, and
+# Sweep (@{ Names; Values }) sweeps those on a fresh instance of it; the listing of each committed entry goes into
+# Ctx.Listing (Read-HarnessParamListing). Nothing else of learning changes.
 function Invoke-HarnessLearn {
-    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][object[]]$Variants, [int]$BatchNo = 1, [int]$BatchCount = 1, [scriptblock]$SameFile = $null)
+    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][object[]]$Variants, [int]$BatchNo = 1, [int]$BatchCount = 1, [scriptblock]$SameFile = $null,
+          [switch]$WithListing, [hashtable]$Sweep = $null)
     $same = $SameFile ?? ${function:Test-HarnessSameFile}
     $saveAs = Join-Path $Ctx.Work "_learn-$BatchNo.rpp"
     $project = Join-Path $Ctx.Work "_learn-$BatchNo-in.rpp"
@@ -282,8 +290,10 @@ function Invoke-HarnessLearn {
     Write-HarnessText -Path $project -Text (New-HarnessLearnProjectText -Variants $Variants -States $stateLines -TrackNames $learnNames)
     $fx = @(foreach ($v in $Variants) {
             $js = $Ctx.Jsfx.ContainsKey($v.Plugin) ? $Ctx.Jsfx[$v.Plugin] : $null
-            @{ name = ($js ? $js.AddName : (Get-HarnessReaperName $Ctx.Installed[$v.Plugin].Info)); preloaded = [bool]$v.State
-               params = @(foreach ($pn in $v.Params.get_Keys()) { @{ name = $pn; value = [double]$v.Params[$pn].Normalized } }) }
+            $entry = @{ name = ($js ? $js.AddName : (Get-HarnessReaperName $Ctx.Installed[$v.Plugin].Info)); preloaded = [bool]$v.State
+                params = @(foreach ($pn in $v.Params.get_Keys()) { @{ name = $pn; value = [double]$v.Params[$pn].Normalized } }) }
+            if ($WithListing) { $entry.list = $true; if ($Sweep) { $entry.sweep = @{ names = @($Sweep.Names); values = @($Sweep['Values'] | ForEach-Object { [double]$_ }) } } }
+            $entry
         })
     Set-HarnessAudioConfig -Sr $script:LearnRate -Block $script:LearnBlock
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name "_learn-$BatchNo" -Step learn -Label (Get-HarnessLearnRowId $BatchNo $BatchCount) -Job @{ fx = $fx; saveAs = $saveAs; project = $project } `
@@ -297,12 +307,161 @@ function Invoke-HarnessLearn {
     foreach ($k in $judged.Commit) { $Ctx.Blocks[$k] = $learnCheck.Blocks[$k]; $Ctx.LearnReads[$k] = $learnCheck.Reads[$k] }
     # Names come from what was installed, per plugin; a plugin with an entry committed has its name
     foreach ($v in @($Variants | Where-Object { $_.Key -cin $judged.Commit })) { $Ctx.Names[$v.Plugin] = $learnCheck.Names[$v.Plugin]; $Ctx.AddNames[$v.Plugin] = $learnCheck.AddNames[$v.Plugin] }
+    if ($WithListing) {
+        for ($n = 1; $n -le $Variants.Count; $n++) {
+            $v = $Variants[$n - 1]
+            if ($v.Key -cnotin $judged.Commit) { continue }
+            $js = $Ctx.Jsfx.ContainsKey($v.Plugin) ? $Ctx.Jsfx[$v.Plugin] : $null
+            $Ctx.Listing[$v.Key] = Read-HarnessParamListing -Report $lua.Result -Key "fx${n}_" -Sweep $Sweep -Installed ($js ? $null : $Ctx.Installed[$v.Plugin]) -Jsfx $js -SameFile $same
+        }
+    }
     $facts = [ordered]@{ variants = $Variants.Count; batch = $BatchNo; batches = $BatchCount; modules = $judged.Modules.Verdict; binaries = $judged.Modules.Binaries }
     $used = @($Variants | Where-Object { $_.State } | ForEach-Object { "$($_.Plugin)@$($_.State)" } | Select-Object -Unique)
     if ($used.Count) { $facts.states = @($used | ForEach-Object { [ordered]@{ plugin = $Ctx.States[$_].Plugin; state = $Ctx.States[$_].State; sha256 = $Ctx.States[$_].Sha } }) }
     $facts.learned = $judged.Commit.Count
     $stop = $judged.Foreign ? 'foreign' : (($lua.Why -and ($lua.Run.StillRunning -or $lua.Run.Status -cin 'LockBusy', 'SkipMarker', 'Blocked')) ? 'launch' : '')
     New-HarnessOutcome $judged.Status $judged.Detail $facts | Add-Member -NotePropertyName Stop -NotePropertyValue $stop -PassThru
+}
+
+# Pure function: the listing the driver reported for learn entry Key ("fx<n>_"). Sweep: @{ Names; Values } or $null;
+# Installed: the install row of a VST3 (Binary, Info.Cid), or Jsfx: the row of a JSFX (Ident); SameFile as above.
+# Returns @{ Count; Nparams; Params; Sweeps; NotFound; Unclean; HostBy; Problem }. Problem, and nothing else is kept,
+# when: the driver stopped listing; the count is missing, not a whole number up to 65536 or not the same at the end; a
+# parameter has no name; an instance to sweep was not added, is not the plugin that was learned (its name, binary and
+# class ID, or its JSFX path) or a swept value was not read back. A parameter whose value is not a number from 0 to 1,
+# that has no display text, or whose name is not exact (a control character, or not UTF-8) gets a problem of its own and
+# counts in Unclean. REAPER's own parameters (host): an ident starting with ':', or without idents the last three named
+# Bypass, Wet and Delta. Settable: what a configuration can set by name and learn finds (the first of that name).
+function Read-HarnessParamListing {
+    param([Parameter(Mandatory)][hashtable]$Report, [Parameter(Mandatory)][string]$Key, [hashtable]$Sweep = $null, $Installed = $null, $Jsfx = $null, [scriptblock]$SameFile = $null)
+    $same = $SameFile ?? ${function:Test-HarnessSameFile}
+    $float = [Globalization.NumberStyles]::Float
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $problems = [Collections.Generic.List[string]]::new()
+    if ($Report.ContainsKey("${Key}lerror")) { $problems.Add("the driver stopped listing: $($Report["${Key}lerror"])") }
+    $countText = [string]$Report["${Key}lcount"]
+    $count = ($countText -cmatch '^\d{1,5}$' -and [int]$countText -le 65536) ? [int]$countText : -1
+    if ($count -lt 0) { $problems.Add("the parameter count '$countText' is not a whole number from 0 to 65536") }
+    elseif (-not $problems.Count -and [string]$Report["${Key}lcount_end"] -cne $countText) { $problems.Add("the parameter count changed while it was read ($countText, then '$($Report["${Key}lcount_end"])')") }
+    $pattern = Get-HarnessParamNamePattern
+    $lastThree = $count -ge 3 -and (@(for ($p = $count - 3; $p -lt $count; $p++) { [string]$Report["${Key}l${p}_name"] }) -join '|') -ceq 'Bypass|Wet|Delta'
+    $first = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+    $hostBy = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    $params = [Collections.Generic.List[object]]::new()
+    $unclean = 0
+    for ($p = 0; $p -lt $count; $p++) {
+        $q = "${Key}l${p}_"
+        if (-not $Report.ContainsKey("${q}name")) { $problems.Add("parameter $p has no name"); break }
+        $name = [string]$Report["${q}name"]
+        $why = [Collections.Generic.List[string]]::new()
+        $num = 0.0
+        $value = ([double]::TryParse([string]$Report["${q}value"], $float, $inv, [ref]$num) -and $num -ge 0 -and $num -le 1) ? $num : $null
+        if ($null -eq $value) { $why.Add('its value is not a number from 0 to 1') }
+        $display = $Report.ContainsKey("${q}display") ? [string]$Report["${q}display"] : $null
+        if ($null -eq $display) { $why.Add('it has no display text') }
+        $exact = [string]$Report["${q}exact"] -ceq 'true'
+        if (-not $exact) { $why.Add('its name has a control character or is not UTF-8') }
+        $paramId = $Report.ContainsKey("${q}ident") ? [string]$Report["${q}ident"] : $null
+        $byReaper = ($null -ne $paramId) ? $paramId.StartsWith(':') : ($lastThree -and $p -ge $count - 3)
+        if ($byReaper) { $null = $hostBy.Add((($null -ne $paramId) ? 'ident' : 'names')) }
+        $sameAs = $first.ContainsKey($name) ? $first[$name] : $null
+        if ($null -eq $sameAs) { $first[$name] = $p }
+        $masked = (Hide-HarnessPaths $name) -cne $name -or ($null -ne $display -and (Hide-HarnessPaths $display) -cne $display)
+        if ($why.Count) { $unclean++ }
+        $params.Add([ordered]@{
+                index = $p; name = $name; normalized = $value; display = $display; ident = $paramId; sameNameAs = $sameAs; host = $byReaper; exact = $exact; masked = $masked
+                settable = ($name -cmatch $pattern -and $exact -and $null -eq $sameAs -and -not $masked -and -not $byReaper -and -not $why.Count)
+                displayUsable = ($null -ne $display -and [string]$Report["${q}dexact"] -ceq 'true' -and $display.Length -le 128 -and -not $masked)
+                problem = ($why.Count ? ($why -join '; ') : $null)
+            })
+    }
+    $sweeps = [Collections.Generic.List[object]]::new()
+    $notFound = [Collections.Generic.List[string]]::new()
+    $swept = @(if ($Sweep) { $Sweep.Names })
+    for ($s = 1; $s -le $swept.Count; $s++) {
+        $q = "${Key}s${s}_"
+        $label = "the instance to sweep '$($swept[$s - 1])'"
+        if ([string]$Report["${q}idx"] -cnotmatch '^\d+$') { $problems.Add("$label could not be added (index '$($Report["${q}idx"])')"); continue }
+        if ([string]$Report["${q}name"] -cne [string]$Report["${Key}name"]) { $problems.Add("$label was added as '$($Report["${q}name"])', not as '$($Report["${Key}name"])'"); continue }
+        $sid = [string]$Report["${q}ident"]
+        $parts = Split-HarnessFxIdent $sid
+        $proven = $Jsfx ? ($sid -ceq $Jsfx.Ident) : [bool]($Installed -and $parts.Path -and (& $same $parts.Path $Installed.Binary) -and $parts.Cid -ceq $Installed.Info.Cid)
+        if (-not $proven) { $problems.Add("$label is not the plugin that was learned (fx_ident names another binary, class ID or effect)"); continue }
+        $at = [string]$Report["${q}index"]
+        if ($at -ceq 'missing') { $notFound.Add($swept[$s - 1]); continue }
+        if ($at -cnotmatch '^\d+$') { $problems.Add("$label has no parameter index"); continue }
+        $read = [Collections.Generic.List[object]]::new()
+        for ($k = 1; $k -le @($Sweep['Values']).Count; $k++) {
+            $num = 0.0
+            if (-not ($Report.ContainsKey("${q}v${k}_display") -and [double]::TryParse([string]$Report["${q}v$k"], $float, $inv, [ref]$num) -and $num -ge 0 -and $num -le 1)) { $problems.Add("${label}: value $k was not read back"); break }
+            $text = [string]$Report["${q}v${k}_display"]
+            $read.Add([ordered]@{ normalized = [double]@($Sweep['Values'])[$k - 1]; readNormalized = $num; display = $text; displayUsable = ([string]$Report["${q}v${k}_dexact"] -ceq 'true' -and $text.Length -le 128 -and (Hide-HarnessPaths $text) -ceq $text) })
+        }
+        $sweeps.Add([ordered]@{ name = $swept[$s - 1]; index = [int]$at; values = $read.ToArray() })
+    }
+    $nparams = 0
+    $nparams = [int]::TryParse([string]$Report["${Key}nparams"], [ref]$nparams) ? $nparams : $null
+    if ($problems.Count) { return [pscustomobject]@{ Count = $count; Nparams = $nparams; Params = @(); Sweeps = @(); NotFound = @(); Unclean = 0; HostBy = @(); Problem = ($problems -join '; ') } }
+    [pscustomobject]@{ Count = $count; Nparams = $nparams; Params = $params.ToArray(); Sweeps = $sweeps.ToArray(); NotFound = $notFound.ToArray(); Unclean = $unclean; HostBy = @($hostBy); Problem = '' }
+}
+
+function Format-HarnessCount([int]$Number, [string]$Noun) { "$Number $Noun$(($Number -eq 1) ? '' : 's')" }
+
+# The params row of a parameter listing (run.ps1 -List params) and the listing of the result, from what the learn launch
+# committed: per plugin of the round (Ctx.Installed and Ctx.Jsfx, in the order of the configuration) its identity, the
+# hash of its learned block (as a kept render's manifest has it), its latency and Ctx.Listing of its default variant.
+# Per plugin and for the row: PASS when listed cleanly with every swept name found; FAIL for a swept name the plugin does
+# not have (learn treats a missing parameter so); INCOMPLETE when the plugin was not learned (see the learn row), its
+# listing has a problem, or parameters were not read cleanly. NotRead: what the result says before anything was read
+# (every plugin not listed, for that reason). Returns @{ Status; Detail; Facts; Lines; Listing (masked) }.
+function Get-HarnessParamListing {
+    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$Request, [string]$NotRead = '')
+    $entries = [Collections.Generic.List[object]]::new()
+    $lines = [Collections.Generic.List[string]]::new()
+    $whys = [Collections.Generic.List[string]]::new()
+    $missing = [Collections.Generic.List[string]]::new()
+    $total = 0; $sweepCount = 0; $listedCount = 0
+    foreach ($id in @($Ctx.Config.Plugins.get_Keys())) {
+        $vst = $Ctx.Installed.ContainsKey($id) ? $Ctx.Installed[$id] : $null
+        $js = $Ctx.Jsfx.ContainsKey($id) ? $Ctx.Jsfx[$id] : $null
+        if (-not ($vst -or $js)) { continue }
+        $k = "$id|"
+        $got = (-not $NotRead -and $Ctx.Listing.ContainsKey($k)) ? $Ctx.Listing[$k] : $null
+        $listed = $got -and -not $got.Problem
+        $why = @(if ($NotRead) { $NotRead } elseif (-not $got) { 'not listed: its learn entry did not pass (see the learn row)' } elseif (-not $listed) { "not listed: $($got.Problem)" }
+            if ($listed -and $got.Unclean) { "$(Format-HarnessCount $got.Unclean 'parameter') could not be read cleanly" }
+            if ($listed) { foreach ($n in $got.NotFound) { "no parameter named '$n' in $id"; $missing.Add($n) } }) -join '; '
+        $status = ($listed -and $got.NotFound.Count) ? 'FAIL' : ($why ? 'INCOMPLETE' : 'PASS')
+        if ($why) { $whys.Add("${id}: $why") }
+        $read = ($listed -and $Ctx.LearnReads.ContainsKey($k)) ? $Ctx.LearnReads[$k] : $null
+        $pdc = 0
+        $params = $listed ? @($got.Params) : @()
+        $sweeps = $listed ? @($got.Sweeps) : @()
+        if ($listed) {
+            $listedCount++; $total += $params.Count; $sweepCount += $sweeps.Count
+            $dups = @($params | Where-Object { $null -ne $_.sameNameAs } | ForEach-Object { $_.sameNameAs } | Select-Object -Unique).Count
+            $lines.Add("${id}: $(Format-HarnessCount $params.Count 'parameter') ($(@($params | Where-Object { $_.host }).Count) of them REAPER's own, $(@($params | Where-Object { $_.settable }).Count) settable), $(Format-HarnessCount $dups 'name') used more than once$(($sweeps.Count) ? ", $($sweeps.Count) swept at $(Format-HarnessCount @($Request['Values']).Count 'value')" : '')")
+        } else { $lines.Add("${id}: $why") }
+        $entries.Add([ordered]@{
+                id = $id; bundle = ($vst ? $vst.Bundle : $null); jsfx = ($js ? $js.Jsfx : $null); sha256 = ($vst ? $vst.Sha256 : $js.Sha256).Substring(0, 12)
+                name = ($js ? $js.Name : (Get-HarnessReaperName $vst.Info)); class = ($vst ? [ordered]@{ name = $vst.Info.Name; vendor = $vst.Info.Vendor; cid = $vst.Info.Cid } : $null)
+                classFrom = ($vst ? 'moduleinfo' : $null); version = ($vst ? $vst.Info.Version : $null)
+                status = $status; listed = [bool]$listed; why = ($why ? $why : $null)
+                blockSha256 = (($listed -and $Ctx.Blocks.ContainsKey($k)) ? (Get-HarnessBlockTextSha $Ctx.Blocks[$k]) : $null)
+                pdc = (($read -and [int]::TryParse([string]$read.Pdc, [ref]$pdc)) ? $pdc : $null)
+                nparams = ($got ? $got.Nparams : $null); paramCount = ($listed ? $got.Count : $null); hostBy = ($listed ? @($got.HostBy) : @())
+                params = $params; sweeps = $sweeps; notFound = ($listed ? @($got.NotFound) : @())
+            })
+    }
+    $statuses = @($entries | ForEach-Object { $_.status })
+    $status = ('FAIL' -cin $statuses) ? 'FAIL' : ((('INCOMPLETE' -cin $statuses) -or -not $statuses.Count) ? 'INCOMPLETE' : 'PASS')
+    $detail = $whys.Count ? ($whys -join '; ') : "$(Format-HarnessCount $listedCount 'plugin') listed, $(Format-HarnessCount $total 'parameter')$(($sweepCount) ? ", $sweepCount swept at $(Format-HarnessCount @($Request['Values']).Count 'value')" : '')"
+    if (-not $statuses.Count) { $detail = 'no plugin to list' }
+    $listing = [ordered]@{ kind = 'params'; values = ($Request.Params ? @($Request['Values']) : $null); readAt = [ordered]@{ sr = $script:LearnRate; block = $script:LearnBlock }; plugins = $entries.ToArray() }
+    [pscustomobject]@{
+        Status = $status; Detail = $detail; Lines = $lines.ToArray(); Listing = (Hide-HarnessFacts $listing)
+        Facts = [ordered]@{ plugins = $entries.Count; listed = $listedCount; params = $total; sweeps = $sweepCount; notFound = $missing.ToArray() }
+    }
 }
 
 # Over every launch of the round (Ctx.LaunchLog): any module with a tested binary's file name that is not the
@@ -329,4 +488,4 @@ function Get-HarnessModuleCheck {
 }
 
 Export-ModuleMember -Function Get-HarnessReaperName, Get-HarnessScenarioLearnKeys, Get-HarnessLearnVariants, Get-HarnessLearnBatches, Get-HarnessLearnRowId, Get-HarnessLearnTrackNames, Split-HarnessFxIdent,
-    Test-HarnessLearnReport, Get-HarnessLearnVerdict, Invoke-HarnessLearn, Get-HarnessModuleCheck
+    Test-HarnessLearnReport, Get-HarnessLearnVerdict, Invoke-HarnessLearn, Read-HarnessParamListing, Get-HarnessParamListing, Get-HarnessModuleCheck

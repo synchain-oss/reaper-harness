@@ -6,7 +6,8 @@
 -- (for the watchdog negative cases). Every wait yields to REAPER's message loop through a coroutine.
 --   learn       open the learn project; add each plugin by name on its own track (or take the one a state block
 --               already put there), set parameters by name and read them back, save the project (the runner takes
---               the plugin blocks from that file)
+--               the plugin blocks from that file); for a parameter listing, after the save, read every parameter of
+--               each instance and sweep the parameters asked for on a fresh instance each
 --   device      open a project, read back the audio device block size and sample rate, the workrender setting and
 --               every FX's reported latency; save a copy when asked (it shows the state each plugin holds)
 --   savereopen  open a project, read its FX, then cycles times: save it as a new file, open that and read the FX again
@@ -177,6 +178,66 @@ local function putTracks(prefix, reads)
     end
 end
 
+-- A text the driver reports as it is: no control character (put replaces those) and valid UTF-8
+local function exact(text) return not text:find("%c") and utf8.len(text) ~= nil end
+
+-- A parameter listing (run.ps1 -List params) of one learned instance, after the save: <key>lcount, then per parameter p
+-- (0-based) <key>l<p>_name, _exact, _value (normalized), _display, _dexact and _ident (REAPER's identifier, when this
+-- REAPER has TrackFX_GetParamIdent), then <key>lcount_end (the count once more: it may not change while it is read).
+local function listParams(key, track, idx)
+    local count = reaper.TrackFX_GetNumParams(track, idx)
+    put(key .. "lcount", count)
+    for p = 0, count - 1 do
+        local q = key .. "l" .. p .. "_"
+        local _, name = reaper.TrackFX_GetParamName(track, idx, p, "")
+        put(q .. "name", name)
+        put(q .. "exact", exact(name))
+        put(q .. "value", string.format("%.9f", reaper.TrackFX_GetParamNormalized(track, idx, p)))
+        local text = paramText(track, idx, p)
+        put(q .. "display", text)
+        put(q .. "dexact", exact(text))
+        if reaper.TrackFX_GetParamIdent then
+            local ok, id = reaper.TrackFX_GetParamIdent(track, idx, p)
+            if ok then put(q .. "ident", id) end
+        end
+    end
+    put(key .. "lcount_end", reaper.TrackFX_GetNumParams(track, idx))
+end
+
+-- Sweeps of entry e (e.sweep = { names, values }): per name s, a fresh instance on a track of its own at the end, so
+-- every sweep starts from the defaults; <key>s<s>_idx, _name and _ident of that instance, _index of the first parameter
+-- of that name (as findParam finds it) or missing, and per value v (1-based) the value set and read back as learn does:
+-- _v<v>, _v<v>_display, _v<v>_dexact. The track is deleted again.
+local function sweepParams(key, e)
+    for s, name in ipairs(e.sweep.names) do
+        local q = key .. "s" .. s .. "_"
+        reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
+        local track = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
+        reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "list-sweep-" .. s, true)
+        local idx = reaper.TrackFX_AddByName(track, e.name, false, -1)
+        put(q .. "idx", idx)
+        if idx >= 0 then
+            local _, fxName = reaper.TrackFX_GetFXName(track, idx, "")
+            put(q .. "name", fxName)
+            put(q .. "ident", named(track, idx, "fx_ident"))
+            local p = findParam(track, idx, name)
+            if p then
+                put(q .. "index", p)
+                for v, value in ipairs(e.sweep.values) do
+                    reaper.TrackFX_SetParamNormalized(track, idx, p, value)
+                    put(q .. "v" .. v, string.format("%.9f", reaper.TrackFX_GetParamNormalized(track, idx, p)))
+                    local text = paramText(track, idx, p)
+                    put(q .. "v" .. v .. "_display", text)
+                    put(q .. "v" .. v .. "_dexact", exact(text))
+                end
+            else
+                put(q .. "index", "missing")
+            end
+        end
+        reaper.DeleteTrack(track)
+    end
+end
+
 local steps = {}
 
 -- job.project: one track per entry, in order (named learn-<n>, or after the template track of its state), empty or
@@ -185,7 +246,9 @@ local steps = {}
 -- Reported per entry n (1-based): fx<n>_idx (-1 = REAPER could not add it, or the state block did not load),
 -- fx<n>_name, fx<n>_ident, fx<n>_offline, fx<n>_nparams, and per parameter k:
 -- fx<n>_p<k>=<normalized read back> or missing, fx<n>_p<k>_display=<text read back>; fx<n>_pdc once every
--- parameter is set (a latency can depend on them).
+-- parameter is set (a latency can depend on them). An entry with list = true is listed after the save (listParams),
+-- one with sweep is swept (sweepParams): the saved blocks are those of a plain learn. An error there is that entry's
+-- fx<n>_lerror, not the step's. Quitting then brings up the save prompt, which the runner answers No.
 function steps.learn()
     if job.project then
         openAndWait(job.project)
@@ -233,6 +296,18 @@ function steps.learn()
     reaper.Main_SaveProjectEx(0, job.saveAs, 0)
     wait(0.5)
     put("saved", reaper.file_exists(job.saveAs))
+    for n, e in ipairs(job.fx) do
+        if added[n] and e.list then
+            local ok, err = pcall(listParams, "fx" .. n .. "_", added[n].track, added[n].idx)
+            if not ok then put("fx" .. n .. "_lerror", err) end
+        end
+    end
+    for n, e in ipairs(job.fx) do
+        if added[n] and e.sweep then
+            local ok, err = pcall(sweepParams, "fx" .. n .. "_", e)
+            if not ok then put("fx" .. n .. "_lerror", err) end
+        end
+    end
 end
 
 function steps.device()
