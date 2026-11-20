@@ -451,10 +451,19 @@ the default `learnBatchSize` that is the one row `learn`; with `learnBatchSize` 
 The dry variant `{ "id": "dry", "bypass": true }` is rendered and kept like the others, every FX in its project
 bypassed (still loaded, so the chain and its latency are those of the other variants); its manifest line says
 `variant: "dry"` and `bypass: true` on every FX. REAPER renders to float32: a kept dry variant of a pcm24 source holds
-the values of the source (x / 2^23), not its bytes, so compare the decoded samples, not the files. The tool's own
-comparer only reports `identical=yes` for two files of one format and compares values only with `maxDiffDb`; it never
-compares a source file with a render. **To be measured on real REAPER:** whether a bypassed third-party FX keeps the
-render identical in value to the source file.
+the values of the source (x / 2^23), not its bytes, so compare the decoded samples, not the files. REAPER also writes the
+time of the render into the file, so even two renders of identical audio differ in bytes and in the `sha256` the
+manifest gives. The tool's own comparer only reports `identical=yes` for two files of one format and compares values
+only with `maxDiffDb`; it never compares a source file with a render.
+
+With the FX bypassed the render stayed identical in value to the source file. Measured on REAPER 7.82 (offline render, 48 kHz,
+a file source with the FX alone on its track): the kept dry variant had a largest absolute difference of 0 against the
+source, with no sample differing, for a float32 stereo file and for a pcm24 mono file on a two-channel render, with
+the JSFX of the tool, Airwindows Consolidated and ZL Equalizer 2 (both VST3) in the chain. For the float32 file the
+data of the render is the source's data byte for byte. Not bypassed, the same plugins are another matter: the default
+state of Airwindows Consolidated changed every sample, and the JSFX at delay 0 left values of at most 1.5e-16 where the
+file is exactly 0 ([validation record](validation/2026-11-19-param-variants.md)). Only these three plugins were tried:
+a plugin that has latency or a tail when bypassed was not measured.
 
 ### keep
 

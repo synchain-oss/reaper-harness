@@ -60,8 +60,9 @@ private `Effects/reaper-harness/` too). Each round: learning proves the private 
 learns every plugin setting the scenarios use, in launches of at most `limits.learnBatchSize` settings
 ([CONFIG.md](CONFIG.md#limits), one row each); then every scenario runs, then the negative cases. Before the first
 launch one line says how many scenarios and negative cases were picked (after matrix and variant expansion) and how
-many plugin settings are learned in how many launches. **To be measured on real REAPER:** the seconds one learn launch
-of 32 settings takes. A launch that REAPER's evaluation licence reminder ended is done once more, through every guard
+many plugin settings are learned in how many launches. Measured on REAPER 7.82: a learn launch took 5.5 to 5.6 s with
+one setting, 5.6 to 5.7 s with 8 and 6.1 s with 32 (JSFX; [validation
+record](validation/2026-11-19-param-variants.md)). A launch that REAPER's evaluation licence reminder ended is done once more, through every guard
 again ([SAFETY.md](SAFETY.md#dialogs)). The work files of a round go to `<ResultDir>/work/<time>-run<n>/`;
 the result file is `<ResultDir>/<time>-<config name>-<build label>.json` ([RESULTS.md](RESULTS.md)). Renders of
 scenarios with `keep` ([CONFIG.md](CONFIG.md#keep)) go to `<ResultDir>/renders/<time>/run<n>/`, with a
