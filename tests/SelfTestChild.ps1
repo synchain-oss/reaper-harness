@@ -703,6 +703,223 @@ Write-Case 'end to end: a configuration of only a JSFX learns without a module p
     $r.verdict -ceq 'PASS' -and $jsLearn.id -ceq 'learn' -and $jsLearn.status -ceq 'PASS' -and $jsLearn.facts.modules -ceq 'NoBinary' -and $jsLearn.facts.binaries.get_Count() -eq 0 -and
     $jsLearn.detail -clike '*no plugin binary to check (only JSFX)*' -and $r.runs[0].moduleCheck.status -ceq 'PASS' -and $r.runs[0].moduleCheck.detail -clike 'no plugin binary to check*' -and @($r.plugins).Count -eq 1)
 
+# ---- parameter variants, learning in batches, a latency that is only reported ----
+# A scenario of four variants (the dry one, as written, a parameter changed, a state with a parameter on top), a compare
+# variant of the dry one, and device, savereopen, transport and a kept render of a JSFX whose latency is only reported.
+# Two variants a launch: the defaults in learn.1, then vary-dry (its gain and the delay), vary-g025 and vary-loud.
+$gainG025 = 0.25
+$trimLoud = @{ normalized = 0.75; display = '0.75' }
+$varyChange = {
+    param($c)
+    & $noExt $c
+    $c.limits.learnBatchSize = 2
+    $c.limits.learnTimeoutSec = 45 # not luaTimeoutSec: each learn launch gets this one
+    $c.plugins.delay.expectPdc = 'report'
+    $c.layouts = [ordered]@{
+        vary = [ordered]@{ tracks = @([ordered]@{ name = 'Voice'; source = $true; fx = @([ordered]@{ plugin = 'gain'; params = @{ Gain = 0.5 } }, [ordered]@{ plugin = 'delay' }) }) }
+        p    = [ordered]@{ tracks = @([ordered]@{ name = 'Voice'; source = $true; fx = @([ordered]@{ plugin = 'delay' }) }) }
+    }
+    $c.scenarios = @(
+        [ordered]@{ id = 'vary'; kind = 'render'; layout = 'vary'; compare = 'none'; keep = $true; variants = @(
+                [ordered]@{ id = 'dry'; bypass = $true }, [ordered]@{ id = 'as-written' }, [ordered]@{ id = 'g025'; fx = @{ gain = @{ params = @{ Gain = $gainG025 } } } },
+                [ordered]@{ id = 'loud'; fx = @{ gain = @{ state = 'loud'; params = @{ Trim = $trimLoud } } } }) },
+        [ordered]@{ id = 'vary-cmp'; kind = 'render'; layout = 'vary'; compare = @{ block = 256 }; variants = @([ordered]@{ id = 'dry'; bypass = $true }, [ordered]@{ id = 'g025'; fx = @{ gain = @{ params = @{ Gain = $gainG025 } } } }) },
+        [ordered]@{ id = 'p-device'; kind = 'device'; layout = 'p'; block = 2048; host = @{ anticipativeFx = $false } },
+        [ordered]@{ id = 'p-reopen'; kind = 'savereopen'; layout = 'p' },
+        [ordered]@{ id = 'p-transport'; kind = 'transport'; layout = 'p'; states = @([ordered]@{ name = 'on'; transport = 'stop'; arm = $true; monitor = 'on'; samples = 4800; expect = @{ called = $true } }) },
+        [ordered]@{ id = 'p-kept'; kind = 'render'; layout = 'p'; compare = 'none'; keep = $true })
+    $c.negative = @()
+}
+$varyCfg = & $writeVariant $varyChange
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
+$rowOf = { param($Res, [string]$RowId) @($Res.runs[0].scenarios | Where-Object { $_.id -ceq $RowId })[0] }
+$rowIds = { param($Res) @($Res.runs[0].scenarios | ForEach-Object { $_.id }) -join ',' }
+$factOf = { param($OfRow, [string]$Name) ($OfRow -is [System.Collections.IDictionary] -and $OfRow.Contains('facts') -and $OfRow['facts'] -is [System.Collections.IDictionary] -and $OfRow['facts'].Contains($Name)) ? $OfRow['facts'][$Name] : $null }
+# Every launch through the one launch path, its label recorded
+$launchLabels = [Collections.Generic.List[string]]::new()
+$learnSettings = [Collections.Generic.List[string]]::new() # per learn launch: label, timeout, rate/block of the private ini as it starts
+$realLaunch = & (Get-Module Scenarios) { (Get-Item function:Invoke-HarnessLaunch).ScriptBlock }
+$labelLaunch = {
+    $labelAt = [array]::IndexOf($args, '-Label')
+    $launchLabel = ($labelAt -ge 0) ? [string]$args[$labelAt + 1] : ''
+    $launchLabels.Add($launchLabel)
+    if ($launchLabel -clike 'learn*') {
+        $hostAt = [array]::IndexOf($args, '-HostArgs')
+        $learnSettings.Add("$launchLabel $($args[$hostAt + 1].TimeoutSec) s $(Get-HarnessIniValue -Section audioconfig -Key dummy_srate)/$(Get-HarnessIniValue -Section audioconfig -Key dummy_blocksize)")
+    }
+    & $realLaunch @args
+}.GetNewClosure()
+$null = & (Get-Module Scenarios) { param($s) Set-Item function:script:Invoke-HarnessLaunch $s } $labelLaunch
+# The module list of a learn launch shows only the binaries of the plugins it added: each batch proves its own
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; OwnModules = $true }
+Set-HarnessAudioConfig -Sr 44100 -Block 1024
+try { $r = Invoke-HarnessSuite @varyCfg -NoNegative -KeepWork -SelfTestHooks $hooks }
+finally {
+    $null = & (Get-Module Scenarios) { param($s) Set-Item function:script:Invoke-HarnessLaunch $s } $realLaunch
+    Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs }
+}
+$varyRows = @($r.runs[0].scenarios)
+$varyNotPass = @($varyRows | Where-Object { $_.status -cne 'PASS' } | ForEach-Object { "$($_.id)=$($_.status): $($_.detail)" })
+$learnLabels = @($launchLabels | Where-Object { $_ -clike 'learn*' })
+Write-Case "end to end: variants: one learn row a batch, learn.1 to learn.4, each PASS and one launch labelled as its row; every variant a row of its own, PASS ($(& $rowIds $r); $($varyNotPass -join ' | '))" $false (
+    $r.verdict -ceq 'PASS' -and $varyNotPass.Count -eq 0 -and (& $rowIds $r) -ceq 'learn.1,learn.2,learn.3,learn.4,vary-dry,vary-as-written,vary-g025,vary-loud,vary-cmp-dry,vary-cmp-g025,p-device,p-reopen,p-transport,p-kept' -and
+    ($learnLabels -join ',') -ceq 'learn.1,learn.2,learn.3,learn.4' -and $launchLabels.Count -eq $r.launches)
+Write-Case "end to end: variants: each learn launch runs at 48000 Hz and block 512 whatever the ini said before, within learnTimeoutSec ($($learnSettings -join ', '))" $false (
+    ($learnSettings -join ',') -ceq 'learn.1 45 s 48000/512,learn.2 45 s 48000/512,learn.3 45 s 48000/512,learn.4 45 s 48000/512')
+Write-Case 'end to end: variants: the facts of a learn row: its batch of how many, the variants it learned, the module proof of its own plugins (a binary of another batch not seen is no gap)' $false (
+    $varyRows[0].facts.batch -eq 1 -and $varyRows[0].facts.batches -eq 4 -and $varyRows[0].facts.variants -eq 3 -and $varyRows[0].facts.learned -eq 3 -and $varyRows[0].facts.modules -ceq 'Proven' -and
+    $varyRows[0].facts.binaries.get_Count() -eq 2 -and $varyRows[1].facts.modules -ceq 'Proven' -and (@($varyRows[1].facts.binaries.get_Keys()) -join ',') -ceq 'Fixture Gain.vst3' -and
+    $varyRows[2].facts.binaries.get_Count() -eq 1 -and $r.runs[0].moduleCheck.status -ceq 'PASS' -and
+    $varyRows[2].facts.variants -eq 1 -and $varyRows[3].facts.variants -eq 2 -and @($varyRows[3].facts.states).Count -eq 1 -and $varyRows[3].facts.states[0].state -ceq 'loud' -and
+    $varyRows[1].detail -clike '2 plugin variants learned; every tested binary loaded from the private copy*')
+Write-Case 'end to end: variants: the row of a variant names it and the scenario as written' $false (
+    (& $factOf (& $rowOf $r 'vary-g025') 'variant') -ceq 'g025' -and (& $factOf (& $rowOf $r 'vary-g025') 'baseScenario') -ceq 'vary' -and (& $factOf (& $rowOf $r 'vary-cmp-dry') 'variant') -ceq 'dry' -and
+    (& $factOf (& $rowOf $r 'vary-cmp-dry') 'baseScenario') -ceq 'vary-cmp' -and $null -eq (& $factOf (& $rowOf $r 'p-device') 'variant'))
+$g025Kept = & $factOf (& $rowOf $r 'vary-g025') 'kept'
+Write-Case 'end to end: variants: a kept variant keeps its manifest line in the facts of its row, next to the variant and the scenario as written' $false (
+    $g025Kept -is [System.Collections.IDictionary] -and $g025Kept['scenario'] -ceq 'vary-g025' -and $g025Kept['variant'] -ceq 'g025' -and $g025Kept['baseScenario'] -ceq 'vary' -and
+    [string]$g025Kept['output']['path'] -clike 'renders/*/run1/vary-g025.wav' -and (& $factOf (& $rowOf $r 'vary-g025') 'baseScenario') -ceq 'vary')
+$varyKeep = @(Get-ChildItem -LiteralPath (Join-Path $varyCfg.ResultDir 'renders') -Directory)[0].FullName
+$varyEntries = @([IO.File]::ReadAllText((Join-Path $varyKeep 'manifest.jsonl')) -split "`n" | Where-Object { $_ } | ForEach-Object { ConvertFrom-HarnessJson $_ })
+$varyEntry = { param([string]$EntryId) @($varyEntries | Where-Object { $_['scenario'] -ceq $EntryId })[0] }
+$gainOf = { param([string]$EntryId) @((& $varyEntry $EntryId)['fx'])[0] }
+$paramText = { param($Fx) @(@($Fx['params']) | ForEach-Object { "$($_['name'])=$($_['normalized'])/$($_['display'])/$($_['readDisplay'])" }) -join ';' }
+$gainBlocks = @('vary-as-written', 'vary-g025', 'vary-loud' | ForEach-Object { (& $gainOf $_)['blockSha256'] })
+Write-Case "end to end: variants: every variant is kept, the manifest naming its variant, the scenario as written, the layout, each FX as rendered with its parameters and display texts ($(& $paramText (& $gainOf 'vary-loud')))" $false (
+    (@($varyEntries | ForEach-Object { $_['scenario'] }) -join ',') -ceq 'vary-dry,vary-as-written,vary-g025,vary-loud,p-kept' -and
+    @($varyEntries | Where-Object { $_['scenario'] -clike 'vary-*' -and ($_['baseScenario'] -cne 'vary' -or $_['layout'] -cne 'vary' -or "vary-$($_['variant'])" -cne $_['scenario']) }).Count -eq 0 -and
+    (& $paramText (& $gainOf 'vary-as-written')) -ceq 'Gain=0.5//0.50' -and (& $paramText (& $gainOf 'vary-g025')) -ceq 'Gain=0.25//0.25' -and (& $paramText (& $gainOf 'vary-loud')) -ceq 'Gain=0.5//0.50;Trim=0.75/0.75/0.75' -and @((& $gainOf 'vary-g025')['params'])[0].Contains('display') -and
+    (& $gainOf 'vary-loud')['state'] -ceq 'loud' -and $null -eq (& $gainOf 'vary-g025')['state'] -and @($gainBlocks | Select-Object -Unique).Count -eq 3 -and
+    (Test-Path -LiteralPath (Join-Path $varyKeep 'run1/vary-loud.wav')))
+$varyWork = @(Get-ChildItem -LiteralPath (Join-Path $varyCfg.ResultDir 'work') -Directory)[-1].FullName
+$bypassLines = { param([string]$Leaf) @([regex]::Matches([IO.File]::ReadAllText((Join-Path $varyWork $Leaf)), '(?m)^      BYPASS (\d) 0 0$') | ForEach-Object { $_.Groups[1].Value }) -join ',' }
+$learnFilesMissing = @(foreach ($k in 1..4) { foreach ($learnLeaf in "_learn-$k.rpp", "_learn-$k-in.rpp", "_learn-$k.job.lua", "_learn-$k.result") { if (-not (Test-Path -LiteralPath (Join-Path $varyWork $learnLeaf))) { $learnLeaf } } })
+Write-Case "end to end: variants: each learn launch has files of its own: _learn-<k>.rpp, _learn-<k>-in.rpp and the job and result of its step _learn-<k> (missing: $($learnFilesMissing -join ', '))" $false (
+    $learnFilesMissing.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $varyWork 'learn.rpp')))
+$gainBlockIn = { param([string]$Leaf) $tb = Get-HarnessFxBlocks ([IO.File]::ReadAllText((Join-Path $varyWork $Leaf))); ($tb.Contains('Voice') -and @($tb['Voice']).Count) ? (@($tb['Voice'])[0].Lines -join "`n") : "no block in $Leaf" }
+Write-Case 'end to end: variants: a compare variant without a layout of its own renders the variant layout: the setting of the variant in both projects, not the layout as written' $false (
+    (& $gainBlockIn 'vary-cmp-g025-variant.rpp') -ceq (& $gainBlockIn 'vary-cmp-g025.rpp') -and (& $gainBlockIn 'vary-cmp-g025.rpp') -ceq (& $gainBlockIn 'vary-g025.rpp') -and
+    (& $gainBlockIn 'vary-cmp-g025-variant.rpp') -cne (& $gainBlockIn 'vary-as-written.rpp') -and (& $bypassLines 'vary-cmp-g025-variant.rpp') -ceq '0,0')
+Write-Case "end to end: variants: the dry variant bypasses every FX, in its project, in both projects of its compare variant and in the manifest ($(& $bypassLines 'vary-dry.rpp'); $(& $bypassLines 'vary-cmp-dry-variant.rpp'))" $false (
+    (& $bypassLines 'vary-dry.rpp') -ceq '1,1' -and (& $bypassLines 'vary-cmp-dry.rpp') -ceq '1,1' -and (& $bypassLines 'vary-cmp-dry-variant.rpp') -ceq '1,1' -and (& $bypassLines 'vary-as-written.rpp') -ceq '0,0' -and
+    @((& $varyEntry 'vary-dry')['fx'] | Where-Object { $_['bypass'] -ne $true }).Count -eq 0 -and @((& $varyEntry 'vary-as-written')['fx'] | Where-Object { $_['bypass'] -ne $false }).Count -eq 0)
+$pDev = & $rowOf $r 'p-device'
+Write-Case "end to end: latency only reported: device PASS without comparing it, its facts list what the JSFX reported; savereopen, transport and the kept render too ($($pDev.detail))" $false (
+    $pDev.detail -clike '*; 0 FX report the configured latency, 1 report it only;*' -and @($pDev.facts.pdc).Count -eq 1 -and $pDev.facts.pdc[0].pdc -eq 64 -and $pDev.facts.pdc[0].plugin -ceq 'delay' -and
+    $pDev.facts.pdc[0].track -ceq 'Voice' -and (& $rowOf $r 'p-reopen').facts.pdc[0].pdc -eq 64 -and (& $rowOf $r 'p-transport').facts.pdc[0].pdc -eq 64 -and @((& $varyEntry 'p-kept')['fx'])[0]['pdc'] -eq 64)
+# A display text the plugin does not show (learn.4 FAIL, the clean state alone committed all the same) and a learn launch
+# that writes no result (learn.3): the batches after either still run, and only what needs their entries does not
+$trimLoud = @{ normalized = 0.75; display = 'loud' }
+$varyBad = & $writeVariant $varyChange
+$varyBad.ReaperExe = $pwshExe; $varyBad.ResultDir = Join-Path $Work 'e2e-vary-bad'
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; LearnNoResult = 3 }
+try { $r = Invoke-HarnessSuite @varyBad -Only '^vary' -NoNegative -SelfTestHooks $hooks } finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$trimLoud = @{ normalized = 0.75; display = '0.75' }
+$varyCfg = & $writeVariant $varyChange # the file is shared: written again as it was
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
+$badStatus = @($r.runs[0].scenarios | ForEach-Object { "$($_.id)=$($_.status)" }) -join ','
+Write-Case "end to end: variants: a launch without a result is INCOMPLETE and a variant showing another text FAIL, the batches after them still learn; what needs their entries is not run, the rest PASS ($badStatus)" $true (
+    $r.verdict -ceq 'FAIL' -and $badStatus -ceq 'learn.1=PASS,learn.2=PASS,learn.3=INCOMPLETE,learn.4=FAIL,vary-dry=PASS,vary-as-written=PASS,vary-g025=INCOMPLETE,vary-loud=INCOMPLETE,vary-cmp-dry=PASS,vary-cmp-g025=INCOMPLETE' -and
+    (& $rowOf $r 'learn.3').detail -clike 'the learn launch failed: *' -and (& $rowOf $r 'learn.4').detail -clike "gain state loud (variant 2, first used by vary-loud) parameter 'Trim' shows '0.75', expected 'loud'*" -and
+    (& $rowOf $r 'learn.4').facts.learned -eq 1 -and (& $rowOf $r 'vary-g025').detail -ceq 'not run: learning the plugin blocks it needs did not succeed (see the learn.3 row)' -and
+    (& $rowOf $r 'vary-loud').detail -ceq 'not run: learning the plugin blocks it needs did not succeed (see the learn.4 row)' -and
+    (& $factOf (& $rowOf $r 'vary-g025') 'variant') -ceq 'g025' -and (& $factOf (& $rowOf $r 'vary-g025') 'baseScenario') -ceq 'vary')
+# -Only on an id after expansion: only what the picked variant needs is learned
+$r = Invoke-HarnessSuite @varyCfg -Only '^vary-g025$' -NoNegative -SelfTestHooks $hooks -InformationVariable varyInfo
+$plannedLine = @($varyInfo | ForEach-Object { [string]$_.MessageData } | Where-Object { $_ -clike '*picked (after matrix and variant expansion)*' })
+Write-Case "end to end: variants: -Only one variant learns the defaults and what that variant needs, nothing else, and says so before the first launch ($(& $rowIds $r); $plannedLine)" $false (
+    $r.verdict -ceq 'PASS' -and (& $rowIds $r) -ceq 'learn.1,learn.2,vary-g025' -and (& $rowOf $r 'learn.2').facts.variants -eq 2 -and
+    ($plannedLine -join '|') -ceq '1 scenarios and 0 negative cases picked (after matrix and variant expansion); 5 plugin variants to learn in 2 launches per round')
+$varyZero = & $writeVariant { param($c) & $varyChange $c; $c.plugins.delay.expectPdc = 0 }
+$varyZero.ReaperExe = $pwshExe; $varyZero.ResultDir = Join-Path $Work 'e2e-vary-zero'
+$r = Invoke-HarnessSuite @varyZero -Only '^p-device$' -NoNegative -SelfTestHooks $hooks
+Write-Case "end to end: latency: the same device scenario with expectPdc 0 compares it, and 64 is a FAIL ($((& $rowOf $r 'p-device').detail))" $true (
+    $r.verdict -ceq 'FAIL' -and (& $rowOf $r 'p-device').status -ceq 'FAIL' -and (& $rowOf $r 'p-device').detail -clike '*t0_fx0_pdc=64, expected 0*')
+$varyCfg = & $writeVariant $varyChange # the file is shared: written again as it was
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
+# The latency of a JSFX only reported, and not read: no evidence, in every kind that reads it; a transport state that
+# fails stays FAIL all the same
+$varyCfg = & $writeVariant { param($c) & $varyChange $c; $c.scenarios = @($c.scenarios) + @([ordered]@{ id = 'p-transport-bad'; kind = 'transport'; layout = 'p'; states = @([ordered]@{ name = 'on'; transport = 'stop'; arm = $true; monitor = 'on'; samples = 4800; expect = @{ called = $false } }) }) }
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; PdcUnread = $true }
+try { $r = Invoke-HarnessSuite @varyCfg -Only '^p-' -NoNegative -SelfTestHooks $hooks } finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$unreadStatus = @($r.runs[0].scenarios | ForEach-Object { "$($_.id)=$($_.status)" }) -join ','
+$unreadKept = @(Get-ChildItem -LiteralPath (Join-Path $varyCfg.ResultDir 'renders') -Directory | Sort-Object Name)[-1].FullName
+$transportBad = & $rowOf $r 'p-transport-bad'
+Write-Case "end to end: latency only reported but not read: a transport state that fails is still FAIL, with the reading that is missing in its detail and facts ($($transportBad.status): $($transportBad.detail))" $true (
+    $transportBad.status -ceq 'FAIL' -and $transportBad.detail -clike '*called in*; no evidence: t0_fx0_pdc was not read (the latency of delay is only reported)' -and
+    @(& $factOf $transportBad 'pdc')[0] -is [System.Collections.IDictionary] -and $null -eq @(& $factOf $transportBad 'pdc')[0]['pdc'] -and @(& $factOf $transportBad 'states').Count -eq 1)
+Write-Case "end to end: latency only reported but not read: device, savereopen, transport and a kept render are INCOMPLETE, saying so; the render is kept all the same ($unreadStatus)" $true (
+    $r.verdict -ceq 'FAIL' -and $unreadStatus -ceq 'learn.1=PASS,learn.2=PASS,p-device=INCOMPLETE,p-reopen=INCOMPLETE,p-transport=INCOMPLETE,p-kept=INCOMPLETE,p-transport-bad=FAIL' -and
+    (& $rowOf $r 'p-device').detail -clike '*; no evidence: t0_fx0_pdc was not read (the latency of delay is only reported)' -and (& $rowOf $r 'p-reopen').detail -clike '*no evidence: before_t0_fx0_pdc was not read*' -and
+    (& $rowOf $r 'p-transport').detail -clike '*t0_fx0_pdc was not read (the latency of delay is only reported)*' -and (& $rowOf $r 'p-device').facts.pdc[0].Contains('pdc') -and $null -eq (& $rowOf $r 'p-device').facts.pdc[0].pdc -and
+    @(& $factOf (& $rowOf $r 'p-transport') 'pdc')[0] -is [System.Collections.IDictionary] -and @(& $factOf (& $rowOf $r 'p-transport') 'pdc')[0].Contains('pdc') -and
+    $null -eq @(& $factOf (& $rowOf $r 'p-transport') 'pdc')[0]['pdc'] -and @(& $factOf (& $rowOf $r 'p-transport') 'pdc')[0]['plugin'] -ceq 'delay' -and
+    (& $rowOf $r 'p-kept').detail -clike '*; kept, but the latency of delay on Voice was not read' -and (Test-Path -LiteralPath (Join-Path $unreadKept 'run1/p-kept.wav')))
+$varyCfg = & $writeVariant $varyChange # the file is shared: written again as it was
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
+# A configuration problem of a variant is a usage error before anything starts
+$launchesBefore = $seenArgs.Count
+$varyClash = & $writeVariant { param($c) & $varyChange $c; $c.layouts.vary.tracks[0].fx[0].params.Gain = @{ normalized = 0.5; display = '0.50' }; $c.scenarios[0].variants[2].fx.gain.params.Gain = @{ normalized = 0.5; display = 'other' } }
+Write-Case 'end to end: a variant asking one learned setting to show two display texts is a usage error; REAPER is never started' $true (
+    (Test-Throws { $null = Invoke-HarnessSuite @varyClash -SelfTestHooks $hooks } "USAGE:*plugin 'gain' parameter 'Gain' at 0.5 is asked to show both*") -and $seenArgs.Count -eq $launchesBefore)
+# A learn launch a skip marker blocked (it appears once learn.1 is done): learning stops there, no later learn launch is
+# started, and their rows say where it stopped
+$varyCfg = & $writeVariant $varyChange # the file is shared: written again as it was
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary-stop'
+$stopMarker = Join-Path $Work 'SKIP_AFTER_LEARN_1'
+$markAfterFirst = { $labelAt = [array]::IndexOf($args, '-Label'); $launched = & $realLaunch @args; if ($labelAt -ge 0 -and [string]$args[$labelAt + 1] -ceq 'learn.1') { Set-Content -LiteralPath $stopMarker -Value x }; $launched }.GetNewClosure()
+$launchesBefore = $seenArgs.Count
+$null = & (Get-Module Scenarios) { param($s) Set-Item function:script:Invoke-HarnessLaunch $s } $markAfterFirst
+try { $r = Invoke-HarnessSuite @varyCfg -Only '^vary' -NoNegative -SkipMarker $stopMarker -SelfTestHooks $hooks }
+finally {
+    $null = & (Get-Module Scenarios) { param($s) Set-Item function:script:Invoke-HarnessLaunch $s } $realLaunch
+    Remove-Item -LiteralPath $stopMarker -ErrorAction SilentlyContinue
+}
+$stopStatus = @($r.runs[0].scenarios | Where-Object { $_.kind -ceq 'learn' } | ForEach-Object { "$($_.id)=$($_.status)" }) -join ','
+Write-Case "end to end: variants: a learn launch a skip marker blocked stops learning: no later learn launch is started ($stopStatus; $((& $rowOf $r 'learn.3').detail))" $true (
+    $stopStatus -ceq 'learn.1=PASS,learn.2=INCOMPLETE,learn.3=INCOMPLETE,learn.4=INCOMPLETE' -and (& $rowOf $r 'learn.2').detail -clike 'the learn launch failed: a skip marker appeared*' -and
+    (& $rowOf $r 'learn.3').detail -ceq 'not run: learning stopped at the learn.2 row' -and (& $rowOf $r 'learn.4').detail -ceq 'not run: learning stopped at the learn.2 row' -and
+    $seenArgs.Count -eq $launchesBefore + 1)
+$factLine = { param($OfRow) @('batch', 'batches', 'variants', 'learned' | ForEach-Object { "$_=$(& $factOf $OfRow $_)" }) -join ' ' }
+Write-Case "end to end: variants: the row of a learn launch not started has the facts of its batch, nothing learned ($(& $factLine (& $rowOf $r 'learn.3')))" $false (
+    (& $factLine (& $rowOf $r 'learn.3')) -ceq 'batch=3 batches=4 variants=1 learned=0' -and (& $factLine (& $rowOf $r 'learn.4')) -ceq 'batch=4 batches=4 variants=2 learned=0')
+# A learn batch that throws: its row says so, learning stops there, and nothing that needs learning runs
+$varyCfg.ResultDir = Join-Path $Work 'e2e-vary-threw'
+$r = Invoke-WithSuiteCommand 'Invoke-HarnessLearn' { throw 'stub learn threw' } { Invoke-HarnessSuite @varyCfg -Only '^vary-g025$' -NoNegative -SelfTestHooks $hooks }
+Write-Case "end to end: variants: a learn batch that throws is one INCOMPLETE row, learning stops, and nothing that needs learning runs ($(@($r.runs[0].scenarios | ForEach-Object { "$($_.id): $($_.detail)" }) -join ' | '))" $true (
+    (& $rowIds $r) -ceq 'learn.1,learn.2,vary-g025' -and (& $rowOf $r 'learn.1').status -ceq 'INCOMPLETE' -and (& $rowOf $r 'learn.1').detail -ceq 'learning threw: stub learn threw' -and
+    (& $rowOf $r 'learn.2').detail -ceq 'not run: learning stopped at the learn.1 row' -and (& $rowOf $r 'vary-g025').detail -ceq 'not run: learning stopped on an error (see the learn.1 row)' -and
+    (& $rowOf $r 'vary-g025').status -ceq 'INCOMPLETE')
+Write-Case "end to end: variants: the row of a learn launch that threw, and of the one after it, have the facts of their batch ($(& $factLine (& $rowOf $r 'learn.1')); $(& $factLine (& $rowOf $r 'learn.2')))" $false (
+    (& $factLine (& $rowOf $r 'learn.1')) -ceq 'batch=1 batches=2 variants=3 learned=0' -and (& $factLine (& $rowOf $r 'learn.2')) -ceq 'batch=2 batches=2 variants=2 learned=0')
+# A launch whose module list never showed the binary of its plugin (learn.2) and a launch with an entry that failed
+# (learn.3, its clean entry taken) do not stop learning: learn.4 still runs and passes, and what needs only entries that
+# were taken runs (vary-g025 takes the delay from learn.2, a JSFX proven by fx_ident)
+$trimLoud = @{ normalized = 0.75; display = 'loud' }
+$varyOrder = & $writeVariant { param($c) & $varyChange $c; $vs = @($c.scenarios[0].variants); $c.scenarios[0].variants = @($vs[0], $vs[1], $vs[3], $vs[2]) }
+$trimLoud = @{ normalized = 0.75; display = '0.75' }
+$varyOrder.ReaperExe = $pwshExe; $varyOrder.ResultDir = Join-Path $Work 'e2e-vary-order'
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; LearnNoModules = 2 }
+try { $r = Invoke-HarnessSuite @varyOrder -Only '^vary-' -NoNegative -SelfTestHooks $hooks } finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$orderStatus = @($r.runs[0].scenarios | ForEach-Object { "$($_.id)=$($_.status)" }) -join ','
+Write-Case "end to end: variants: a batch with a binary never seen and a batch with a failed entry do not stop learning; the batch after them passes and what needs only its entries runs ($orderStatus)" $true (
+    $orderStatus -ceq 'learn.1=PASS,learn.2=INCOMPLETE,learn.3=FAIL,learn.4=PASS,vary-dry=INCOMPLETE,vary-as-written=INCOMPLETE,vary-loud=INCOMPLETE,vary-g025=PASS,vary-cmp-dry=INCOMPLETE,vary-cmp-g025=PASS' -and
+    (& $rowOf $r 'learn.2').detail -clike 'the module list never showed Fixture Gain.vst3 loaded*' -and (& $rowOf $r 'learn.3').detail -clike "*parameter 'Trim' shows '0.75', expected 'loud'*" -and
+    (& $rowOf $r 'vary-dry').detail -ceq 'not run: learning the plugin blocks it needs did not succeed (see the learn.2 row)' -and
+    (& $rowOf $r 'vary-loud').detail -ceq 'not run: learning the plugin blocks it needs did not succeed (see the learn.3 row)')
+# A kind of an extension runs only when every learn row passed: a learn launch without a result, which stops nothing,
+# keeps it from running all the same
+$extGap = $e2e.Clone(); $extGap.ResultDir = Join-Path $Work 'e2e-ext-gap'
+Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; LearnNoResult = 1 }
+try { $r = Invoke-HarnessSuite @extGap -Only '^ext-count$' -NoNegative -SelfTestHooks $hooks } finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+Write-Case "end to end: a kind of an extension does not run when a learn row is not PASS, though learning did not stop ($(& $rowIds $r): $((& $rowOf $r 'ext-count').detail))" $true (
+    (& $rowIds $r) -ceq 'learn,ext-count' -and (& $rowOf $r 'learn').status -ceq 'INCOMPLETE' -and (& $rowOf $r 'learn').detail -clike 'the learn launch failed: *' -and
+    (& $rowOf $r 'ext-count').status -ceq 'INCOMPLETE' -and (& $rowOf $r 'ext-count').detail -ceq 'not run: learning did not pass in every batch, and a kind of an extension gets every block (see the learn row)')
+$varyCfg = & $writeVariant $varyChange # the file is shared: written again as it was
+$varyCfg.ReaperExe = $pwshExe
+$varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
+
 # A WAV file of the configuration as the source of a track: checked before the start, copied into the work directory,
 # its item as long as the file to the last frame; at another rate a usage error before REAPER starts
 $srcDir = Join-Path $Work 'sources'
@@ -1285,7 +1502,16 @@ $sameName = Join-Path $env:COMMONPROGRAMFILES 'VST3\Fixture Gain.vst3\Contents\x
 $foreignSampler = { param($proc) @($sameName) }.GetNewClosure()
 $r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks @{ Launcher = $hooks.Launcher; ModuleSampler = $foreignSampler }
 Write-Case 'end to end: a same-name binary from outside the private directory makes learn and the round INCOMPLETE, and nothing else runs' $true (
-    $r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].status -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like 'not the private copy*' -and $r.runs[0].scenarios[1].detail -like 'not run: learning*' -and $r.runs[0].moduleCheck.status -eq 'INCOMPLETE')
+    $r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].status -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like 'not the private copy*' -and $r.runs[0].scenarios[1].detail -ceq 'not run: learning saw a tested binary loaded from outside the private copy (see the learn row)' -and
+    $r.runs[0].moduleCheck.status -eq 'INCOMPLETE')
+$varyCfg = & $writeVariant $varyChange # the file is shared: written again as it was
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary-foreign'
+$launchesBefore = $seenArgs.Count
+$r = Invoke-HarnessSuite @varyCfg -Only '^vary-g025$' -NoNegative -SelfTestHooks @{ Launcher = $hooks.Launcher; ModuleSampler = $foreignSampler }
+Write-Case "end to end: a binary from outside the private copy in the first of two learn launches: the second is not started, and nothing that needs learning runs ($(@($r.runs[0].scenarios | ForEach-Object { "$($_.id)=$($_.status)" }) -join ','))" $true (
+    $r.verdict -ceq 'INCOMPLETE' -and (& $rowIds $r) -ceq 'learn.1,learn.2,vary-g025' -and @($r.runs[0].scenarios | Where-Object { $_.status -cne 'INCOMPLETE' }).Count -eq 0 -and
+    (& $rowOf $r 'learn.2').detail -ceq 'not run: learning stopped at the learn.1 row' -and
+    (& $rowOf $r 'vary-g025').detail -ceq 'not run: learning saw a tested binary loaded from outside the private copy (see the learn.1 row)' -and $seenArgs.Count -eq $launchesBefore + 1)
 $r = Invoke-HarnessSuite @e2e -Only '^chain-offline-48000$' -NoNegative -SelfTestHooks @{ Launcher = $hooks.Launcher; ModuleSampler = { param($proc) @() } }
 Write-Case 'end to end: a tested binary never seen loaded makes learn INCOMPLETE (the private copy is not proven)' $true ($r.verdict -eq 'INCOMPLETE' -and $r.runs[0].scenarios[0].detail -like '*not proven*')
 # A state block of another plugin: a usage error before REAPER is ever started

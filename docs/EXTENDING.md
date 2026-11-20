@@ -67,8 +67,9 @@ paths masked. Numbers, booleans, characters, dates and enums in the facts stay w
 written as its text, masked the same way. JSON has no NaN or infinity, so those are written as the strings `"NaN"`,
 `"Infinity"` and `"-Infinity"`, and dates as ISO 8601 strings.
 
-Scenarios of extension kinds always get the learned plugin blocks: by the time `Run` is called, `$Ctx.Blocks` and
-`$Ctx.Names` (plugin id → the name REAPER shows) are filled, and the private copies are proven. `$Ctx.LearnReads`
+Scenarios of extension kinds always get every learned plugin block: they run only when every learn row of the round
+passed (with several learn launches, every one), and by the time `Run` is called `$Ctx.Blocks` and `$Ctx.Names`
+(plugin id → the name REAPER shows) are filled, and the private copies are proven. `$Ctx.LearnReads`
 holds what the learn launch read back per variant key (the key of `$Ctx.Blocks`): `Name`, `Pdc`, `Params` (name →
 `Read`, `Display`, as REAPER reported them) and the `Sr` and `Block` they were read at (48000, 512).
 
@@ -78,14 +79,15 @@ holds what the learn launch read back per variant key (the key of `$Ctx.Blocks`)
 |---|---|
 | `Outcome` | `& $Ctx.Api.Outcome PASS 'detail' $facts` |
 | `Layout` | `& $Ctx.Api.Layout $Ctx '<layout id>'`: the normalised layout |
+| `ScenarioLayout` | `& $Ctx.Api.ScenarioLayout -Config $Ctx.Config -Scenario $scenario`: the layout a scenario renders: its variant's (see [CONFIG.md](CONFIG.md#variants)) when it has one, else its configured layout (`@dry`: the dry one), null without a layout |
 | `NewRun` | `& $Ctx.Api.NewRun -Ctx $Ctx -Name <file name> -Layout <layout> [-Sr] [-Block] [-Mode] [-Channels] [-Bypass] [-NoFx] [-Stems <track names>] [-AnticipativeFx <bool>] [-NoItems]`: writes the project (from the learned blocks) and sets the audio device (anticipative FX on unless `-AnticipativeFx $false`); returns `Project`, `Wav` (the master) and `Stems` (track name → file). A track with a [`file`](CONFIG.md#source-files) plays the round's checked copy of it, as long as the file; a scenario whose layout (or `compare.layout`) uses a file whose copy failed its check is INCOMPLETE before `Run` is called. Nothing is resampled or mixed down: `NewRun` throws (the row is INCOMPLETE) when such a file is at another rate than `-Sr` or has more channels than `-Channels`; with `-NoItems` nothing is placed and nothing is asked of the file. The master is `<Name>.wav`; with stems REAPER writes `<Name>-stem-<track>.wav` per stem and the master as `<Name>-stem-Master.wav`. Start your names with the scenario id: names starting with `_` are the harness's own |
 | `Render` | `& $Ctx.Api.Render $Ctx <project> <wav> [-Also <files>]`: one render launch; returns `Run` and `Why` (empty when it worked; a file of `-Also`, such as the stems of `NewRun`, that the render did not produce is a reason too) |
-| `LuaStep` | `& $Ctx.Api.LuaStep -Ctx $Ctx -Name <file name> -Step <step> [-Job @{...}] [-Watch @{ label = <mark file> }] [-TimeoutSec]`: one driver launch; returns `Run`, `Result` (the key=value lines as a hashtable) and `Why` |
+| `LuaStep` | `& $Ctx.Api.LuaStep -Ctx $Ctx -Name <file name> -Step <step> [-Job @{...}] [-Watch @{ label = <mark file> }] [-TimeoutSec] [-Label <label>]`: one driver launch; returns `Run`, `Result` (the key=value lines as a hashtable) and `Why`. `-Label` names the launch in the retries and the module check (default: the step) |
 | `Compare` | `& $Ctx.Api.Compare -A <wav> -B <wav> [-MaxDiffDb] [-Lag] [-PeakMaxDb] [-NotSilent]`: the comparer; returns an outcome |
 | `Reference` | `& $Ctx.Api.Reference $Ctx <layout id> <sr> <block> <mode> <channels> [-Stems <track names>] [-AnticipativeFx <bool>]`: the dry reference render, cached per round; returns `Wav`, `Stems` and `Why` (empty when it worked) |
 | `Judge` | `& $Ctx.Api.Judge $Ctx <criteria> <reference wav, or '' for none> <test wav>`: one file against criteria as `render` judges it (an object with all of `maxDiffDb`, `lag`, `peakMaxDb`, `notSilent`, `rmsDb`, `energyRatioDb`, `rmsChangeDb`, `$null` for those not used; without a reference the file is judged on its own); returns an outcome |
 | `StateProof`, `FxBlocks` | `& $Ctx.Api.StateProof -Layout <layout> -Blocks $Ctx.Blocks -States $Ctx.States -Saved (& $Ctx.Api.FxBlocks <text of a project REAPER saved>)`: whether every FX with a named state holds it, as `device` and `savereopen` check; returns `Problems` and `Proven` |
-| `FxReport`, `ParamReads` | check a driver report of tracks and FX against a layout, as `device` does |
+| `FxReport`, `ParamReads` | check a driver report of tracks and FX against a layout, as `device` does. The latency of a plugin with `expectPdc: "report"` is not compared; pass `-Gaps` (a `[Collections.Generic.List[string]]`) to get each such reading that is missing, and make the outcome INCOMPLETE for them as `device` does (a FAIL stays FAIL); without `-Gaps` a missing reading throws, so the scenario is INCOMPLETE (`the scenario threw: ...`) and never passes without the reading |
 | `HostFailure` | the one-line reason for a launch that did not end normally |
 | `HidePaths` | masks local paths in a text |
 | `Signal` | the path of the test signal file for a rate and channel count |

@@ -49,7 +49,12 @@ A plugin has exactly one of `bundle` and `jsfx`.
   `Contents/x86_64-win/<bundle>` (the binary). The name REAPER shows, `VST3: <Name> (<Vendor>)`, is taken from that
   class; two plugins with the same name cannot be told apart and are refused in the preflight.
 - `jsfx`: a JSFX shipped with the tool (see [JSFX](#jsfx)), instead of a bundle.
-- `expectPdc`: the latency in samples the plugin must report (default 0). Checked by `device` and `savereopen`.
+- `expectPdc`: the latency in samples the plugin must report (default 0), checked by `device`, `savereopen` and
+  `transport`; or `"report"`, for a plugin whose latency depends on its settings: what it reports is recorded, not
+  judged (`facts.pdc` of those rows, see [RESULTS.md](RESULTS.md#a-row-scenarios)), and a reading that is not there
+  makes the row INCOMPLETE (no evidence). The `pdc` of a kept render is the one the learn launch read (48000 Hz, block
+  512) for that setting of the plugin; a kept render with a `"report"` plugin whose latency was not read there is
+  INCOMPLETE, its files kept all the same.
 - `params`: parameter values every FX of this plugin gets (an FX's own `params` go on top), see [layouts](#layouts).
 - `states`: named plugin states, see [states](#states). VST3 plugins only.
 - `report`: counts the plugin writes about itself to a small file, see [reports](#reports).
@@ -130,7 +135,8 @@ layouts can be rendered in both with the same signal and subtracted on the same 
 |---|---|---|
 | `renderTimeoutSec` | 90 | one render launch |
 | `luaTimeoutSec` | 120 | one Lua driver launch |
-| `learnTimeoutSec` | 120 | the learn launch |
+| `learnTimeoutSec` | 120 | one learn launch (each batch, see `learnBatchSize`) |
+| `learnBatchSize` | 32 | plugin settings learned per launch, 1 … 256; the settings of every plugin as configured all go into the first launch, which can then hold more |
 | `lockWaitSec` | 1800 | how long to wait for the GUI locks before a launch; not taken in time is INCOMPLETE |
 | `lagSearch` | 64 | the comparer searches lags within ± this many samples |
 | `headSeconds` | 2 | the residual of the first seconds is reported separately (`head=`) |
@@ -173,8 +179,10 @@ A layout is a list of tracks in project order.
 An FX is `{ "plugin": "<id>", "state": "<name>", "bypass": true|false, "params": { "<parameter name>": <value> } }`.
 A parameter value is a normalized number 0 … 1, or `{ "normalized": 0.25, "display": "0.25" }`: then the text
 REAPER shows for the parameter must equal `display` exactly. Parameters are set and read back by name. The plugin
-block for every distinct state and set of parameters is learned once per round (see
-[SAFETY.md](SAFETY.md#learning-the-plugin-blocks)); a plugin block is never written by hand.
+block for every distinct state and set of parameters is learned once per round, in launches of at most
+`limits.learnBatchSize` of them (see [SAFETY.md](SAFETY.md#learning-the-plugin-blocks)); a plugin block is never
+written by hand. One setting (plugin, state and values) has one display text: asking two different texts of it,
+anywhere in the configuration, is a usage error; a text given once is checked wherever that setting is used.
 
 ### routing
 
@@ -342,6 +350,7 @@ Renders the layout and compares the render with a reference.
 | `rmsChangeDb` | channel → `[min, max]`: RMS of the test render minus RMS of the reference, per channel, in dB |
 | `stems` | tracks rendered as files of their own, see [stems](#stems) |
 | `keep` | `true`: keep the render and its stems under `renders/` of the result directory, see [keep](#keep) |
+| `variants` | the scenario once per variant, each with some plugins set otherwise, see [variants](#variants) |
 
 The pass criteria are fields of the scenario itself, not a nested object: in negative cases `expect` names the
 expected outcome. Both renders must be readable, comparable (same rate and channel count) and free of NaN and Inf
@@ -388,13 +397,83 @@ fader and pan.
 There is no switch for bypassing an FX in the middle of a render; render two layouts (or the same layout with and
 without `bypass`) and compare them instead.
 
+### variants
+
+`"variants": [ ... ]` renders one `render` scenario once per variant: the same layout, with some plugins set
+otherwise or bypassed. For example, to render a file through an effect at several settings and keep each render, to
+be listened to or measured outside the tool:
+
+```json
+"plugins": { "eq": { "bundle": "Example EQ.vst3", "states": { "air": { "stateFile": "states/air.RfxChain" } } } },
+"layouts": { "eq-on-file": { "tracks": [ { "name": "Voice", "source": true, "file": "sources/voice.wav", "fx": [ { "plugin": "eq" } ] } ] } },
+"scenarios": [
+  { "id": "eq-gain", "kind": "render", "layout": "eq-on-file", "compare": "none", "keep": true,
+    "variants": [
+      { "id": "dry", "bypass": true },
+      { "id": "as-written" },
+      { "id": "g025", "fx": { "eq": { "params": { "Gain 1": 0.25 } } } },
+      { "id": "g075", "fx": { "eq": { "params": { "Gain 1": { "normalized": 0.75, "display": "6.0" } } } } },
+      { "id": "air", "fx": { "eq": { "state": "air", "params": { "Gain 1": 0.5 } } } }
+    ] }
+]
+```
+
+`eq`, `Example EQ.vst3`, `air` and `Gain 1` stand for a plugin of yours, its state and a parameter by the name REAPER
+shows. This gives the scenarios `eq-gain-dry`, `eq-gain-as-written`, `eq-gain-g025`, `eq-gain-g075` and `eq-gain-air`,
+and five plugin settings to learn: `eq` as configured (the dry and the as-written variant use it), `Gain 1` at 0.25,
+at 0.75, the state `air` alone (it proves the state loads, see [states](#states)) and `air` with `Gain 1` at 0.5. With
+the default `learnBatchSize` that is the one row `learn`; with `learnBatchSize` 2 it is `learn.1` (`eq` as configured,
+`Gain 1` at 0.25), `learn.2` (0.75) and `learn.3` (both of `air`).
+
+| key | |
+|---|---|
+| `id` | required; `[a-z0-9][a-z0-9-]{0,39}`, unique within the scenario |
+| `fx` | plugin id → `{ "state": "<name>", "params": { ... } }` with at least one of the two (`params` as in [layouts](#layouts)); the plugin must be used in the scenario's layout |
+| `bypass` | `true` (every FX) or a list of plugin ids of the layout, rendered bypassed |
+
+- Each variant is a scenario of its own: `<id>-<variant id>`, after a [matrix](#matrix)
+  `<id>-<matrix suffix>-<variant id>` (the legs of the matrix outside, the variants inside, in the order written).
+  The ids after expansion are at most 80 characters and unique. `-Only` matches them: `^eq-gain-` picks every
+  variant of the scenario, `-dry$` the dry ones, and only what the picked ones need is learned. The row of a variant
+  names it and the scenario as written (`facts.variant`, `facts.baseScenario`).
+- A variant changes every FX of a plugin it names, on every track of the layout. Its parameters go on top of that
+  FX's, which go on top of the plugin's (`plugins.<id>.params` < the FX's `params` < the variant's); its `state`
+  replaces the FX's. Nothing else of the layout changes: tracks, files, signals, sends, and the `bypass` of an FX. The
+  `bypass` of a variant adds to the scenario's (`true` wins); a variant cannot un-bypass an FX or take a state away.
+  A variant with neither (`as-written` above) is the layout as written.
+- A scenario with variants must give `compare` (a usage error otherwise). `"none"` renders each variant to be judged
+  on its own: an active effect is never identical to the dry render. A compare variant without a `layout`
+  (`{ "block": 256 }`) renders the same variant again with another block, mode or bypass, and without a `bypass` of
+  its own it takes the variant's; with a `layout` it compares with that layout as written.
+- Each setting is learned once, however many variants use it. At most 1000 variants per scenario. Only `render`
+  scenarios have variants: on another kind and in a negative case `variants` is an unknown key.
+
+The dry variant `{ "id": "dry", "bypass": true }` is rendered and kept like the others, every FX in its project
+bypassed (still loaded, so the chain and its latency are those of the other variants); its manifest line says
+`variant: "dry"` and `bypass: true` on every FX. REAPER renders to float32: a kept dry variant of a pcm24 source holds
+the values of the source (x / 2^23), not its bytes, so compare the decoded samples, not the files. REAPER also writes the
+time of the render into the file, so even two renders of identical audio differ in bytes and in the `sha256` the
+manifest gives. The tool's own comparer only reports `identical=yes` for two files of one format and compares values
+only with `maxDiffDb`; it never compares a source file with a render.
+
+With the FX bypassed the render stayed identical in value to the source file. Measured on REAPER 7.82 (offline render, 48 kHz,
+a file source with the FX alone on its track): the kept dry variant had a largest absolute difference of 0 against the
+source, with no sample differing, for a float32 stereo file and for a pcm24 mono file on a two-channel render, with
+the JSFX of the tool, Airwindows Consolidated and ZL Equalizer 2 (both VST3) in the chain. For the float32 file the
+data of the render is the source's data byte for byte. Not bypassed, the same plugins are another matter: the default
+state of Airwindows Consolidated changed every sample, and the JSFX at delay 0 left values of at most 1.5e-16 where the
+file is exactly 0 ([validation record](validation/2026-11-19-param-variants.md)). Only these three plugins were tried:
+a plugin that has latency or a tail when bypassed was not measured.
+
 ### keep
 
 `"keep": true` on a `render` scenario (on no other kind, and not in negative cases: usage errors) keeps what it
 rendered. After its verdict, whatever the verdict, its render moves out of the work directory to
 `<result directory>/renders/<run stamp>/run<round>/<id>.wav` and each stem to `<id>-stem-<track>.wav` next to it;
-the references (dry, first, variant) are not kept. A scenario of a matrix keeps each expanded scenario under its own
-id. The run stamp is the one of the work directories (`yyyyMMdd-HHmmss`), shared by all rounds of a run.
+the references (dry, first, compare variant) are not kept. A scenario of a matrix or with [variants](#variants)
+keeps each expanded scenario under its own id (`eq-gain-g025.wav`). The run stamp is the one of the work directories
+(`yyyyMMdd-HHmmss`), shared by all rounds of a run. Kept renders take room: 180 s of stereo float32 at 48 kHz are
+about 69 MB, so 200 kept variants of such a file are about 14 GB a round.
 
 Each kept scenario appends one line to `renders/<run stamp>/manifest.jsonl` as soon as it is done (the format is in
 [RESULTS.md](RESULTS.md#kept-renders)): what the files are, how they were rendered, what each source track played,
@@ -643,7 +722,8 @@ the readings of an `offline` or `1x` render with the preference on.
 
 ## negative cases
 
-A negative case is a scenario that must come out a certain way: the same fields as its kind (no matrix), plus
+A negative case is a scenario that must come out a certain way: the same fields as its kind (no `matrix`, `keep`
+or `variants`), plus
 
 | key | |
 |---|---|

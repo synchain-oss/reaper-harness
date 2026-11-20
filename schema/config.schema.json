@@ -102,6 +102,12 @@
           "exclusiveMinimum": 0,
           "maximum": 600
         },
+        "learnBatchSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "description": "plugin variants per learn launch, default 32 (the default variants of all plugins share the first launch, however many there are)"
+        },
         "instances": {
           "type": "object",
           "properties": {
@@ -354,9 +360,18 @@
           "description": "a JSFX shipped with the tool, instead of a bundle"
         },
         "expectPdc": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 1000000
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            {
+              "type": "string",
+              "const": "report"
+            }
+          ],
+          "description": "the latency in samples the plugin must report (default 0), or \"report\": recorded, never compared"
         },
         "params": {
           "type": "object",
@@ -581,6 +596,68 @@
           ]
         }
       },
+      "additionalProperties": false
+    },
+    "variantFx": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,39}$",
+          "description": "a state of that plugin, in place of the FX's own"
+        },
+        "params": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[^\\u0000-\\u001f]{1,128}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/paramValue"
+          },
+          "description": "parameter name -> value, set by name and read back by the Lua driver"
+        }
+      },
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "every FX of that plugin in the layout gets these on top"
+    },
+    "variant": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,39}$",
+          "description": "appended to the scenario id: <id>[-<matrix>]-<variant id>"
+        },
+        "fx": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9-]{0,39}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/variantFx"
+          },
+          "minProperties": 1,
+          "description": "plugin id -> state and parameters"
+        },
+        "bypass": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,39}$"
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          ]
+        }
+      },
+      "required": ["id"],
       "additionalProperties": false
     },
     "matrix": {
@@ -1058,6 +1135,15 @@
               "keep": {
                 "type": "boolean",
                 "description": "keep the render (and its stems) under renders/ of the result directory, with a line in its manifest"
+              },
+              "variants": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/variant"
+                },
+                "minItems": 1,
+                "maxItems": 1000,
+                "description": "one scenario per variant, the layout with its settings on top; needs compare"
               }
             },
             "required": ["id", "kind", "layout"],

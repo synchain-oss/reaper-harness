@@ -250,31 +250,33 @@ release build of the same plugin (same bundle name, class ID and display name, d
 
 So with the same file name the directory scanned **last** wins, regardless of file times. REAPER appends
 `%COMMONPROGRAMFILES%\VST3` and `%LOCALAPPDATA%\Programs\Common\VST3` to the path only when they are missing.
-Before every round the harness therefore writes `vstpath64` as your other entries, then both system directories,
-then the private plugins directory, and removes the cache entries of the configured bundles so REAPER scans them
-afresh.
+Before the first round the harness therefore writes `vstpath64` as your other entries, then both system
+directories, then the private plugins directory, and removes the cache entries of the configured bundles so REAPER
+scans them afresh.
 
 That ordering is observed behaviour, not a documented promise. So it is not trusted on its own; every round also
 proves which file was loaded, in two independent ways:
 
 - **The module list of the REAPER process.** On every poll the full paths of loaded modules with the file name of a
   tested binary are collected. Each tested binary must be seen loaded, and only from its private file (compared by
-  file identity). Another file with that name (`Foreign`) makes the learn row and the round INCOMPLETE; a binary
-  never seen (`Unseen`) makes the learn row INCOMPLETE ("the private copy is not proven"). Every later launch of the
-  round is checked for `Foreign` too.
+  file identity). Each learn launch is judged on its own: another file with the name of any tested binary
+  (`Foreign`) makes its learn row and the round INCOMPLETE and stops learning; a binary of a plugin of that launch
+  never seen (`Unseen`) makes its learn row INCOMPLETE ("the private copy is not proven"). The first learn launch
+  holds every plugin, so it proves every binary. Every later launch of the round is checked for `Foreign` too.
 - **`fx_ident`.** After adding each plugin the Lua driver reads `fx_ident`, which for VST3 is the full path of the
   binary followed by the class ID. It must be the private binary, and the class ID must equal the one in
   `moduleinfo.json`.
 
 Plugin scanning happens in a separate process, so only launches that instantiate the plugin can show it in the
-module list; the learn launch always does. If a future REAPER resolves duplicate names differently, the result is
-INCOMPLETE with the reason, never a PASS about the wrong build.
+module list; the first learn launch always does (it holds every plugin), a later one only for the plugins of its
+settings. If a future REAPER resolves duplicate names differently, the result is INCOMPLETE with the reason, never a
+PASS about the wrong build.
 
 ## Keeping other plugins out
 
 On startup REAPER loads every plugin file it has no up-to-date cache entry for. On a machine with many plugins
 that means third-party code runs inside the test process: a newly installed plugin can show an activation dialog
-or hang the scan. Before every round the **scan shield** gives each file REAPER would scan outside the private
+or hang the scan. Before the first round the **scan shield** gives each file REAPER would scan outside the private
 plugins directory (`*.vst3` bundles and files, `*.dll`) an empty, current entry in the private
 `reaper-vstplugins64.ini` when it has none, so REAPER treats it as "scanned, no plugin here" and never loads it.
 Only the private cache is written; the plugins and the system directories are only listed. The key is the file
@@ -286,11 +288,24 @@ loaded, so a third-party plugin in the process is visible.
 ## Learning the plugin blocks
 
 A plugin block in a project without the state REAPER saved for that plugin is reported as "effect unavailable".
-So no block is ever written by hand. Once per round one launch adds every plugin (and every parameter set a layout
-uses) by name, sets the parameters by name and reads them back, and saves the project; the blocks REAPER wrote are
-what every other project of the round uses. `TrackFX_AddByName` matches loosely (a single letter adds some plugin),
-so the full name `VST3: <Name> (<Vendor>)` is used and checked after adding: the displayed name, `fx_ident` and the
-class ID of the saved block must all be the expected ones. A plugin that does not load is FAIL.
+So no block is ever written by hand. Once per round, learning adds every plugin (and every state and parameter set
+a layout or a [variant](CONFIG.md#variants) uses) by name, sets the parameters by name and reads them back, and saves
+the project; the blocks REAPER wrote are what every other project of the round uses. `TrackFX_AddByName` matches
+loosely (a single letter adds some plugin), so the full name `VST3: <Name> (<Vendor>)` is used and checked after
+adding: the displayed name, `fx_ident` and the class ID of the saved block must all be the expected ones. A plugin
+that does not load is FAIL.
+
+Learning runs in launches of at most `limits.learnBatchSize` settings (default 32), one row each (`learn`, or
+`learn.1` … `learn.<n>`): the first holds every plugin as configured, however many, and then the settings in the
+order the scenarios first use them, those of one scenario together where they fit. Each launch goes through every
+guard, lock and the watchdog like any other and is proven on its own (see above). A setting is taken only when it
+failed nothing (an offline plugin is not) and its plugin was proven in that launch; the clean settings of a launch
+with failed ones are taken too, and the row is FAIL. A launch that failed (a timeout, a dialog, no result) leaves its
+settings unlearned and the next launch still runs. Learning stops at a tested binary from outside the private copy
+(that launch takes nothing, not even its clean settings) and at an unexpected error, and then nothing that needs
+learning runs; it stops at a launch that was blocked (a skip marker, a busy lock) or could not be ended as well. The
+launches it did not start are INCOMPLETE rows. A scenario runs only when every setting it needs was taken; otherwise
+it is INCOMPLETE and names the learn row. A kind of an extension runs only when every learn row passed.
 
 A named state is a block REAPER saved for you (see [CONFIG.md](CONFIG.md#states)). It is not added by name: the
 project the learn launch opens already holds the block, REAPER loads it as it loads any saved project, and the block

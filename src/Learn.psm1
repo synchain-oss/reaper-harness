@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 #
 # Learning the plugin blocks, and proving which plugin binary REAPER loaded.
-# Once per round, one REAPER launch adds every plugin variant the round needs (each configured plugin with its
-# default state, plus every distinct parameter set and named state a layout asks for) by name, sets the parameters
-# by name, reads them back, and saves the project. A variant with a named state is not added by name: the project
+# Once per round, REAPER launches in batches (limits.learnBatchSize) add every plugin variant the round needs (each
+# configured plugin with its default state, plus every distinct parameter set and named state a layout or a variant of a
+# scenario asks for) by name, set the parameters by name, read them back, and save the project. A variant with a named state is not added by name: the project
 # the launch opens already has its block (from the template or state file), so REAPER loads that state. The plugin
 # blocks REAPER wrote into the saved project are what every other project of the round uses, so no plugin state is
 # ever written by hand.
@@ -15,12 +15,16 @@
 # ("JS: <desc>"), its path under Effects in fx_ident and in the saved block.
 # Proof of the private copy: the module list of the REAPER process, sampled while it ran, must show each tested
 # binary from the private plugins directory and no file of the same name from anywhere else.
-#   Get-HarnessLearnVariants  the variants a set of scenarios needs (pure)
+#   Get-HarnessScenarioLearnKeys the variants one scenario needs (pure; the same walk gives what is learned)
+#   Get-HarnessLearnVariants  the variants a set of scenarios needs, each with For: the first scenario that needs it (pure)
+#   Get-HarnessLearnBatches   those variants in launches of at most a size (pure)
+#   Get-HarnessLearnRowId     the id of the row of a batch: learn, or learn.<k> when there are several
+#   Get-HarnessLearnVerdict   the outcome of one batch and what of it is committed (pure)
 #   Get-HarnessLearnTrackNames the learn project's track names: a template state on its template track's name (pure)
 #   Get-HarnessReaperName     "VST3: <Name> (<Vendor>)" from moduleinfo
 #   Test-HarnessLearnReport   the driver's report and the saved project against what was asked (pure)
-#   Invoke-HarnessLearn       the launch itself; fills Ctx.Blocks, Ctx.Names and Ctx.LearnReads (what REAPER read back
-#                             per variant, at the learn settings: 48000 Hz, block 512)
+#   Invoke-HarnessLearn       the launch of one batch; fills Ctx.Blocks, Ctx.Names and Ctx.LearnReads (what REAPER read
+#                             back per variant, at the learn settings: 48000 Hz, block 512) with what it committed
 #   Get-HarnessModuleCheck    the module proof over every launch of the round (pure over Ctx.LaunchLog)
 
 Set-StrictMode -Version Latest
@@ -37,31 +41,82 @@ $script:LearnBlock = 512
 
 function Get-HarnessReaperName($Info) { "VST3: $($Info.Name) ($($Info.Vendor))" }
 
-# Variants: one per configured plugin with no parameters (always: the module proof and the instances kind need
-# them), then every distinct FX variant of the layouts the scenarios use, in first-use order, a state with parameters
-# on top preceded by that state alone. State: the name of a state of the plugin ('' for its default state).
-function Get-HarnessLearnVariants {
-    param([Parameter(Mandatory)]$Config, [object[]]$Scenarios = @())
+# The variants one scenario needs, in order (pure): every FX of the layout it renders (its variant's when it has one) and
+# of the layout it compares with, a state with parameters on top preceded by that state alone (only a state with nothing
+# set on top can be compared with the block it was given, and that is what proves the plugin loads it); for instances
+# the default variant of each of its plugins; nothing for built-in negative cases. A kind of an extension gets those of
+# its layout, and needs every learn batch to pass on top (Get-HarnessLearnGap). Key, Plugin, State, Params each.
+function Get-HarnessScenarioLearnKeys {
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$Scenario)
+    $p = $Scenario.PSObject.Properties
     $out = [ordered]@{}
-    foreach ($id in $Config.Plugins.get_Keys()) { $out["$id|"] = [pscustomobject]@{ Key = "$id|"; Plugin = $id; State = ''; Params = [ordered]@{} } }
-    $layoutIds = [Collections.Generic.List[string]]::new()
-    foreach ($s in $Scenarios) {
-        foreach ($name in 'layout') { if ($s.PSObject.Properties[$name] -and $s.$name -and $s.$name -notlike '@*' -and $s.$name -cnotin $layoutIds) { $layoutIds.Add($s.$name) } }
-        if ($s.PSObject.Properties['compare'] -and $s.compare -and $s.compare.Kind -eq 'variant' -and $s.compare.Layout -cnotin $layoutIds) { $layoutIds.Add($s.compare.Layout) }
+    if ($p['builtin'] -and $Scenario.builtin) { return , @() }
+    if ($p['kind'] -and $Scenario.kind -ceq 'instances') {
+        foreach ($id in @($Scenario.plugins)) { $out["$id|"] = [pscustomobject]@{ Key = "$id|"; Plugin = $id; State = ''; Params = [ordered]@{} } }
+        return , @($out.get_Values())
     }
-    foreach ($lid in $layoutIds) {
-        foreach ($t in $Config.Layouts[$lid].Tracks) {
-            foreach ($fx in $t.Fx) {
-                # A state with parameters on top is also learned on its own first: only a state with nothing set on top can
-                # be compared with the block it was given, and that is what proves the plugin loads it
-                $alone = "$($fx.Plugin)@$($fx.State)|"
-                if ($fx.State -and $fx.Params.get_Count() -and -not $out.Contains($alone)) { $out[$alone] = [pscustomobject]@{ Key = $alone; Plugin = $fx.Plugin; State = $fx.State; Params = [ordered]@{} } }
-                if (-not $out.Contains($fx.Variant)) { $out[$fx.Variant] = [pscustomobject]@{ Key = $fx.Variant; Plugin = $fx.Plugin; State = $fx.State; Params = $fx.Params } }
-            }
+    $own = ($p['layout'] -and $Scenario.layout -is [string] -and $Scenario.layout -notlike '@*') ? (Get-HarnessScenarioLayout $Config $Scenario) : $null
+    $walk = @($own)
+    $c = $p['compare'] ? $Scenario.compare : $null
+    if ($c -and $c.Kind -eq 'variant' -and $c.Layout -notlike '@*') { $walk += ($c.PSObject.Properties['SameLayout'] -and $c.SameLayout -and $own) ? $own : $Config.Layouts[$c.Layout] }
+    foreach ($l in @($walk | Where-Object { $_ })) {
+        foreach ($fx in @($l.Tracks | ForEach-Object { $_.Fx })) {
+            $alone = "$($fx.Plugin)@$($fx.State)|"
+            if ($fx.State -and $fx.Params.get_Count() -and -not $out.Contains($alone)) { $out[$alone] = [pscustomobject]@{ Key = $alone; Plugin = $fx.Plugin; State = $fx.State; Params = [ordered]@{} } }
+            if (-not $out.Contains($fx.Variant)) { $out[$fx.Variant] = [pscustomobject]@{ Key = $fx.Variant; Plugin = $fx.Plugin; State = $fx.State; Params = $fx.Params } }
         }
     }
     , @($out.get_Values())
 }
+
+# Variants: one per configured plugin with no parameters (always: the module proof and the instances kind need them),
+# then what the scenarios need (Get-HarnessScenarioLearnKeys), in first-use order. For: the id of the first scenario that
+# needs a variant ('' for the defaults). A display text the first use of a setting leaves out and a later one gives is
+# checked all the same (two different texts are a usage error, see Test-HarnessConfigData); the layouts are not changed.
+function Get-HarnessLearnVariants {
+    param([Parameter(Mandatory)]$Config, [object[]]$Scenarios = @())
+    $out = [ordered]@{}
+    foreach ($id in $Config.Plugins.get_Keys()) { $out["$id|"] = [pscustomobject]@{ Key = "$id|"; Plugin = $id; State = ''; Params = [ordered]@{}; For = '' } }
+    foreach ($s in $Scenarios) {
+        foreach ($e in (Get-HarnessScenarioLearnKeys -Config $Config -Scenario $s)) {
+            if ($out.Contains($e.Key)) {
+                $have = $out[$e.Key].Params
+                foreach ($pn in $e.Params.get_Keys()) { if ($null -eq $have[$pn].Display -and $null -ne $e.Params[$pn].Display) { $have[$pn].Display = $e.Params[$pn].Display } }
+                continue
+            }
+            $params = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+            foreach ($pn in $e.Params.get_Keys()) { $params[$pn] = [pscustomobject]@{ Normalized = $e.Params[$pn].Normalized; Display = $e.Params[$pn].Display } }
+            $out[$e.Key] = [pscustomobject]@{ Key = $e.Key; Plugin = $e.Plugin; State = $e.State; Params = $params; For = ($s.PSObject.Properties['id'] ? [string]$s.id : '') }
+        }
+    }
+    , @($out.get_Values())
+}
+
+# Pure function: the variants in launches of at most Size. The defaults (For '') all go into the first, never split: it
+# holds every plugin, so it proves every binary and names every plugin, whatever its size then. The others follow in
+# groups of the same For, in order; a group that does not fit where the last launch is opens a new one, a group larger
+# than Size is cut into launches of Size. Returns @{ No; Entries } per launch.
+function Get-HarnessLearnBatches {
+    param([Parameter(Mandatory)][object[]]$Variants, [Parameter(Mandatory)][int]$Size)
+    $groups = [Collections.Generic.List[object]]::new()
+    $defaults = [Collections.Generic.List[object]]::new()
+    foreach ($v in $Variants) {
+        $for = ($v.PSObject.Properties['For'] -and $v.For) ? [string]$v.For : ''
+        if (-not $for) { $defaults.Add($v); continue }
+        if ($groups.Count -and $groups[$groups.Count - 1].For -ceq $for) { $groups[$groups.Count - 1].Entries.Add($v) }
+        else { $groups.Add([pscustomobject]@{ For = $for; Entries = [Collections.Generic.List[object]]::new(@(, $v)) }) }
+    }
+    $launches = [Collections.Generic.List[object]]::new()
+    $launches.Add($defaults)
+    foreach ($g in $groups) {
+        $last = $launches[$launches.Count - 1]
+        if ($last.Count + $g.Entries.Count -le $Size) { $last.AddRange($g.Entries); continue }
+        for ($i = 0; $i -lt $g.Entries.Count; $i += $Size) { $launches.Add([Collections.Generic.List[object]]::new($g.Entries.GetRange($i, [Math]::Min($Size, $g.Entries.Count - $i)))) }
+    }
+    , @(for ($k = 0; $k -lt $launches.Count; $k++) { [pscustomobject]@{ No = $k + 1; Entries = $launches[$k].ToArray() } })
+}
+
+function Get-HarnessLearnRowId([int]$BatchNo, [int]$BatchCount) { ($BatchCount -gt 1) ? "learn.$BatchNo" : 'learn' }
 
 # Pure function: the name of each variant's track in the learn project. A variant with a state taken from a template
 # gets the name of the template track it came from, because a plugin can save what it sees of other instances into its
@@ -94,7 +149,8 @@ function Split-HarnessFxIdent([string]$Ident) {
 # AddName, Ident) describe what was asked; States ("<plugin>@<state>" -> state with Lines) the named states; Report is
 # the driver's key=value table; Saved is Get-HarnessFxBlocks of the saved project; TrackNames the names the learn
 # project gave the tracks (learn-<n> where missing); SameFile (a, b) decides whether two paths are one file (default
-# Test-HarnessSameFile). Returns @{ Fail; Foreign; Blocks (variant key -> lines); Names (id -> name REAPER shows);
+# Test-HarnessSameFile). Returns @{ Fail; Foreign; Blocks (variant key -> lines, only for entries that failed nothing);
+# Names (id -> name REAPER shows);
 # AddNames (id -> name to add it by); Reads (variant key -> Name, Pdc, Params (name -> Read, Display) as reported, and
 # the Sr and Block they were read at) }.
 function Test-HarnessLearnReport {
@@ -115,7 +171,12 @@ function Test-HarnessLearnReport {
         $names[$v.Plugin] = $want
         $addNames[$v.Plugin] = $js ? $js.AddName : $want
         $k = "fx${n}_"
-        $label = "$($v.Plugin)$($v.State ? " state $($v.State)" : '')$($v.Params.get_Count() ? " (variant $n)" : '')"
+        # What the entry is and where it comes from: n counts in this batch only
+        $about = @(@(($v.Params.get_Count()) ? "variant $n" : $null) + @(($v.PSObject.Properties['For'] -and $v.For) ? "first used by $($v.For)" : $null) | Where-Object { $_ }) -join ', '
+        $label = "$($v.Plugin)$($v.State ? " state $($v.State)" : '')$($about ? " ($about)" : '')"
+        # Only an entry that added no failure of its own is taken (an offline plugin goes on to be checked, and is not)
+        $failsBefore = $fail.Count
+        $foreignBefore = $foreign.Count
         $idx = $Report["${k}idx"]
         if ($idx -ne '0') {
             $fail.Add($v.State ? "$label did not load from its state block (index $idx)" : "$label could not be added as '$($addNames[$v.Plugin])' (index $idx): the plugin did not load or is not known to REAPER"); continue
@@ -156,20 +217,63 @@ function Test-HarnessLearnReport {
                 $fail.Add("$label : the plugin saved its state back changed, so it does not hold the state as given"); continue
             }
         }
+        if ($fail.Count -ne $failsBefore -or $foreign.Count -ne $foreignBefore) { continue }
         $blocks[$v.Key] = $list[0].Lines
         $reads[$v.Key] = [pscustomobject]@{ Name = $Report["${k}name"]; Pdc = $Report["${k}pdc"]; Params = $readParams; Sr = $script:LearnRate; Block = $script:LearnBlock }
     }
     [pscustomobject]@{ Fail = $fail.ToArray(); Foreign = $foreign.ToArray(); Blocks = $blocks; Names = $names; AddNames = $addNames; Reads = $reads }
 }
 
-# The learn launch. Returns an outcome (Status PASS / FAIL / INCOMPLETE, Detail, Facts) and fills Ctx.Blocks and
-# Ctx.Names on success. A plugin loaded from anywhere but the private copy makes it INCOMPLETE (whatever else was
-# found would be about another build); a plugin that did not load, or a wrong class ID, is FAIL.
-function Invoke-HarnessLearn {
-    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][object[]]$Variants, [scriptblock]$SameFile = $null)
+# Pure function: the outcome of one learn batch from what its launch showed. Check: Test-HarnessLearnReport of it ($null
+# when the launch failed: LaunchWhy); Installed: VST3 id -> install row; Jsfx: JSFX id -> row; Seen: the module list of
+# the launch. In this order: a tested binary from outside the private copy (any installed binary in the module list,
+# also in a batch of JSFX only, or an fx_ident) is INCOMPLETE and commits nothing (Foreign); a launch that failed is
+# INCOMPLETE; an entry that failed is FAIL; a binary of a plugin of this batch never seen loaded is INCOMPLETE
+# (binaries of plugins of other batches may be unseen). Commit: the keys of entries that failed nothing whose plugin was
+# proven in this launch (a VST3 by its binary Private in the module list, a JSFX of Jsfx by fx_ident and its saved
+# block; a plugin that is neither is never committed). Modules: the module verdict over the binaries of this batch's
+# plugins (NoBinary when it has none).
+function Get-HarnessLearnVerdict {
+    param([Parameter(Mandatory)][object[]]$Variants, $Check = $null, [string]$LaunchWhy = '', [hashtable]$Installed = @{}, [hashtable]$Jsfx = @{}, [hashtable]$Seen = @{}, [scriptblock]$SameFile = $null)
     $same = $SameFile ?? ${function:Test-HarnessSameFile}
-    $saveAs = Join-Path $Ctx.Work 'learn.rpp'
-    $project = Join-Path $Ctx.Work 'learn-in.rpp'
+    $none = [pscustomobject]@{ Verdict = 'NoBinary'; Binaries = [ordered]@{} }
+    $every = @{}
+    $mine = @{}
+    foreach ($id in $Installed.get_Keys()) {
+        $row = $Installed[$id]
+        $every[$row.BinaryLeaf] = $row.Binary
+        if (@($Variants | Where-Object { $_.Plugin -ceq $id }).Count) { $mine[$row.BinaryLeaf] = $row.Binary }
+    }
+    # Asked about nothing, the module list says Unseen, which is right for it and wrong here: no binary, nothing to prove
+    $all = $every.get_Count() ? (Get-HarnessModuleVerdict -Expected $every -Seen $Seen -SameFile $same) : $none
+    $mod = $mine.get_Count() ? (Get-HarnessModuleVerdict -Expected $mine -Seen $Seen -SameFile $same) : $none
+    $why = @(if ($Check) { $Check.Foreign }) + @($all.Binaries.get_Keys() | Where-Object { $all.Binaries[$_] -eq 'Foreign' } | ForEach-Object { "a module named $_ was loaded from outside the private plugins directory" })
+    $commit = @(if (-not $why.Count -and $Check) {
+            foreach ($v in $Variants) {
+                $vst = $Installed.ContainsKey($v.Plugin) ? $Installed[$v.Plugin] : $null
+                if ($Check.Blocks.ContainsKey($v.Key) -and ($vst ? ($mod.Binaries[$vst.BinaryLeaf] -ceq 'Private') : $Jsfx.ContainsKey($v.Plugin))) { $v.Key }
+            }
+        })
+    $proof = ($mod.Verdict -ceq 'NoBinary') ? 'no plugin binary to check (only JSFX), each JSFX found at its private path (fx_ident)' : 'every tested binary loaded from the private copy (module list and fx_ident)'
+    $status, $detail = if ($why.Count) { 'INCOMPLETE', ('not the private copy: ' + ($why -join '; ')) }
+    elseif ($LaunchWhy) { 'INCOMPLETE', "the learn launch failed: $LaunchWhy" }
+    elseif ($Check.Fail.Count) { 'FAIL', ($Check.Fail -join '; ') }
+    elseif ($mod.Verdict -cnotin 'Proven', 'NoBinary') { 'INCOMPLETE', "the module list never showed $(@($mod.Binaries.get_Keys() | Where-Object { $mod.Binaries[$_] -eq 'Unseen' }) -join ', ') loaded, so the private copy is not proven" }
+    else { 'PASS', "$($Variants.Count) plugin variants learned; $proof" }
+    [pscustomobject]@{ Status = $status; Detail = $detail; Commit = $commit; Modules = $mod; Foreign = [bool]$why.Count }
+}
+
+# The launch of one learn batch (BatchNo of BatchCount): projects _learn-<k>-in.rpp and _learn-<k>.rpp, Lua step
+# _learn-<k>, labelled as its row. Returns an outcome (Status PASS / FAIL / INCOMPLETE, Detail, Facts) with Stop:
+# 'foreign' (a tested binary from outside the private copy: nothing more is learned, and nothing that needs learning runs),
+# 'launch' (the launch was blocked or could not be ended: a skip marker, a busy lock, StillRunning; no later batch is
+# started) or ''. What Get-HarnessLearnVerdict commits goes into Ctx.Blocks, Ctx.LearnReads, Ctx.Names and Ctx.AddNames,
+# also when the row is FAIL for other entries.
+function Invoke-HarnessLearn {
+    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][object[]]$Variants, [int]$BatchNo = 1, [int]$BatchCount = 1, [scriptblock]$SameFile = $null)
+    $same = $SameFile ?? ${function:Test-HarnessSameFile}
+    $saveAs = Join-Path $Ctx.Work "_learn-$BatchNo.rpp"
+    $project = Join-Path $Ctx.Work "_learn-$BatchNo-in.rpp"
     if (Test-Path -LiteralPath $saveAs) { Remove-Item -LiteralPath $saveAs }
     $Ctx.Files.Add($saveAs); $Ctx.Files.Add($project)
     $stateLines = @{}
@@ -182,31 +286,23 @@ function Invoke-HarnessLearn {
                params = @(foreach ($pn in $v.Params.get_Keys()) { @{ name = $pn; value = [double]$v.Params[$pn].Normalized } }) }
         })
     Set-HarnessAudioConfig -Sr $script:LearnRate -Block $script:LearnBlock
-    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name 'learn' -Step learn -Job @{ fx = $fx; saveAs = $saveAs; project = $project } -TimeoutSec ([double]$Ctx.Limits.learnTimeoutSec)
-    $expected = @{}
-    foreach ($row in $Ctx.Installed.get_Values()) { $expected[$row.BinaryLeaf] = $row.Binary }
-    # Only JSFX shipped with the tool, no plugin binary: the module list has nothing to prove (asked about nothing it
-    # says Unseen, which is right for it and wrong here), so it is not asked, and the facts say there was nothing to
-    # check. A JSFX is proven by fx_ident and its saved block instead.
-    $mod = $expected.get_Count() ? (Get-HarnessModuleVerdict -Expected $expected -Seen $lua.Run.Modules -SameFile $same) : [pscustomobject]@{ Verdict = 'NoBinary'; Binaries = [ordered]@{} }
-    $facts = [ordered]@{ variants = $Variants.Count; modules = $mod.Verdict; binaries = $mod.Binaries }
+    $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name "_learn-$BatchNo" -Step learn -Label (Get-HarnessLearnRowId $BatchNo $BatchCount) -Job @{ fx = $fx; saveAs = $saveAs; project = $project } `
+        -TimeoutSec ([double]$Ctx.Limits.learnTimeoutSec)
+    $learnCheck = $null
+    if (-not $lua.Why) {
+        $Saved = (Test-Path -LiteralPath $saveAs) ? (Get-HarnessFxBlocks ([IO.File]::ReadAllText($saveAs))) : $null
+        $learnCheck = Test-HarnessLearnReport -Variants $Variants -Installed $Ctx.Installed -Jsfx $Ctx.Jsfx -States $Ctx.States -Report $lua.Result -Saved $Saved -TrackNames $learnNames -SameFile $same
+    }
+    $judged = Get-HarnessLearnVerdict -Variants $Variants -Check $learnCheck -LaunchWhy ([string]$lua.Why) -Installed $Ctx.Installed -Jsfx $Ctx.Jsfx -Seen $lua.Run.Modules -SameFile $same
+    foreach ($k in $judged.Commit) { $Ctx.Blocks[$k] = $learnCheck.Blocks[$k]; $Ctx.LearnReads[$k] = $learnCheck.Reads[$k] }
+    # Names come from what was installed, per plugin; a plugin with an entry committed has its name
+    foreach ($v in @($Variants | Where-Object { $_.Key -cin $judged.Commit })) { $Ctx.Names[$v.Plugin] = $learnCheck.Names[$v.Plugin]; $Ctx.AddNames[$v.Plugin] = $learnCheck.AddNames[$v.Plugin] }
+    $facts = [ordered]@{ variants = $Variants.Count; batch = $BatchNo; batches = $BatchCount; modules = $judged.Modules.Verdict; binaries = $judged.Modules.Binaries }
     $used = @($Variants | Where-Object { $_.State } | ForEach-Object { "$($_.Plugin)@$($_.State)" } | Select-Object -Unique)
     if ($used.Count) { $facts.states = @($used | ForEach-Object { [ordered]@{ plugin = $Ctx.States[$_].Plugin; state = $Ctx.States[$_].State; sha256 = $Ctx.States[$_].Sha } }) }
-    if ($lua.Why) { return New-HarnessOutcome INCOMPLETE "the learn launch failed: $($lua.Why)" $facts }
-    $Saved = (Test-Path -LiteralPath $saveAs) ? (Get-HarnessFxBlocks ([IO.File]::ReadAllText($saveAs))) : $null
-    $check = Test-HarnessLearnReport -Variants $Variants -Installed $Ctx.Installed -Jsfx $Ctx.Jsfx -States $Ctx.States -Report $lua.Result -Saved $Saved -TrackNames $learnNames -SameFile $same
-    $foreignMods = @($mod.Binaries.get_Keys() | Where-Object { $mod.Binaries[$_] -eq 'Foreign' })
-    $why = @($check.Foreign) + @($foreignMods | ForEach-Object { "a module named $_ was loaded from outside the private plugins directory" })
-    if ($why.Count) { return New-HarnessOutcome INCOMPLETE ("not the private copy: " + ($why -join '; ')) $facts }
-    if ($check.Fail.Count) { return New-HarnessOutcome FAIL ($check.Fail -join '; ') $facts }
-    if ($mod.Verdict -cnotin 'Proven', 'NoBinary') {
-        $unseen = @($mod.Binaries.get_Keys() | Where-Object { $mod.Binaries[$_] -eq 'Unseen' })
-        return New-HarnessOutcome INCOMPLETE "the module list never showed $($unseen -join ', ') loaded, so the private copy is not proven" $facts
-    }
-    foreach ($k in $check.Blocks.get_Keys()) { $Ctx.Blocks[$k] = $check.Blocks[$k]; $Ctx.LearnReads[$k] = $check.Reads[$k] }
-    foreach ($k in $check.Names.get_Keys()) { $Ctx.Names[$k] = $check.Names[$k]; $Ctx.AddNames[$k] = $check.AddNames[$k] }
-    $proof = ($mod.Verdict -ceq 'NoBinary') ? 'no plugin binary to check (only JSFX), each JSFX found at its private path (fx_ident)' : 'every tested binary loaded from the private copy (module list and fx_ident)'
-    New-HarnessOutcome PASS "$($Variants.Count) plugin variants learned; $proof" $facts
+    $facts.learned = $judged.Commit.Count
+    $stop = $judged.Foreign ? 'foreign' : (($lua.Why -and ($lua.Run.StillRunning -or $lua.Run.Status -cin 'LockBusy', 'SkipMarker', 'Blocked')) ? 'launch' : '')
+    New-HarnessOutcome $judged.Status $judged.Detail $facts | Add-Member -NotePropertyName Stop -NotePropertyValue $stop -PassThru
 }
 
 # Over every launch of the round (Ctx.LaunchLog): any module with a tested binary's file name that is not the
@@ -232,4 +328,5 @@ function Get-HarnessModuleCheck {
     New-HarnessOutcome $status $detail ([ordered]@{ launches = $Ctx.LaunchLog.Count; foreign = @($foreign); otherPlugins = $others.Count })
 }
 
-Export-ModuleMember -Function Get-HarnessReaperName, Get-HarnessLearnVariants, Get-HarnessLearnTrackNames, Split-HarnessFxIdent, Test-HarnessLearnReport, Invoke-HarnessLearn, Get-HarnessModuleCheck
+Export-ModuleMember -Function Get-HarnessReaperName, Get-HarnessScenarioLearnKeys, Get-HarnessLearnVariants, Get-HarnessLearnBatches, Get-HarnessLearnRowId, Get-HarnessLearnTrackNames, Split-HarnessFxIdent,
+    Test-HarnessLearnReport, Get-HarnessLearnVerdict, Invoke-HarnessLearn, Get-HarnessModuleCheck

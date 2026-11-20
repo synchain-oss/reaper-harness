@@ -238,6 +238,25 @@ function Test-HarnessNeedsLearn($Scenario) {
     [bool]($p['compare'] -and $Scenario.compare -and $Scenario.compare.Kind -eq 'variant' -and $Scenario.compare.Layout -notlike '@*')
 }
 
+# Why a scenario does not run for want of learned plugin blocks ('' when it runs). Halt: learning saw what no scenario
+# may run after (a tested binary from outside the private copy) or broke; it is the reason. A kind of an extension gets
+# every block and the proof: it runs only when there were learn rows, every one PASS, and learning did not stop
+# (Complete). Every other scenario runs when each plugin variant it needs (Get-HarnessScenarioLearnKeys) was committed.
+function Get-HarnessLearnGap {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)]$Scenario, [string]$Halt = '', [bool]$Complete = $false)
+    if (-not (Test-HarnessNeedsLearn $Scenario)) { return '' }
+    if ($Halt) { return $Halt }
+    if ($Scenario.kind -cnotin 'render', 'device', 'savereopen', 'transport', 'instances') {
+        return $Complete ? '' : "not run: learning did not pass in every batch, and a kind of an extension gets every block (see the learn row$(($Context.LearnBatchCount -gt 1) ? 's' : ''))"
+    }
+    foreach ($e in (Get-HarnessScenarioLearnKeys -Config $Context.Config -Scenario $Scenario)) {
+        if ($Context.Blocks.ContainsKey($e.Key)) { continue }
+        if (-not $Context.LearnBatchOf.ContainsKey($e.Key)) { return "not run: learning did not cover $($e.Plugin) as this scenario uses it" }
+        return "not run: learning the plugin blocks it needs did not succeed (see the $(Get-HarnessLearnRowId $Context.LearnBatchOf[$e.Key] $Context.LearnBatchCount) row)"
+    }
+    ''
+}
+
 function Write-HarnessLine([string]$Text) { Write-Host (Hide-HarnessPaths $Text) }
 
 function Invoke-HarnessSuite {
@@ -297,6 +316,9 @@ function Invoke-HarnessSuite {
         $toolJsfx = @($all | Where-Object { $_.kind -ceq 'transport' }).Count ? (Install-HarnessToolJsfx) : @{}
         $needLearn = @($all | Where-Object { Test-HarnessNeedsLearn $_ }).Count -gt 0
         $variants = Get-HarnessLearnVariants -Config $conf -Scenarios @($all | Where-Object { Test-HarnessNeedsLearn $_ })
+        $plan = $needLearn ? (Get-HarnessLearnBatches -Variants $variants -Size ([int]$conf.Limits.learnBatchSize)) : @()
+        Write-HarnessLine ("{0} scenarios and {1} negative cases picked (after matrix and variant expansion); {2} plugin variants to learn in {3} launch{4} per round" -f
+            @($picked.Positive).Count, @($picked.Negative).Count, ($needLearn ? $variants.Count : 0), $plan.Count, (($plan.Count -eq 1) ? '' : 'es'))
         $firstId = @($conf.Scenarios)[0].id
         $guardSet = @{ CfgDir = $CfgDir; Config = $Config; PluginDir = $PluginDir; ResultDir = $ResultDir; ReaperExe = $ReaperExe; SkipMarker = $SkipMarker; ExtraGuiLock = $ExtraGuiLock; SelfTestHooks = $SelfTestHooks }
         for ($k = 1; $k -le $Repeat; $k++) {
@@ -311,23 +333,43 @@ function Invoke-HarnessSuite {
             Copy-HarnessSourceFiles -Ctx $ctx -Sources $sourceFiles
             $sw = [Diagnostics.Stopwatch]::StartNew()
             $rows = [Collections.Generic.List[object]]::new()
-            $NotRun = ''
+            $learnHalt = '' # why nothing that needs learning runs
             # What the end of the round works with if the rows below never get that far
             $mods = New-HarnessOutcome INCOMPLETE 'the module check did not run' ([ordered]@{ launches = 0; foreign = @(); otherPlugins = 0 })
             $brokenRound = $false
             try {
-                if ($needLearn) {
+                # One row per learn batch. A batch whose launch failed leaves its entries unlearned and the next batch still
+                # runs: every launch passes every guard on its own. Learning stops at a tested binary from outside the private
+                # copy, at a launch that was blocked or could not be ended, and at an error.
+                $ctx.LearnBatchCount = $plan.Count
+                foreach ($batch in $plan) { foreach ($e in $batch.Entries) { $ctx.LearnBatchOf[$e.Key] = $batch.No } }
+                $stoppedAt = ''
+                $learnRows = [Collections.Generic.List[object]]::new()
+                foreach ($batch in $plan) {
+                    $rowId = Get-HarnessLearnRowId $batch.No $plan.Count
                     $t0 = [Diagnostics.Stopwatch]::StartNew()
-                    $o = try { Invoke-HarnessLearn -Ctx $ctx -Variants $variants } catch { New-HarnessOutcome INCOMPLETE "learning threw: $($_.Exception.Message -replace '\s+', ' ')" }
-                    $row = [ordered]@{ id = 'learn'; kind = 'learn'; status = $o.Status; seconds = [math]::Round($t0.Elapsed.TotalSeconds, 1); detail = (Hide-HarnessPaths $o.Detail) }
-                    # No path in these today (counts, verdicts, file names, state names); masked like every other row all the same
-                    if ($o.PSObject.Properties['Facts']) { $row.facts = Hide-HarnessFacts $o.Facts }
-                    $rows.Add($row)
-                    Write-HarnessLine ("  [{0}] learn  {1} s  {2}" -f $o.Status, $row.seconds, $o.Detail)
-                    if ($o.Status -ne 'PASS') { $NotRun = 'not run: learning the plugin blocks did not succeed (see the learn row)' }
+                    $o = if ($stoppedAt) { New-HarnessOutcome INCOMPLETE "not run: learning stopped at the $stoppedAt row" }
+                    else {
+                        try { Invoke-HarnessLearn -Ctx $ctx -Variants $batch.Entries -BatchNo $batch.No -BatchCount $plan.Count }
+                        catch { New-HarnessOutcome INCOMPLETE "learning threw: $($_.Exception.Message -replace '\s+', ' ')" | Add-Member -NotePropertyName Stop -NotePropertyValue 'threw' -PassThru }
+                    }
+                    $learnStop = ($o.PSObject.Properties['Stop'] -and $o.Stop) ? [string]$o.Stop : ''
+                    if ($learnStop -and -not $stoppedAt) {
+                        $stoppedAt = $rowId
+                        if ($learnStop -ceq 'foreign') { $learnHalt = "not run: learning saw a tested binary loaded from outside the private copy (see the $rowId row)" }
+                        elseif ($learnStop -ceq 'threw') { $learnHalt = "not run: learning stopped on an error (see the $rowId row)" }
+                    }
+                    $row = [ordered]@{ id = $rowId; kind = 'learn'; status = $o.Status; seconds = [math]::Round($t0.Elapsed.TotalSeconds, 1); detail = (Hide-HarnessPaths $o.Detail) }
+                    # No path in these today (counts, verdicts, file names, state names); masked like every other row all the same.
+                    # A batch not started, or one that threw, has its place and size all the same, and nothing learned.
+                    $row.facts = Hide-HarnessFacts ($o.PSObject.Properties['Facts'] ? $o.Facts : [ordered]@{ variants = @($batch.Entries).Count; batch = $batch.No; batches = $plan.Count; learned = 0 })
+                    $rows.Add($row); $learnRows.Add($row)
+                    Write-HarnessLine ("  [{0}] {1}  {2} s  {3}" -f $o.Status, $rowId, $row.seconds, $o.Detail)
                 }
+                $learnComplete = $learnRows.Count -gt 0 -and -not $stoppedAt -and @($learnRows | Where-Object { $_.status -ne 'PASS' }).Count -eq 0
                 foreach ($s in $picked.Positive) {
-                    if ($NotRun -and (Test-HarnessNeedsLearn $s)) { $o = New-HarnessOutcome INCOMPLETE $NotRun | Add-Member -NotePropertyName Seconds -NotePropertyValue 0 -PassThru }
+                    $gap = Get-HarnessLearnGap -Context $ctx -Scenario $s -Halt $learnHalt -Complete $learnComplete
+                    if ($gap) { $o = New-HarnessOutcome INCOMPLETE $gap | Add-Member -NotePropertyName Seconds -NotePropertyValue 0 -PassThru }
                     else { $o = Invoke-HarnessScenario -Ctx $ctx -Scenario $s }
                     $row = [ordered]@{ id = $s.id; kind = $s.kind; status = $o.Status; seconds = $o.Seconds; detail = (Hide-HarnessPaths $o.Detail) }
                     if ($o.PSObject.Properties['Facts']) { $row.facts = Hide-HarnessFacts $o.Facts }
@@ -343,11 +385,16 @@ function Invoke-HarnessSuite {
                         }
                         if ($keeper.Lines) { $result.manifest = "$($keeper.Rel)/manifest.jsonl" }
                     }
+                    # A row of a variant names it and the scenario as written, whether or not it ran
+                    if ($s.PSObject.Properties['variant'] -and $s.variant) {
+                        if (-not ($row.Contains('facts') -and $row.facts -is [System.Collections.IDictionary])) { $row.facts = [ordered]@{} }
+                        $row.facts['variant'] = $s.variant; $row.facts['baseScenario'] = $s.PSObject.Properties['baseId'] ? $s.baseId : $s.id
+                    }
                     $rows.Add($row)
                     Write-HarnessLine ("  [{0}] {1}  {2} s  {3}" -f $shown.Status, $s.id, $o.Seconds, $shown.Detail)
                 }
                 foreach ($s in $picked.Negative) {
-                    $skip = ($NotRun -and (Test-HarnessNeedsLearn $s)) ? $NotRun : ''
+                    $skip = Get-HarnessLearnGap -Context $ctx -Scenario $s -Halt $learnHalt -Complete $learnComplete
                     $row = Invoke-HarnessNegativeRow -Context $ctx -Scenario $s -GuardParams $guardSet -TempRoot $work -FirstScenario $firstId -NotRun $skip
                     $rows.Add($row)
                     Write-HarnessLine ("  [{0}] {1}  expected {2}, observed {3}  {4}" -f $row.status, $row.id, $row.expected, $row.observed, $row.detail)
@@ -436,4 +483,4 @@ function Complete-HarnessRun {
 }
 
 Export-ModuleMember -Function Get-HarnessPreflight, Get-HarnessDefaultLabel, Get-HarnessWorstStatus, Get-HarnessCfgChangesSeen, Get-HarnessRunVerdict, Get-HarnessRoundStop, Get-HarnessNegativeVerdict,
-    Invoke-HarnessGuardNegative, Invoke-HarnessNegativeRow, Select-HarnessScenarios, Test-HarnessNeedsLearn, Invoke-HarnessSuite, Write-HarnessResult, Complete-HarnessRun
+    Invoke-HarnessGuardNegative, Invoke-HarnessNegativeRow, Select-HarnessScenarios, Test-HarnessNeedsLearn, Get-HarnessLearnGap, Invoke-HarnessSuite, Write-HarnessResult, Complete-HarnessRun

@@ -215,7 +215,8 @@ bit-identical; that is right only for a plugin documented to pass audio through 
     plugin that does its work on the main thread to behave differently in online renders there.
   - The negative case `neg-passthrough-is-not-routing` applies the vocal-track criterion to the all-default layout
     and must come out FAIL, which shows that the criterion tells routing from passthrough.
-- `device` checks the reported latency (`expectPdc`, from the documentation), the block size, the sample rate and
+- `device` checks the reported latency (`expectPdc`, from the documentation; `"report"` for a plugin whose latency
+  depends on its settings, which is then recorded, not judged), the block size, the sample rate and
   the parameters read back; give a parameter `{ "normalized", "display" }` once you have seen the text REAPER shows
   for it (the example: `Width` 0.5 shows `75 %`). `savereopen` and `instances` need no criteria of their own beyond
   their limits.
