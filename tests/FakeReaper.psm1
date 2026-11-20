@@ -22,6 +22,15 @@
 #       PdcUnread: no latency is read (pdc= stays empty), in the learn step and in device, savereopen and transport
 #       LearnNoResult (n): the n-th learn launch since Set-FakeReaper writes no result
 #       LearnNoModules (n): the module list of the n-th learn launch since Set-FakeReaper shows no binary at all
+#       Params (REAPER name -> a list of @{ Name; Value }): the parameters of that plugin in order, with their defaults;
+#       names may repeat (it sets and reads the first of a name, as the driver does) and it saves them as index=value
+#       pairs. Without it a plugin takes any name it is given and saves name=value pairs. HostParams: those plugins end
+#       with REAPER's Bypass, Wet and Delta (idents :bypass, :wet, :delta); nparams counts the parameters an instance has.
+#       A parameter listing (job entries with list, sweep) is reported like the driver does, after the save. Faults, in
+#       the first listed entry: ListInexact (the name of parameter 1 is not exact), ListDrop (no display of parameter
+#       1), ListError (the listing stops with an error), ListCountEnd (the count at the end is one more), SweepNoAdd
+#       (the first instance to sweep is not added), SweepOtherName (the instances to sweep show another name),
+#       SweepOtherBinary (their fx_ident names another binary)
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
 #   ConvertFrom-FakeLua <text>                        reads a job file written by ConvertTo-HarnessLuaTable
 
@@ -160,9 +169,51 @@ function New-FakeParams([string]$kind) {
     $p
 }
 
-# The state a plugin saves: its parameters as name=value; pairs (always written the same way).
-function ConvertTo-FakeState($Params) {
-    $pairs = -join @($Params.get_Keys() | ForEach-Object { "$_=$(([double]$Params[$_]).ToString('R', $script:Inv));" })
+# The parameters of a plugin of Spec.Params by its REAPER name, in order (Name, Value, Ident); $null for any other plugin
+function New-FakeParamList([string]$reaperName) {
+    $given = $script:Spec['Params']
+    if (-not $given -or -not $given.Contains($reaperName)) { return $null }
+    $out = [Collections.Generic.List[object]]::new()
+    foreach ($e in @($given[$reaperName])) { $out.Add([pscustomobject]@{ Name = [string]$e['Name']; Value = [double]$e['Value']; Ident = "$($out.Count)" }) }
+    if ($script:Spec['HostParams']) { foreach ($h in 'Bypass', 'Wet', 'Delta') { $out.Add([pscustomobject]@{ Name = $h; Value = (($h -ceq 'Wet') ? 1.0 : 0.0); Ident = ":$($h.ToLowerInvariant())" }) } }
+    , $out
+}
+
+# Every parameter of an instance, in order (Name, Value, Ident); without a list, those it was given (ident = index)
+function Get-FakeParamRows($fx) {
+    if ($fx.List) { return , @($fx.List) }
+    $pos = 0
+    , @(foreach ($pn in @($fx.Params.get_Keys())) { [pscustomobject]@{ Name = [string]$pn; Value = [double]$fx.Params[$pn]; Ident = "$pos" }; $pos++ })
+}
+
+# The index of the first parameter of that name, as findParam finds it; -1 when there is none
+function Find-FakeParamIndex($fx, [string]$name) {
+    $rows = Get-FakeParamRows $fx
+    for ($i = 0; $i -lt $rows.Count; $i++) { if ($rows[$i].Name -ceq $name) { return $i } }
+    -1
+}
+
+# The value of the first parameter of that name ($null when there is none)
+function Get-FakeParamValue($fx, [string]$name) {
+    if (-not $fx.List) { return $fx.Params.Contains($name) ? [double]$fx.Params[$name] : $null }
+    $i = Find-FakeParamIndex $fx $name
+    ($i -ge 0) ? $fx.List[$i].Value : $null
+}
+
+# Sets the first parameter of that name; a plugin without a list takes any name. False when it has no such parameter.
+function Set-FakeParamValue($fx, [string]$name, [double]$Value) {
+    if (-not $fx.List) { $fx.Params[$name] = $Value; return $true }
+    $i = Find-FakeParamIndex $fx $name
+    if ($i -lt 0) { return $false }
+    $fx.List[$i].Value = $Value
+    $true
+}
+
+# The state a plugin saves: its parameters as name=value; pairs, or index=value; for a plugin of Spec.Params (always
+# written the same way).
+function ConvertTo-FakeState($fx) {
+    $pairs = $fx.List ? (-join @(for ($i = 0; $i -lt $fx.List.Count; $i++) { "$i=$(([double]$fx.List[$i].Value).ToString('R', $script:Inv));" })) :
+        (-join @($fx.Params.get_Keys() | ForEach-Object { "$_=$(([double]$fx.Params[$_]).ToString('R', $script:Inv));" }))
     'FAKESTATE ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pairs))
 }
 
@@ -192,7 +243,12 @@ function Read-FakeProject([string]$Text) {
             if ($s.StartsWith('<')) { $fxLevel++ } elseif ($s -eq '>') { $fxLevel--; if ($fxLevel -eq 0) { $fx = $null }; continue }
             if ($s -match '^FAKESTATE (\S*)$') {
                 $state = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
-                foreach ($pair in ($state -split ';' | Where-Object { $_ })) { $kv = $pair -split '=', 2; $fx.Params[$kv[0]] = [double]::Parse($kv[1], $script:Inv) }
+                foreach ($pair in ($state -split ';' | Where-Object { $_ })) {
+                    $kv = $pair -split '=', 2
+                    $pos = 0
+                    if ($fx.List -and [int]::TryParse($kv[0], [ref]$pos) -and $pos -lt $fx.List.Count) { $fx.List[$pos].Value = [double]::Parse($kv[1], $script:Inv) }
+                    else { $null = Set-FakeParamValue $fx $kv[0] ([double]::Parse($kv[1], $script:Inv)) }
+                }
             }
             continue
         }
@@ -214,8 +270,9 @@ function Read-FakeProject([string]$Text) {
         elseif ($s -match '^<(VST|JS) (.*)$') {
             $kind = $Matches[1]
             $tok = @([regex]::Matches($Matches[2], '"[^"]*"|\S+') | ForEach-Object { $_.Value.Trim('"') })
-            $fx = [pscustomobject]@{ Kind = $kind; Name = ''; Ident = ''; Header = $s; Bypassed = $bypassNext; Params = (New-FakeParams $kind) }
+            $fx = [pscustomobject]@{ Kind = $kind; Name = ''; Ident = ''; Header = $s; Bypassed = $bypassNext; Params = (New-FakeParams $kind); List = $null }
             if ($kind -eq 'JS') { $fx.Ident = $tok[0]; $fx.Name = Get-FakeJsName $tok[0] } else { $fx.Name = $tok[0] }
+            $fx.List = New-FakeParamList $fx.Name
             $cur.Fx.Add($fx)
             $fxLevel = 1
         }
@@ -223,7 +280,7 @@ function Read-FakeProject([string]$Text) {
     , $tracks.ToArray()
 }
 
-function Format-FakeFxBlock($fx) { @($fx.Header, (ConvertTo-FakeState $fx.Params), '>') }
+function Format-FakeFxBlock($fx) { @($fx.Header, (ConvertTo-FakeState $fx), '>') }
 
 # The mix of a project. Returns @{ Master; Stems (track name -> samples); Rate; Channels }.
 function Get-FakeMix([string]$Text) {
@@ -272,7 +329,8 @@ function Get-FakeMix([string]$Text) {
             $post = $pre
             foreach ($fx in $t.Fx) {
                 if ($fx.Bypassed) { continue }
-                if ($fx.Params.Contains('Trim')) { $post = [FakeMix]::Scale($post, 2 * [double]$fx.Params['Trim']) }
+                $trim = Get-FakeParamValue $fx 'Trim'
+                if ($null -ne $trim) { $post = [FakeMix]::Scale($post, 2 * $trim) }
                 if (-not (Test-FakeReportsPdc $fx) -and (Get-FakeDelay $fx)) { $post = [FakeMix]::Delay($post, (Get-FakeDelay $fx), $channels) }
             }
             $out = [double[]]::new($len)
@@ -329,7 +387,8 @@ function Add-FakeTracks($Lines, [string]$Prefix, [string]$Project, $Reads) {
         $k++
         $q = "${Prefix}t$([int]$r['t'])_fx$([int]$r['f'])_"
         $fx = $tracks[[int]$r['t']].Fx[[int]$r['f']]
-        if ($fx.Params.Contains($r['name'])) { $v = $fx.Params[$r['name']]; $Lines.Add("${q}param$k=$(Format-Fake $v)"); $Lines.Add("${q}display$k=$(Get-FakeDisplay $fx $r['name'] $v)") }
+        $v = Get-FakeParamValue $fx $r['name']
+        if ($null -ne $v) { $Lines.Add("${q}param$k=$(Format-Fake $v)"); $Lines.Add("${q}display$k=$(Get-FakeDisplay $fx $r['name'] $v)") }
         else { $Lines.Add("${q}param$k=missing") }
     }
 }
@@ -346,6 +405,7 @@ function Invoke-FakeLearn($job, $report) {
     $given = @(($job['project'] -and (Test-Path -LiteralPath $job['project'])) ? (Read-FakeProject ([IO.File]::ReadAllText($job['project']))) : @())
     $rpp = [Text.StringBuilder]::new("<REAPER_PROJECT 0.1 `"7.0/win64`" 0 0`n")
     $n = 0
+    $made = [Collections.Generic.List[object]]::new() # each entry and the instance it added, for a listing after the save
     foreach ($e in @($job['fx'])) {
         $n++
         $key = "fx${n}_"
@@ -360,7 +420,7 @@ function Invoke-FakeLearn($job, $report) {
             $p = Find-FakePlugin $e['name']
             if ($p) {
                 $header = ($p.Kind -eq 'JS') ? "<JS $($p.Ident) `"`"" : "<VST `"$($p.Name)`" `"$($p.Bundle)`" 0 `"`" 1234567890{$($p.Cid)} `"`""
-                $fx = [pscustomobject]@{ Kind = $p.Kind; Name = $p.Name; Ident = $p.Ident; Header = $header; Bypassed = $false; Params = (New-FakeParams $p.Kind); Plugin = $p }
+                $fx = [pscustomobject]@{ Kind = $p.Kind; Name = $p.Name; Ident = $p.Ident; Header = $header; Bypassed = $false; Params = (New-FakeParams $p.Kind); List = (New-FakeParamList $p.Name); Plugin = $p }
             }
         }
         # Like the driver: track n of the opened project keeps its name; a track it has to add is named learn-<n>
@@ -370,12 +430,13 @@ function Invoke-FakeLearn($job, $report) {
         $ident = ($fx.Kind -eq 'JS') ? $fx.Ident : $fx.Plugin.Ident
         if ($fx.Kind -ne 'JS') { $script:JobBinaries = @($script:JobBinaries) + (Get-FakeBinary $fx.Plugin.Bundle) }
         $k = 0
+        $made.Add([pscustomobject]@{ N = $n; Fx = $fx })
         $readBack = foreach ($prm in @($e['params'])) {
             $k++
-            $fx.Params[$prm['name']] = [double]$prm['value']
+            if (-not (Set-FakeParamValue $fx $prm['name'] ([double]$prm['value']))) { "${key}p$k=missing"; continue }
             "${key}p$k=$(Format-Fake $prm['value'])"; "${key}p${k}_display=$(Get-FakeDisplay $fx $prm['name'] ([double]$prm['value']))"
         }
-        foreach ($kv in @('idx=0', "name=$($fx.Name)", "ident=$ident", "pdc=$(Get-FakePdcText $fx)", 'offline=false', 'nparams=4')) { $report.Add($key + $kv) }
+        foreach ($kv in @('idx=0', "name=$($fx.Name)", "ident=$ident", "pdc=$(Get-FakePdcText $fx)", 'offline=false', "nparams=$((Get-FakeParamRows $fx).Count)")) { $report.Add($key + $kv) }
         foreach ($line in @($readBack)) { $report.Add($line) }
         $null = $rpp.Append("    <FXCHAIN`n      BYPASS 0 0 0`n")
         foreach ($line in (Format-FakeFxBlock $fx)) { $null = $rpp.Append("      $line`n") }
@@ -384,6 +445,55 @@ function Invoke-FakeLearn($job, $report) {
     $null = $rpp.Append(">`n")
     [IO.File]::WriteAllText($job['saveAs'], $rpp.ToString())
     $report.Add('saved=true')
+    Add-FakeListing $job $report $made
+}
+
+# A parameter listing after the save, as the driver reports it: every listed entry's parameters, then the sweeps of an
+# entry on a fresh instance per name. The faults of Spec act on the first listed entry.
+function Add-FakeListing($job, $report, $made) {
+    $faulty = $true
+    foreach ($m in $made) {
+        $e = @($job['fx'])[$m.N - 1]
+        $fx = $m.Fx
+        $key = "fx$($m.N)_"
+        if (-not $e['list']) { continue }
+        $fault = { param([string]$Opt) $faulty -and $script:Spec[$Opt] }
+        $rows = Get-FakeParamRows $fx
+        $report.Add("${key}lcount=$($rows.Count)")
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $q = "${key}l${i}_"
+            $report.Add("${q}name=$($rows[$i].Name)")
+            $report.Add("${q}exact=$(((& $fault 'ListInexact') -and $i -eq 1) ? 'false' : 'true')")
+            $report.Add("${q}value=$(Format-Fake $rows[$i].Value)")
+            if (-not ((& $fault 'ListDrop') -and $i -eq 1)) { $report.Add("${q}display=$(Get-FakeDisplay $fx $rows[$i].Name $rows[$i].Value)") }
+            $report.Add("${q}dexact=true")
+            $report.Add("${q}ident=$($rows[$i].Ident)")
+        }
+        if (& $fault 'ListError') { $report.Add("${key}lerror=driver.lua:1: listing stopped") }
+        else { $report.Add("${key}lcount_end=$($rows.Count + ((& $fault 'ListCountEnd') ? 1 : 0))") }
+        $sweep = $e['sweep']
+        $swept = @(if ($sweep) { $sweep['names'] })
+        for ($s = 1; $s -le $swept.Count; $s++) {
+            $q = "${key}s${s}_"
+            if ((& $fault 'SweepNoAdd') -and $s -eq 1) { $report.Add("${q}idx=-1"); continue }
+            $report.Add("${q}idx=0")
+            $report.Add("${q}name=$($fx.Name)$((& $fault 'SweepOtherName') ? ' 2' : '')")
+            $ident = ($fx.Kind -eq 'JS') ? $fx.Ident : $fx.Plugin.Ident
+            if (& $fault 'SweepOtherBinary') { $ident = [IO.Path]::Combine($env:COMMONPROGRAMFILES, 'VST3', 'Other.vst3') + $ident.Substring($ident.LastIndexOf('<')) }
+            $report.Add("${q}ident=$ident")
+            $fresh = [pscustomobject]@{ Kind = $fx.Kind; Name = $fx.Name; Params = (New-FakeParams $fx.Kind); List = (New-FakeParamList $fx.Name) }
+            $pos = Find-FakeParamIndex $fresh $swept[$s - 1]
+            if ($pos -lt 0) { $report.Add("${q}index=missing"); continue }
+            $report.Add("${q}index=$pos")
+            $sweepVals = @($sweep['values'])
+            for ($k = 1; $k -le $sweepVals.Count; $k++) {
+                $null = Set-FakeParamValue $fresh $swept[$s - 1] ([double]$sweepVals[$k - 1])
+                $back = Get-FakeParamValue $fresh $swept[$s - 1]
+                foreach ($kv in "v$k=$(Format-Fake $back)", "v${k}_display=$(Get-FakeDisplay $fresh $swept[$s - 1] $back)", "v${k}_dexact=true") { $report.Add($q + $kv) }
+            }
+        }
+        $faulty = $false
+    }
 }
 
 # Plugin reports, as the driver copies them (job.reports: path, copy, period, and for the stand-in fields and pid): every

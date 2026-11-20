@@ -1525,6 +1525,19 @@ end
     $settle = $learnStep.LastIndexOf('wait(1.0)')
     & $add 'driver: the learn step reads each latency after every parameter is set and the plugins had time to settle' $false (
         $settle -gt $learnStep.IndexOf('"_display"') -and $learnStep.IndexOf('"_pdc"') -gt $settle -and $learnStep.IndexOf('"_pdc"') -lt $learnStep.IndexOf('Main_SaveProjectEx') -and -not $learnStep.Contains('key .. "pdc"'))
+    # A parameter listing reads after the save (the saved blocks stay those of a plain learn), an error in it is that
+    # entry's and not the step's, and a sweep works on a fresh instance of its own that it removes again
+    $driverAll = [IO.File]::ReadAllText((Join-Path $RepoRoot 'lua/driver.lua'))
+    $saveAt = $learnStep.IndexOf('Main_SaveProjectEx')
+    & $add 'driver: the learn step lists and sweeps only after the save, each call through pcall, an error reported as the entry''s lerror' $true (
+        $saveAt -gt 0 -and $learnStep.IndexOf('pcall(listParams, ') -gt $saveAt -and $learnStep.IndexOf('pcall(sweepParams, ') -gt $saveAt -and
+        @([regex]::Matches($driverAll, '(?<!function )\b(listParams|sweepParams)\(')).Count -eq 0 -and @([regex]::Matches($learnStep, 'if not ok then put\("fx" \.\. n \.\. "_lerror", err\) end')).Count -eq 2)
+    $listBody = [regex]::Match($driverAll, '(?s)\nlocal function listParams\(key, track, idx\)\r?\n.*?\r?\nend\r?\n').Value
+    & $add 'driver: a listing only reads (it sets nothing), and reads the count once more after the last parameter' $true (
+        $listBody -and $listBody -cnotmatch 'Set\w*\(' -and $listBody -cmatch '(?s)for p = 0, count - 1 do.*\n    end\r?\n    put\(key \.\. "lcount_end", reaper\.TrackFX_GetNumParams\(track, idx\)\)')
+    $sweepBody = [regex]::Match($driverAll, '(?s)\nlocal function sweepParams\(key, e\)\r?\n.*?\r?\nend\r?\n').Value
+    & $add 'driver: a sweep adds a fresh instance per name (TrackFX_AddByName with -1), reports its name and fx_ident, and deletes its track again' $true (
+        $sweepBody -cmatch '(?s)for s, name in ipairs\(e\.sweep\.names\) do.*?InsertTrackAtIndex.*?TrackFX_AddByName\(track, e\.name, false, -1\).*?put\(q \.\. "name", fxName\).*?put\(q \.\. "ident", named\(track, idx, "fx_ident"\)\).*reaper\.DeleteTrack\(track\)\r?\n    end\r?\nend')
     & $add 'learn report: a plugin that could not be added (index -1) is a failure naming it' $true (@((& $mut { param($r) $r.fx2_idx = '-1' }).Fail -match '^bus could not be added').Count -eq 1)
     & $add 'learn report: another plugin matched the name (TrackFX_AddByName is loose) is a failure' $true (@((& $mut { param($r) $r.fx1_name = 'VST3: Fixture Gain Pro (Fixture Audio)' }).Fail -match 'another plugin matched').Count -eq 1)
     & $add 'learn report: an offline FX is a failure' $true (@((& $mut { param($r) $r.fx2_offline = 'true' }).Fail -match 'offline').Count -eq 1)
@@ -1895,6 +1908,199 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'scenario layout: the variant layout when there is one, else the layout of the configuration, the dry one for @dry, nothing without a layout' $false (
         [object]::ReferenceEquals((& $sl (& $byId $o 'bus-trim')), $trim) -and [object]::ReferenceEquals((& $sl (& $byId $o 'routing')), $o.Config.Layouts['routing']) -and
         (& $sl ([pscustomobject]@{ layout = '@dry' })).Id -ceq '@dry' -and $null -eq (& $sl ([pscustomobject]@{ id = 'i'; kind = 'instances' })))
+    $cases
+}
+
+# ---------------------------------------------------------------- parameter listing
+function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    # What run.ps1 hands over: its bound parameters
+    $req = { param([hashtable]$BoundArgs) Test-HarnessListRequest -Bound $BoundArgs }
+    $sweepOf = { param([hashtable]$More = @{}) $h = @{ List = 'params'; ListPlugin = 'gain'; ListParam = 'Gain' }; foreach ($k in @($More.get_Keys())) { $h[$k] = $More[$k] }; $h }
+    $none = & $req @{ Config = 'c.json'; Only = 'x'; Repeat = 2 }
+    $plain = & $req @{ List = 'params' }
+    $dflt = & $req (& $sweepOf)
+    & $add 'list request: no -List is no listing ($null); -List params alone lists every plugin with no sweep; a sweep has the values 0, 0.25, 0.5, 0.75 and 1 by default' $false (
+        $null -eq $none -and $plain.Kind -ceq 'params' -and $null -eq $plain.Plugins -and $null -eq $plain.Params -and $null -eq $plain['Values'] -and
+        ($dflt.Plugins -join ',') -ceq 'gain' -and ($dflt.Params -join ',') -ceq 'Gain' -and ($dflt['Values'] -join ',') -ceq '0,0.25,0.5,0.75,1')
+    $given = & $req (& $sweepOf @{ ListValues = '1, 0.5,0 0.25'; ListPlugin = ' gain ' })
+    $blanks = & $req @{ List = 'params'; ListPlugin = 'gain bus' }
+    & $add "list request: values are kept in the order given, commas or blanks between them; ids too ($($given['Values'] -join ','); $($blanks.Plugins -join ','))" $false (
+        ($given['Values'] -join ',') -ceq '1,0.5,0,0.25' -and ($given.Plugins -join ',') -ceq 'gain' -and ($blanks.Plugins -join ',') -ceq 'gain,bus')
+    & $add 'list request: the PowerShell bound parameters of a script (a dictionary that has no .Contains) are read as well as a hashtable' $false (
+        & { function Get-Bound { param([string]$List, [string]$ListPlugin, [int]$Repeat = 1) $PSBoundParameters }; $b = Get-Bound -List params -ListPlugin gain; ((& $req $b).Plugins -join ',') -ceq 'gain' })
+    foreach ($o in 'ListPlugin', 'ListParam', 'ListParamFile', 'ListValues') {
+        & $add "list request: -$o without -List is a usage error" $true (Test-Usage { & $req @{ $o = 'x' } } "USAGE: -$o needs -List params*")
+    }
+    & $add 'list request: -List with anything but params is a usage error, saying so' $true (Test-Usage { & $req @{ List = 'classes' } } 'USAGE: -List: only "params" can be listed')
+    foreach ($o in @(@{ Only = 'x' }, @{ NoNegative = $true }, @{ Repeat = 1 })) {
+        $name = @($o.get_Keys())[0]
+        & $add "list request: -List with -$name (given at all, -Repeat 1 too) is a usage error" $true (Test-Usage { & $req (@{ List = 'params' } + $o) } "USAGE: -$name does not go with -List*")
+    }
+    & $add 'list request: a sweep without -ListPlugin, or with two plugins, is a usage error' $true (
+        (Test-Usage { & $req @{ List = 'params'; ListParam = 'Gain' } } '*needs exactly one plugin*') -and (Test-Usage { & $req (& $sweepOf @{ ListPlugin = 'gain,bus' }) } '*needs exactly one plugin*'))
+    & $add 'list request: an empty plugin id, or one given twice, is a usage error' $true (
+        (Test-Usage { & $req @{ List = 'params'; ListPlugin = 'gain,,bus' } } '*an empty plugin id*') -and (Test-Usage { & $req @{ List = 'params'; ListPlugin = 'gain,gain' } } "*plugin 'gain' is given twice*"))
+    & $add 'list request: -ListValues without a sweep is a usage error' $true (Test-Usage { & $req @{ List = 'params'; ListPlugin = 'gain'; ListValues = '0.5' } } '*-ListValues needs -ListParam or -ListParamFile*')
+    foreach ($wrongValue in '1.5', '-0.1', 'NaN', 'Infinity', 'x', '', '0,,1', '0;1', '0,5') {
+        & $add "list request: -ListValues '$wrongValue' is a usage error" $true (Test-Usage { & $req (& $sweepOf @{ ListValues = $wrongValue }) } '*-ListValues:*')
+    }
+    & $add 'list request: a value given twice (0 and -0 too) is a usage error' $true ((Test-Usage { & $req (& $sweepOf @{ ListValues = '0.5,0.25,0.5' }) } '*0.5 is given twice*') -and (Test-Usage { & $req (& $sweepOf @{ ListValues = '0,-0' }) } '*is given twice*'))
+    $values = { param([int]$n) (@(for ($i = 0; $i -lt $n; $i++) { ($i / 1000).ToString([Globalization.CultureInfo]::InvariantCulture) }) -join ',') }
+    & $add 'list request: 101 values are fine, 102 are a usage error' $true (@((& $req (& $sweepOf @{ ListValues = (& $values 101) }))['Values']).Count -eq 101 -and (Test-Usage { & $req (& $sweepOf @{ ListValues = (& $values 102) }) } '*at most 101 values*'))
+    & $add 'list request: a name of 256 characters is fine; 257, an empty one or one with a control character is a usage error' $true (
+        @((& $req (& $sweepOf @{ ListParam = ('n' * 256) })).Params)[0].Length -eq 256 -and (Test-Usage { & $req (& $sweepOf @{ ListParam = ('n' * 257) }) } '*parameter name 1 to sweep is empty, longer than 256*') -and
+        (Test-Usage { & $req (& $sweepOf @{ ListParam = '' }) } '*parameter name 1 to sweep is empty*') -and (Test-Usage { & $req (& $sweepOf @{ ListParam = "a`tb" }) } '*control character*') -and
+        (Test-Usage { & $req (& $sweepOf @{ ListParam = "ab`n" }) } '*control character*'))
+    & $add 'list request: -ListParam and -ListParamFile together are a usage error' $true (Test-Usage { & $req (& $sweepOf @{ ListParamFile = 'x.txt' }) } '*-ListParam and -ListParamFile do not go together*')
+    $nameFile = { param([byte[]]$FileBytes) $f = Join-Path $Tmp ('names-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.txt'); [IO.File]::WriteAllBytes($f, $FileBytes); @{ List = 'params'; ListPlugin = 'gain'; ListParamFile = $f } }
+    $utf8 = { param([string]$NameText) [Text.UTF8Encoding]::new($false).GetBytes($NameText) }
+    $fromFile = & $req (& $nameFile ([byte[]](0xEF, 0xBB, 0xBF) + (& $utf8 "Band 1 Gain`r`nGain`nEcho $([char]0xE9)`n`n")))
+    & $add 'list request: -ListParamFile reads UTF-8 names one a line, a BOM and empty lines at the end left out' $false (($fromFile.Params -join '|') -ceq "Band 1 Gain|Gain|Echo $([char]0xE9)")
+    & $add 'list request: -ListParamFile with 33 names, a name twice, an empty line inside, no name or bytes that are not UTF-8 is a usage error' $true (
+        (Test-Usage { & $req (& $nameFile (& $utf8 ((@(1..33 | ForEach-Object { "p$_" }) -join "`n") + "`n"))) } '*1 to 32 parameter names*(found 33)') -and
+        (Test-Usage { & $req (& $nameFile (& $utf8 "a`nb`na`n")) } '*name 3 to sweep is given twice*') -and (Test-Usage { & $req (& $nameFile (& $utf8 "a`n`nb`n")) } '*name 2 to sweep is empty*') -and
+        (Test-Usage { & $req (& $nameFile (& $utf8 "`n")) } '*(found 0)') -and (Test-Usage { & $req (& $nameFile ([byte[]](0x61, 0xFF, 0x0A))) } '*cannot be read as UTF-8*') -and
+        @((& $req (& $nameFile (& $utf8 ((@(1..32 | ForEach-Object { "p$_" }) -join "`n") + "`n")))).Params).Count -eq 32)
+    & $add 'list request: -ListParamFile that is not there is a usage error that does not repeat the path' $true (Test-Usage { & $req @{ List = 'params'; ListPlugin = 'gain'; ListParamFile = (Join-Path $Tmp 'no-such-names.txt') } } 'USAGE: -ListParamFile: no such file')
+
+    # What the driver reports of a listing (Read-HarnessParamListing): three parameters, two of them of the same name
+    $bin = 'P:\plugins\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3'
+    $cid = '5A1B2C3D4E5F60718293A4B5C6D7E8F9'
+    $inst = [pscustomobject]@{ Binary = $bin; Info = [pscustomobject]@{ Name = 'Fixture Gain'; Vendor = 'Fixture Audio'; Cid = $cid } }
+    $same = { param($a, $b) [string]::Equals($a, $b, [StringComparison]::OrdinalIgnoreCase) }
+    $one = { param([int]$p, [string]$ParamName, [string]$Value = '0.500000000', [string]$Display = '0.50', $Ident = "$p")
+        $h = @{ "fx1_l${p}_name" = $ParamName; "fx1_l${p}_exact" = 'true'; "fx1_l${p}_value" = $Value; "fx1_l${p}_display" = $Display; "fx1_l${p}_dexact" = 'true' }
+        if ($null -ne $Ident) { $h["fx1_l${p}_ident"] = $Ident }
+        $h }
+    $base = { param([object[]]$Rows)
+        $h = @{ fx1_name = 'VST3: Fixture Gain (Fixture Audio)'; fx1_nparams = "$($Rows.Count)"; fx1_lcount = "$($Rows.Count)"; fx1_lcount_end = "$($Rows.Count)" }
+        foreach ($r in $Rows) { foreach ($k in @($r.get_Keys())) { $h[$k] = $r[$k] } }
+        $h }
+    $three = { & $base @((& $one 0 'Gain'), (& $one 1 'Gain' '0.250000000' '0.25'), (& $one 2 'Mode' '1.000000000' 'On')) }
+    $read = { param([hashtable]$Reported, [hashtable]$Sweep = $null) Read-HarnessParamListing -Report $Reported -Key 'fx1_' -Sweep $Sweep -Installed $inst -SameFile $same }
+    $ok = & $read (& $three)
+    $p0 = $ok.Params[0]; $p1 = $ok.Params[1]; $p2 = $ok.Params[2]
+    & $add 'listing: every parameter as REAPER read it: index, name, normalized value, display text, ident; the count and nparams kept' $false (
+        -not $ok.Problem -and $ok.Count -eq 3 -and $ok.Nparams -eq 3 -and $ok.Params.Count -eq 3 -and $ok.Unclean -eq 0 -and
+        $p0.index -eq 0 -and $p0.name -ceq 'Gain' -and $p0.normalized -eq 0.5 -and $p0.display -ceq '0.50' -and $p0.ident -ceq '0' -and $p2.normalized -eq 1 -and $p2.display -ceq 'On' -and $p2.index -eq 2)
+    & $add 'listing: a name used before points at the first parameter of that name (the one learn sets) and is not settable; the first one is' $true (
+        $null -eq $p0.sameNameAs -and $p1.sameNameAs -eq 0 -and $p0.settable -and -not $p1.settable -and $p2.settable -and $null -eq $p2.sameNameAs)
+    $mut = { param([scriptblock]$Edit, [hashtable]$Sweep = $null) $rep = & $three; & $Edit $rep; & $read $rep $Sweep }
+    $whole = { param($res, [string]$Like) [bool]($res.Problem -clike $Like -and $res.Params.Count -eq 0 -and $res.Sweeps.Count -eq 0) }
+    & $add 'listing: a parameter without a name is a problem of the whole listing (nothing of it is kept)' $true (& $whole (& $mut { param($r) $r.Remove('fx1_l1_name') }) 'parameter 1 has no name')
+    & $add 'listing: no count, or one that is not a whole number from 0 to 65536, is a problem of the whole listing' $true (
+        (& $whole (& $mut { param($r) $r.Remove('fx1_lcount') }) "the parameter count '' is not*") -and (& $whole (& $mut { param($r) $r.fx1_lcount = '2.5' }) "the parameter count '2.5'*") -and
+        (& $whole (& $mut { param($r) $r.fx1_lcount = '-1' }) '*not a whole number*') -and (& $whole (& $mut { param($r) $r.fx1_lcount = '65537'; $r.fx1_lcount_end = '65537' }) '*from 0 to 65536'))
+    & $add 'listing: a count at the end other than at the start is a problem of the whole listing' $true (& $whole (& $mut { param($r) $r.fx1_lcount_end = '4' }) "the parameter count changed while it was read (3, then '4')")
+    & $add 'listing: the driver stopping with an error is a problem of the whole listing, with its message' $true (& $whole (& $mut { param($r) $r.fx1_lerror = 'driver.lua:9: boom' }) 'the driver stopped listing: driver.lua:9: boom')
+    $bad1 = { param([scriptblock]$Edit) $res = & $mut $Edit; [pscustomobject]@{ Res = $res; P = ($res.Params.Count -eq 3 ? $res.Params[1] : $null) } }
+    $noValue = & $bad1 { param($r) $r.Remove('fx1_l1_value') }
+    $high = & $bad1 { param($r) $r.fx1_l1_value = '1.200000000' }
+    $word = & $bad1 { param($r) $r.fx1_l1_value = 'nan' }
+    $noDisplay = & $bad1 { param($r) $r.Remove('fx1_l1_display') }
+    $inexact = & $bad1 { param($r) $r.fx1_l1_exact = 'false' }
+    $perParam = { param($x, [string]$Like) [bool]($x.P -and -not $x.Res.Problem -and $x.Res.Unclean -eq 1 -and $x.P.problem -clike $Like -and -not $x.P.settable -and $x.Res.Params[0].settable) }
+    & $add 'listing: a value that is missing, above 1 or not a number is a problem of that parameter only: written, not settable, counted as unclean' $true (
+        (& $perParam $noValue 'its value is not a number from 0 to 1') -and (& $perParam $high 'its value*') -and (& $perParam $word 'its value*') -and $null -eq $noValue.P.normalized)
+    & $add 'listing: a display text that is missing is a problem of that parameter only' $true ((& $perParam $noDisplay 'it has no display text') -and $null -eq $noDisplay.P.display -and -not $noDisplay.P.displayUsable)
+    & $add 'listing: a name that is not exact (a control character, or not UTF-8) is a problem of that parameter only' $true ((& $perParam $inexact '*control character or is not UTF-8') -and -not $inexact.P.exact)
+    $long = & $read (& $base @((& $one 0 ('n' * 129)), (& $one 1 ('n' * 128))))
+    & $add 'listing: a name longer than a configuration takes (129 characters) is not settable, and nothing else is said of it' $true (
+        -not $long.Problem -and -not $long.Params[0].settable -and $null -eq $long.Params[0].problem -and -not $long.Params[0].masked -and $long.Params[0].exact -and $long.Params[1].settable)
+    $pathName = & $read (& $base @((& $one 0 'Out D:\mixes\a.wav'), (& $one 1 'Level' '0.5' 'from //server/x'), (& $one 2 'Gain')))
+    & $add 'listing: a name or a display text with a path in it is masked (and so not settable, its display not usable)' $true (
+        $pathName.Params[0].masked -and -not $pathName.Params[0].settable -and $pathName.Params[1].masked -and -not $pathName.Params[1].settable -and -not $pathName.Params[1].displayUsable -and
+        -not $pathName.Params[2].masked -and $pathName.Params[2].settable)
+    $hostIdent = & $read (& $base @((& $one 0 'Gain'), (& $one 1 'Wet' '1.000000000' '100.0' ':wet')))
+    & $add "listing: a parameter whose ident starts with ':' is REAPER's own, not settable ($($hostIdent.HostBy -join ','))" $true (
+        $hostIdent.Params[1].host -and -not $hostIdent.Params[1].settable -and -not $hostIdent.Params[0].host -and ($hostIdent.HostBy -join ',') -ceq 'ident')
+    $noIdent = & $read (& $base @((& $one 0 'Gain' -Ident $null), (& $one 1 'Bypass' -Ident $null), (& $one 2 'Wet' -Ident $null), (& $one 3 'Delta' -Ident $null)))
+    $notLast = & $read (& $base @((& $one 0 'Bypass' -Ident $null), (& $one 1 'Wet' -Ident $null), (& $one 2 'Delta' -Ident $null), (& $one 3 'Gain' -Ident $null)))
+    & $add "listing: without idents the last three named Bypass, Wet and Delta are REAPER's own; the same names elsewhere are not ($($noIdent.HostBy -join ','))" $true (
+        @($noIdent.Params | Where-Object { $_.host }).Count -eq 3 -and -not $noIdent.Params[0].host -and $noIdent.Params[0].settable -and ($noIdent.HostBy -join ',') -ceq 'names' -and
+        @($notLast.Params | Where-Object { $_.host }).Count -eq 0 -and $null -eq $noIdent.Params[0].ident)
+    $dispLong = & $read (& $base @((& $one 0 'Gain' '0.5' ('d' * 129)), (& $one 1 'Mode' '0.5' ('d' * 128))))
+    $dispInexact = & $mut { param($r) $r.fx1_l2_dexact = 'false' }
+    & $add 'listing: a display text is usable when it is exact and at most 128 characters long' $true (
+        -not $dispLong.Params[0].displayUsable -and $dispLong.Params[1].displayUsable -and -not $dispInexact.Params[2].displayUsable -and $dispInexact.Params[2].settable -and $ok.Params[2].displayUsable)
+    # Sweeps: a fresh instance per name, proven to be the plugin that was learned
+    $sw = @{ Names = @('Gain', 'Volume'); Values = @(0.0, 1.0) }
+    $sweepRep = {
+        $r = & $three
+        foreach ($kv in @{ fx1_s1_idx = '0'; fx1_s1_name = 'VST3: Fixture Gain (Fixture Audio)'; fx1_s1_ident = "$bin<1234567890{$cid"; fx1_s1_index = '0'
+                fx1_s1_v1 = '0.000000000'; fx1_s1_v1_display = '0.00'; fx1_s1_v1_dexact = 'true'; fx1_s1_v2 = '1.000000000'; fx1_s1_v2_display = '1.00'; fx1_s1_v2_dexact = 'true'
+                fx1_s2_idx = '0'; fx1_s2_name = 'VST3: Fixture Gain (Fixture Audio)'; fx1_s2_ident = "$bin<1234567890{$cid"; fx1_s2_index = 'missing' }.GetEnumerator()) { $r[$kv.Key] = $kv.Value }
+        $r
+    }
+    $swOk = & $read (& $sweepRep) $sw
+    & $add "listing: a sweep gives every value asked, read back and shown; a name the plugin does not have is not found ($($swOk.NotFound -join ','))" $false (
+        -not $swOk.Problem -and $swOk.Sweeps.Count -eq 1 -and $swOk.Sweeps[0].name -ceq 'Gain' -and $swOk.Sweeps[0].index -eq 0 -and $swOk.Sweeps[0]['values'].Count -eq 2 -and
+        $swOk.Sweeps[0]['values'][1].normalized -eq 1 -and $swOk.Sweeps[0]['values'][1].readNormalized -eq 1 -and $swOk.Sweeps[0]['values'][1].display -ceq '1.00' -and $swOk.Sweeps[0]['values'][0].displayUsable -and
+        ($swOk.NotFound -join ',') -ceq 'Volume')
+    $swMut = { param([scriptblock]$Edit) $r = & $sweepRep; & $Edit $r; & $read $r $sw }
+    & $add 'listing: an instance to sweep that was not added is a problem of the whole listing' $true (& $whole (& $swMut { param($r) $r.fx1_s1_idx = '-1' }) "the instance to sweep 'Gain' could not be added (index '-1')")
+    & $add 'listing: a swept value that was not read back is a problem of the whole listing' $true (
+        (& $whole (& $swMut { param($r) $r.Remove('fx1_s1_v2') }) "*'Gain': value 2 was not read back") -and (& $whole (& $swMut { param($r) $r.Remove('fx1_s1_v1_display') }) '*value 1 was not read back'))
+    & $add 'listing: an instance to sweep with another name is not the plugin that was learned: a problem of the whole listing' $true (& $whole (& $swMut { param($r) $r.fx1_s1_name = 'VST3: Fixture Gain Pro (Fixture Audio)' }) "*'Gain' was added as 'VST3: Fixture Gain Pro*")
+    & $add 'listing: an instance to sweep loaded from another binary, or of another class, is not the plugin that was learned' $true (
+        (& $whole (& $swMut { param($r) $r.fx1_s1_ident = "S:\VST3\Fixture Gain.vst3\Contents\x86_64-win\Fixture Gain.vst3<1234567890{$cid" }) '*is not the plugin that was learned*') -and
+        (& $whole (& $swMut { param($r) $r.fx1_s1_ident = "$bin<1234567890{FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" }) '*is not the plugin that was learned*') -and
+        (& $whole (& $swMut { param($r) $r.fx1_s2_ident = 'x.dll' }) "the instance to sweep 'Volume' is not the plugin*"))
+    $jsRow = [pscustomobject]@{ Ident = 'reaper-harness/harness-pdc-delay.jsfx' }
+    $jsRep = { param([string]$Ident) $r = & $three; foreach ($kv in @{ fx1_s1_idx = '0'; fx1_s1_name = 'VST3: Fixture Gain (Fixture Audio)'; fx1_s1_ident = $Ident; fx1_s1_index = 'missing' }.GetEnumerator()) { $r[$kv.Key] = $kv.Value }; $r }
+    & $add 'listing: a JSFX instance to sweep is proven by its path under Effects' $true (
+        -not (Read-HarnessParamListing -Report (& $jsRep $jsRow.Ident) -Key 'fx1_' -Sweep @{ Names = @('x'); Values = @(0.5) } -Jsfx $jsRow).Problem -and
+        (Read-HarnessParamListing -Report (& $jsRep 'other/harness-pdc-delay.jsfx') -Key 'fx1_' -Sweep @{ Names = @('x'); Values = @(0.5) } -Jsfx $jsRow).Problem -clike '*not the plugin that was learned*')
+
+    # The row and the listing of the result (Get-HarnessParamListing), from a context as a learn launch leaves it
+    $vstRow = [pscustomobject]@{ Id = 'gain'; Bundle = 'Fixture Gain.vst3'; Binary = $bin; Sha256 = ('ab' * 32); Info = [pscustomobject]@{ Name = 'Fixture Gain'; Vendor = 'Fixture Audio'; Cid = $cid; Version = '1.0.0' } }
+    $jsfxRow = [pscustomobject]@{ Id = 'delay'; Jsfx = 'harness-pdc-delay'; Name = 'JS: reaper-harness PDC delay'; Ident = $jsRow.Ident; Sha256 = ('cd' * 32) }
+    $block = @('<VST "VST3: Fixture Gain (Fixture Audio)" "Fixture Gain.vst3" 0 "" 1234567890{5A1B2C3D4E5F60718293A4B5C6D7E8F9} ""', 'FAKESTATE QUlFRA==', '>')
+    $ctxOf = {
+        param([hashtable]$ListingTable, [hashtable]$BlockTable = @{ 'gain|' = $block })
+        @{ Config = [pscustomobject]@{ Plugins = [ordered]@{ gain = $null; bus = $null; delay = $null } }; Installed = @{ gain = $vstRow }; Jsfx = @{ delay = $jsfxRow }
+            Listing = $ListingTable; Blocks = $BlockTable; LearnReads = @{ 'gain|' = [pscustomobject]@{ Pdc = '32' } } }
+    }
+    $request = @{ Kind = 'params'; Plugins = $null; Params = $null; Values = $null }
+    $jsOk = Read-HarnessParamListing -Report (& $base @((& $one 0 'Delay (samples)'))) -Key 'fx1_' -Jsfx $jsRow
+    $both = Get-HarnessParamListing -Ctx (& $ctxOf @{ 'gain|' = $ok; 'delay|' = $jsOk }) -Request $request
+    $g = $both.Listing['plugins'][0]; $d = $both.Listing['plugins'][1]
+    & $add "listing row: every plugin of the round listed cleanly is PASS; plugins that were not installed are not in it ($($both.Detail))" $false (
+        $both.Status -ceq 'PASS' -and $both.Listing['plugins'].Count -eq 2 -and $g['id'] -ceq 'gain' -and $d['id'] -ceq 'delay' -and $both.Facts.listed -eq 2 -and $both.Facts.params -eq 4 -and
+        $both.Detail -ceq '2 plugins listed, 4 parameters' -and $both.Lines[0] -ceq 'gain: 3 parameters (0 of them REAPER''s own, 2 settable), 1 name used more than once')
+    & $add 'listing row: a plugin is named by its bundle and hash, its class from moduleinfo.json, its learned block by the hash a kept render records, its latency as learn read it' $false (
+        $g['bundle'] -ceq 'Fixture Gain.vst3' -and $g['sha256'] -ceq 'abababababab' -and $g['class']['cid'] -ceq $cid -and $g['classFrom'] -ceq 'moduleinfo' -and $g['version'] -ceq '1.0.0' -and
+        $g['blockSha256'] -ceq (Get-HarnessBlockTextSha $block) -and $g['blockSha256'] -cmatch '^[0-9a-f]{64}$' -and $g['pdc'] -eq 32 -and $g['paramCount'] -eq 3 -and $g['listed'] -and $null -eq $g['why'] -and
+        $null -eq $d['bundle'] -and $d['jsfx'] -ceq 'harness-pdc-delay' -and $null -eq $d['class'] -and $null -eq $d['classFrom'] -and $null -eq $d['blockSha256'])
+    & $add 'listing row: the block hash is the SHA-256 of the block as a project holds it (indented, line feeds), the one a kept render manifest has' $false (
+        (Get-HarnessBlockTextSha $block) -ceq [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.UTF8Encoding]::new($false).GetBytes(-join @($block | ForEach-Object { "      $_`n" })))).ToLowerInvariant())
+    $missingOne = Get-HarnessParamListing -Ctx (& $ctxOf @{ 'gain|' = $ok }) -Request $request
+    & $add 'listing row: a plugin its learn entry did not pass for is INCOMPLETE, not listed, pointing at the learn row' $true (
+        $missingOne.Status -ceq 'INCOMPLETE' -and -not $missingOne.Listing['plugins'][1]['listed'] -and $missingOne.Listing['plugins'][1]['why'] -ceq 'not listed: its learn entry did not pass (see the learn row)' -and
+        $missingOne.Listing['plugins'][1]['params'].Count -eq 0 -and $missingOne.Listing['plugins'][0]['listed'])
+    $probRow = Get-HarnessParamListing -Ctx (& $ctxOf @{ 'gain|' = (& $mut { param($r) $r.fx1_lcount_end = '9' }); 'delay|' = $jsOk }) -Request $request
+    & $add 'listing row: a listing with a problem is INCOMPLETE, not listed, its why says the problem; no block hash or latency for it' $true (
+        $probRow.Status -ceq 'INCOMPLETE' -and -not $probRow.Listing['plugins'][0]['listed'] -and $probRow.Listing['plugins'][0]['why'] -clike 'not listed: the parameter count changed*' -and
+        $null -eq $probRow.Listing['plugins'][0]['blockSha256'] -and $null -eq $probRow.Listing['plugins'][0]['pdc'] -and $probRow.Detail -clike 'gain: not listed: *')
+    $uncleanRow = Get-HarnessParamListing -Ctx (& $ctxOf @{ 'gain|' = $noDisplay.Res; 'delay|' = $jsOk }) -Request $request
+    & $add 'listing row: parameters not read cleanly make it INCOMPLETE; every parameter that was read is written all the same' $true (
+        $uncleanRow.Status -ceq 'INCOMPLETE' -and $uncleanRow.Listing['plugins'][0]['listed'] -and $uncleanRow.Listing['plugins'][0]['params'].Count -eq 3 -and
+        $uncleanRow.Listing['plugins'][0]['why'] -ceq '1 parameter could not be read cleanly')
+    $swRequest = @{ Kind = 'params'; Plugins = @('gain'); Params = $sw.Names; Values = $sw['Values'] }
+    $notFoundRow = Get-HarnessParamListing -Ctx (& $ctxOf @{ 'gain|' = $swOk; 'delay|' = $jsOk }) -Request $swRequest
+    & $add "listing row: a swept name the plugin does not have is a FAIL naming it ($($notFoundRow.Detail))" $true (
+        $notFoundRow.Status -ceq 'FAIL' -and $notFoundRow.Detail -ceq "gain: no parameter named 'Volume' in gain" -and ($notFoundRow.Facts.notFound -join ',') -ceq 'Volume' -and
+        ($notFoundRow.Listing['values'] -join ',') -ceq '0,1' -and $notFoundRow.Listing['plugins'][0]['status'] -ceq 'FAIL' -and $notFoundRow.Listing['plugins'][0]['sweeps'].Count -eq 1)
+    $notRead = Get-HarnessParamListing -Ctx (& $ctxOf @{ 'gain|' = $ok; 'delay|' = $jsOk }) -Request $request -NotRead 'not listed: the round stopped'
+    & $add 'listing row: before anything is read every plugin is not listed, for that reason' $true (
+        $notRead.Status -ceq 'INCOMPLETE' -and @($notRead.Listing['plugins'] | Where-Object { $_['listed'] -or $_['why'] -cne 'not listed: the round stopped' }).Count -eq 0 -and $null -eq $notRead.Listing['values'])
+    $maskedRow = Get-HarnessParamListing -Ctx (& $ctxOf @{ 'gain|' = $pathName; 'delay|' = $jsOk }) -Request $request
+    & $add 'listing row: the listing of the result is masked: no path of a parameter name or display reaches it' $true (
+        $maskedRow.Listing['plugins'][0]['params'][0]['name'] -ceq 'Out <path>' -and (ConvertTo-HarnessJsonText -Value $maskedRow.Listing) -cnotmatch 'mixes|//server')
+    $nothing = Get-HarnessParamListing -Ctx @{ Config = [pscustomobject]@{ Plugins = [ordered]@{ x = $null } }; Installed = @{}; Jsfx = @{}; Listing = @{}; Blocks = @{}; LearnReads = @{} } -Request $request
+    & $add 'listing row: nothing to list is INCOMPLETE, never PASS' $true ($nothing.Status -ceq 'INCOMPLETE' -and $nothing.Detail -ceq 'no plugin to list' -and $nothing.Listing['plugins'].Count -eq 0)
     $cases
 }
 
@@ -3041,6 +3247,26 @@ function Get-WiringCases([string]$RepoRoot) {
         (& $at $suite 'Read-HarnessStates')[0] -lt (& $at $suite 'Get-HarnessPreflight')[0] -and (& $at $suite 'Get-HarnessPreflight')[0] -lt (& $at $suite 'Assert-HarnessStateIdentity')[0] -and
         (& $at $suite 'Assert-HarnessStateIdentity')[0] -lt (& $at $suite 'Install-HarnessPlugins')[0] -and (& $at $suite 'Assert-HarnessStateIdentity')[0] -lt (& $at $suite 'Install-HarnessJsfx')[0])
     & $add 'wiring: Invoke-HarnessSuite lists the default resource directory before and after every round' $false (@(& $at $suite 'Get-HarnessDefaultCfgSnapshot').Count -eq 2 -and 'Compare-HarnessDefaultCfgSnapshot' -in $suite.Name)
+    # A parameter listing is read in the one learn launch of a guarded round, and nowhere else: the listing and the
+    # learn launch are called only by Invoke-HarnessSuite, between its two listings of the default resource directory;
+    # run.ps1 and doctor.ps1 start nothing themselves
+    $callers = { param([string[]]$Names) @(foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1') + @(Get-Item (Join-Path $RepoRoot 'run.ps1'), (Join-Path $RepoRoot 'doctor.ps1'))) {
+                $tree = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
+                foreach ($c in $tree.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -in $Names }, $true)) {
+                    $fn = $c.Parent
+                    while ($fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
+                    "$($c.GetCommandName())<-$($f.Name):$($fn ? $fn.Name : 'top')"
+                }
+            }) }
+    $listCallers = & $callers @('Get-HarnessParamListing', 'Invoke-HarnessLearn')
+    $snaps = & $at $suite 'Get-HarnessDefaultCfgSnapshot'
+    $inRound = @(foreach ($n in 'Get-HarnessParamListing', 'Invoke-HarnessLearn') { foreach ($pos in (& $at $suite $n)) { $pos -gt $snaps[0] -and $pos -lt $snaps[1] } })
+    & $add "wiring: the listing and the learn launch are called only by Invoke-HarnessSuite, inside the round ($(@($listCallers | Sort-Object -Unique) -join ', '))" $false (
+        (@($listCallers | Sort-Object -Unique) -join ',') -ceq 'Get-HarnessParamListing<-Suite.psm1:Invoke-HarnessSuite,Invoke-HarnessLearn<-Suite.psm1:Invoke-HarnessSuite' -and
+        $snaps.Count -eq 2 -and $inRound.Count -eq 3 -and $inRound -notcontains $false)
+    $scriptStarts = & $callers @('Invoke-HarnessLuaStep', 'Invoke-HarnessLaunch', 'Invoke-HarnessLaunchOnce', 'Invoke-HarnessHost', 'Invoke-HarnessLearn')
+    & $add "wiring: run.ps1 and doctor.ps1 start no REAPER and no step themselves ($(@($scriptStarts | Where-Object { $_ -cmatch '<-(run|doctor)\.ps1:' }) -join ', '))" $false (
+        @($scriptStarts | Where-Object { $_ -cmatch '<-(run|doctor)\.ps1:' }).Count -eq 0)
     $launch = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessLaunchOnce'
     & $add 'wiring: every launch takes the GUI locks before starting REAPER and checks the skip marker again while holding them' $false (
         (& $at $launch 'Enter-HarnessLocks')[0] -lt (& $at $launch 'Invoke-HarnessHost')[0] -and @(& $at $launch 'Get-HarnessSkipMarkerHit').Count -eq 2 -and (& $at $launch 'Get-HarnessSkipMarkerHit')[1] -lt (& $at $launch 'Invoke-HarnessHost')[0])
@@ -3286,7 +3512,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot }, { Get-SourceCases $scratch }, { Get-RenderCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-VariantCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-VariantCases $scratch $RepoRoot }, { Get-ListingCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {
