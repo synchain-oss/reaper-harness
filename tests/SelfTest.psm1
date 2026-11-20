@@ -1864,11 +1864,12 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     $facts = { param([string]$DelayPdc, [string]$NumPdc = '64', [string]$ZeroPdc = '0') @{ tracks = '1'; t0_fx_count = '3'; t0_fx0_pdc = $DelayPdc; t0_fx1_pdc = $NumPdc; t0_fx2_pdc = $ZeroPdc; t0_fx0_bypassed = 'false'; t0_fx1_bypassed = 'false'; t0_fx2_bypassed = 'false'; t0_fx0_offline = 'false'; t0_fx1_offline = 'false'; t0_fx2_offline = 'false' } }
     $fr = { param($FactSet) $g = [Collections.Generic.List[string]]::new(); $fxBad = Test-HarnessFxReport -Facts $FactSet -Layout $pl -Plugins $plugins -Gaps $g; [pscustomobject]@{ Bad = @($fxBad); Gaps = @($g) } }
     $read = & $fr (& $facts '512')
-    $withoutGaps = Test-HarnessFxReport -Facts (& $facts '') -Layout $pl -Plugins $plugins
+    $withoutGaps = try { $null = Test-HarnessFxReport -Facts (& $facts '') -Layout $pl -Plugins $plugins; 'no throw' } catch { $_.Exception.Message }
+    $readWithoutGaps = Test-HarnessFxReport -Facts (& $facts '512') -Layout $pl -Plugins $plugins
     $unreadPdc = & $fr (& $facts '')
-    & $add 'latency: a plugin with expectPdc "report" is not compared, whatever it reports; a reading that is not there is a gap' $true (
+    & $add "latency: a plugin with expectPdc `"report`" is not compared, whatever it reports; a reading that is not there is a gap, and throws without -Gaps ($withoutGaps)" $true (
         $read.Bad.Count -eq 0 -and $read.Gaps.Count -eq 0 -and $unreadPdc.Bad.Count -eq 0 -and ($unreadPdc.Gaps -join ';') -ceq 't0_fx0_pdc was not read (the latency of d is only reported)' -and
-        (& $fr (& $facts '-1')).Gaps.Count -eq 1 -and $withoutGaps.Count -eq 0)
+        (& $fr (& $facts '-1')).Gaps.Count -eq 1 -and $withoutGaps -ceq 't0_fx0_pdc was not read (the latency of d is only reported), and the caller took no -Gaps' -and $readWithoutGaps.Count -eq 0)
     $numeric = try { (& $fr (& $facts '7' '32')).Bad -join ';' } catch { "threw: $($_.Exception.Message)" }
     & $add "latency: a numeric expectPdc is still compared, 0 included ($numeric)" $true ($numeric -ceq 't0_fx1_pdc=32, expected 64' -and (& $fr (& $facts '7' '64' '0')).Bad.Count -eq 0 -and (& $fr (& $facts '7' '64' '3')).Bad.Count -eq 1)
     $pf = Get-HarnessPdcFacts (& $facts '512') '' $pl $plugins

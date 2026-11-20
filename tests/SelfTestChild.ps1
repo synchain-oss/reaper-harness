@@ -837,18 +837,27 @@ Write-Case "end to end: latency: the same device scenario with expectPdc 0 compa
     $r.verdict -ceq 'FAIL' -and (& $rowOf $r 'p-device').status -ceq 'FAIL' -and (& $rowOf $r 'p-device').detail -clike '*t0_fx0_pdc=64, expected 0*')
 $varyCfg = & $writeVariant $varyChange # the file is shared: written again as it was
 $varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
-# The latency of a JSFX only reported, and not read: no evidence, in every kind that reads it
+# The latency of a JSFX only reported, and not read: no evidence, in every kind that reads it; a transport state that
+# fails stays FAIL all the same
+$varyCfg = & $writeVariant { param($c) & $varyChange $c; $c.scenarios = @($c.scenarios) + @([ordered]@{ id = 'p-transport-bad'; kind = 'transport'; layout = 'p'; states = @([ordered]@{ name = 'on'; transport = 'stop'; arm = $true; monitor = 'on'; samples = 4800; expect = @{ called = $false } }) }) }
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
 Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; PdcUnread = $true }
 try { $r = Invoke-HarnessSuite @varyCfg -Only '^p-' -NoNegative -SelfTestHooks $hooks } finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
 $unreadStatus = @($r.runs[0].scenarios | ForEach-Object { "$($_.id)=$($_.status)" }) -join ','
 $unreadKept = @(Get-ChildItem -LiteralPath (Join-Path $varyCfg.ResultDir 'renders') -Directory | Sort-Object Name)[-1].FullName
+$transportBad = & $rowOf $r 'p-transport-bad'
+Write-Case "end to end: latency only reported but not read: a transport state that fails is still FAIL, with the reading that is missing in its detail and facts ($($transportBad.status): $($transportBad.detail))" $true (
+    $transportBad.status -ceq 'FAIL' -and $transportBad.detail -clike '*called in*; no evidence: t0_fx0_pdc was not read (the latency of delay is only reported)' -and
+    @(& $factOf $transportBad 'pdc')[0] -is [System.Collections.IDictionary] -and $null -eq @(& $factOf $transportBad 'pdc')[0]['pdc'] -and @(& $factOf $transportBad 'states').Count -eq 1)
 Write-Case "end to end: latency only reported but not read: device, savereopen, transport and a kept render are INCOMPLETE, saying so; the render is kept all the same ($unreadStatus)" $true (
-    $r.verdict -ceq 'INCOMPLETE' -and $unreadStatus -ceq 'learn.1=PASS,learn.2=PASS,p-device=INCOMPLETE,p-reopen=INCOMPLETE,p-transport=INCOMPLETE,p-kept=INCOMPLETE' -and
+    $r.verdict -ceq 'FAIL' -and $unreadStatus -ceq 'learn.1=PASS,learn.2=PASS,p-device=INCOMPLETE,p-reopen=INCOMPLETE,p-transport=INCOMPLETE,p-kept=INCOMPLETE,p-transport-bad=FAIL' -and
     (& $rowOf $r 'p-device').detail -clike '*; no evidence: t0_fx0_pdc was not read (the latency of delay is only reported)' -and (& $rowOf $r 'p-reopen').detail -clike '*no evidence: before_t0_fx0_pdc was not read*' -and
     (& $rowOf $r 'p-transport').detail -clike '*t0_fx0_pdc was not read (the latency of delay is only reported)*' -and (& $rowOf $r 'p-device').facts.pdc[0].Contains('pdc') -and $null -eq (& $rowOf $r 'p-device').facts.pdc[0].pdc -and
     @(& $factOf (& $rowOf $r 'p-transport') 'pdc')[0] -is [System.Collections.IDictionary] -and @(& $factOf (& $rowOf $r 'p-transport') 'pdc')[0].Contains('pdc') -and
     $null -eq @(& $factOf (& $rowOf $r 'p-transport') 'pdc')[0]['pdc'] -and @(& $factOf (& $rowOf $r 'p-transport') 'pdc')[0]['plugin'] -ceq 'delay' -and
     (& $rowOf $r 'p-kept').detail -clike '*; kept, but the latency of delay on Voice was not read' -and (Test-Path -LiteralPath (Join-Path $unreadKept 'run1/p-kept.wav')))
+$varyCfg = & $writeVariant $varyChange # the file is shared: written again as it was
+$varyCfg.ReaperExe = $pwshExe; $varyCfg.ResultDir = Join-Path $Work 'e2e-vary'
 # A configuration problem of a variant is a usage error before anything starts
 $launchesBefore = $seenArgs.Count
 $varyClash = & $writeVariant { param($c) & $varyChange $c; $c.layouts.vary.tracks[0].fx[0].params.Gain = @{ normalized = 0.5; display = '0.50' }; $c.scenarios[0].variants[2].fx.gain.params.Gain = @{ normalized = 0.5; display = 'other' } }

@@ -389,7 +389,8 @@ function Test-HarnessParamValue([string]$Read, [string]$Display, $Want) {
 # Pure function: the driver's report of one project (prefix '' / before_ / after_) against the layout. Checks the
 # track and FX counts, the learned names, the bypass states, the latency (pdc == expectPdc), that no FX is
 # offline, and the configured parameters. Bypass: plugin ids bypassed on top of the layout ('*' = all). The latency of a
-# plugin with expectPdc "report" is not compared: given Gaps, a reading that is not there goes into it (no evidence).
+# plugin with expectPdc "report" is not compared: a reading that is not there goes into Gaps (no evidence); without
+# Gaps it throws.
 function Test-HarnessFxReport {
     param([Parameter(Mandatory)][hashtable]$Facts, [string]$Prefix = '', [Parameter(Mandatory)]$Layout, [hashtable]$Names = @{}, $Plugins, [string[]]$Bypass = @(), [object[]]$Reads = @(),
           [Collections.Generic.List[string]]$Gaps = $null)
@@ -407,7 +408,14 @@ function Test-HarnessFxReport {
             if ($Want -and $Facts["${q}name"] -cne $Want) { $bad.Add("${q}name='$($Facts["${q}name"])', expected '$Want'") }
             $pdc = $Plugins[$fx.Plugin].ExpectPdc
             # An integer or the word "report": the type says which (an integer -eq the word is merely false)
-            if ($pdc -is [string]) { if ($null -ne $Gaps -and [string]$Facts["${q}pdc"] -cnotmatch '\A[0-9]{1,9}\z') { $Gaps.Add("${q}pdc was not read (the latency of $($fx.Plugin) is only reported)") } }
+            if ($pdc -is [string]) {
+                if ([string]$Facts["${q}pdc"] -cnotmatch '\A[0-9]{1,9}\z') {
+                    $unread = "${q}pdc was not read (the latency of $($fx.Plugin) is only reported)"
+                    # A caller without Gaps could not tell: no evidence never passes, so it throws (that scenario is INCOMPLETE)
+                    if ($null -eq $Gaps) { throw "$unread, and the caller took no -Gaps" }
+                    $Gaps.Add($unread)
+                }
+            }
             elseif ($Facts["${q}pdc"] -ne "$pdc") { $bad.Add("${q}pdc=$($Facts["${q}pdc"]), expected $pdc") }
             $off = ($fx.Bypass -or ('*' -cin $Bypass) -or ($fx.Plugin -cin $Bypass)) ? 'true' : 'false'
             if ($Facts["${q}bypassed"] -ne $off) { $bad.Add("${q}bypassed=$($Facts["${q}bypassed"]), expected $off") }
@@ -708,7 +716,8 @@ function Invoke-HarnessInstancesScenario($Ctx, $s) {
 
 # The transport kind (Transport.psm1 builds the job and judges). A readback that differs from what was asked for (the
 # device, anticipative FX, Run FX when stopped, the FX of the layout) or a file in the record directory is FAIL; a
-# setup that leaves no evidence is INCOMPLETE; otherwise the worst of the states. The project has no items: what the
+# setup that leaves no evidence is INCOMPLETE; otherwise the worst of the states, raised to INCOMPLETE (a FAIL stays
+# FAIL) when the latency of a plugin that only reports it was not read. The project has no items: what the
 # tested track gets comes through its input. The Lua step gets the time its windows need on top of luaTimeoutSec
 # (Get-HarnessTransportTimeout).
 function Invoke-HarnessTransportScenario($Ctx, $s) {
@@ -744,9 +753,10 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
     if ($bad.Count) { return New-HarnessOutcome FAIL ($bad -join '; ') }
     $idents = @{ 'harness-block-probe' = $Ctx.ToolJsfx['harness-block-probe'].Ident; 'harness-feed' = $Ctx.ToolJsfx['harness-feed'].Ident }
     $gap = Test-HarnessTransportSetup -Facts $f -Scenario $s -Idents $idents -FxCount @($Layout.Tracks[$Job.track].Fx).Count
-    $gap = @($gap) + @($noEvidence)
     $reportOnly = Get-HarnessPdcFacts $f '' $Layout $Ctx.Config.Plugins
-    if ($gap.Count) { return New-HarnessOutcome INCOMPLETE ($gap -join '; ') ($reportOnly.Count ? [ordered]@{ pdc = $reportOnly } : $null) }
+    # A setup that leaves no evidence makes the readings of the states worthless; a latency only reported and not read
+    # does not, so the states are still judged and it is added at the end (a FAIL stays FAIL)
+    if ($gap.Count) { return New-HarnessOutcome INCOMPLETE ((@($gap) + @($noEvidence)) -join '; ') ($reportOnly.Count ? [ordered]@{ pdc = $reportOnly } : $null) }
     $perState = [Collections.Generic.List[object]]::new()
     $judged = for ($i = 0; $i -lt $s.states.Count; $i++) {
         $st = $s.states[$i]
@@ -761,8 +771,7 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
         $j
     }
     $seen = [ordered]@{ track = $s.track; runFxWhenStopped = $rfs; runFxAfterStopMs = $f['cfg_runafterstop']; settleSamples = $f['settle']; feed = $feed; states = $perState.ToArray() }
-    if ($reportOnly.Count) { $seen.pdc = $reportOnly }
-    New-HarnessOutcome (Get-HarnessOutcomeStatus @($judged | ForEach-Object { $_.Status })) (@($judged | ForEach-Object { $_.Line }) -join ' | ') $seen
+    Get-HarnessGapOutcome (Get-HarnessOutcomeStatus @($judged | ForEach-Object { $_.Status })) (@($judged | ForEach-Object { $_.Line }) -join ' | ') $noEvidence $reportOnly $seen
 }
 
 # A driver step that never finishes: timeout and kill must both end as INCOMPLETE, with the process gone and every
