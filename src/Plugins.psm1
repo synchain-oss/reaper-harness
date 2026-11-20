@@ -25,7 +25,7 @@
 # many plugins that means third-party code runs inside the test process: a newly installed plugin can show an
 # activation dialog or hang the scan for minutes, and a release build of the plugin under test in a system directory
 # shares the file name (and the class ID) with the private copy. The cache (reaper-vstplugins64.ini, keyed by file
-# name; the value starts with the binary's last write time) is what REAPER trusts, so before every round each file
+# name; the value starts with the binary's last write time) is what REAPER trusts, so before the first round each file
 # REAPER would scan outside the private plugins directory gets an entry that says "scanned, nothing here" when it
 # has no current one. REAPER then never loads them. The entries of the configured bundles are removed instead, so
 # REAPER scans the private copies afresh. Only the private configuration directory is written; the plugins

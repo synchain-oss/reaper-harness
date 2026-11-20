@@ -1684,12 +1684,12 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     $fb = & $with {
         param($c)
         $c['layouts']['chain']['tracks'][0]['file'] = 'sources/voice.wav'; $c['layouts']['chain']['tracks'][0]['fx'][1]['bypass'] = $true
-        $s = & $scenario $c 'chain-repeat'; $s['compare'] = 'none'; $s['bypass'] = @('gain'); $s['variants'] = @((& $v 'b' ([ordered]@{ bus = [ordered]@{ params = [ordered]@{ Trim = 0.5 } } }) @('bus')), (& $v 'all' $null $true))
+        $s = & $scenario $c 'chain-repeat'; $s['compare'] = 'none'; $s['bypass'] = @('gain'); $s['variants'] = @((& $v 'b' ([ordered]@{ bus = [ordered]@{ params = [ordered]@{ Trim = 0.5 } } }) @('bus', 'gain')), (& $v 'all' $null $true))
     }
     $fbV = (& $byId $fb 'chain-repeat-b')
     & $add 'variants: a file source keeps its file and an FX bypassed in the layout stays bypassed when a variant sets it' $false (
         @($fb.Problems).Count -eq 0 -and $fbV.variantLayout.Tracks[0].File -ceq 'sources/voice.wav' -and $fbV.variantLayout.Tracks[0].Fx[1].Bypass -eq $true -and $fbV.variantLayout.Tracks[0].Fx[1].Variant -ceq 'bus|Trim=0.5')
-    & $add 'variants: the bypass of a variant adds to the scenario''s, each plugin once; true (every FX) wins' $false (
+    & $add "variants: the bypass of a variant adds to the scenario's, each plugin once (also one in both lists); true (every FX) wins ($($fbV.bypass -join ','))" $false (
         ($fbV.bypass -join ',') -ceq 'gain,bus' -and ((& $byId $fb 'chain-repeat-all').bypass -join ',') -ceq '*')
     $blocks = @{ 'gain|Gain=0.5' = @('<VST "g"', 'G', '>'); 'bus|Trim=0.5' = @('<VST "b"', 'B', '>'); 'bus|' = @('<VST "b0"', 'B0', '>') }
     $rppB = New-HarnessProjectText -Layout $fbV.variantLayout -Blocks $blocks -SourceWav 'S.wav' -Sources @{ Voice = 'V.wav' } -RenderDir 'D' -RenderName 'N' -Bypass @()
@@ -1702,7 +1702,7 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
         param($c)
         $s = & $scenario $c 'chain-block'; $s['variants'] = @((& $v 'dry' $null $true), (& $v 't' (& $gainP ([ordered]@{ Trim = 0.25 }))))
         $c['scenarios'] += [ordered]@{ id = 'cmp-own'; kind = 'render'; layout = 'chain'; compare = [ordered]@{ block = 256; bypass = @('bus') }; variants = @((& $v 'dry' $null $true)) }
-        $c['scenarios'] += [ordered]@{ id = 'cmp-other'; kind = 'render'; layout = 'chain'; compare = [ordered]@{ layout = 'bus' }; variants = @((& $v 't' (& $gainP ([ordered]@{ Trim = 0.25 })))) }
+        $c['scenarios'] += [ordered]@{ id = 'cmp-other'; kind = 'render'; layout = 'chain'; compare = [ordered]@{ layout = 'bus' }; variants = @((& $v 't' (& $gainP ([ordered]@{ Trim = 0.25 }))), (& $v 'dry' $null $true)) }
     }
     $cDry = & $byId $cv 'chain-block-dry'; $cT = & $byId $cv 'chain-block-t'
     & $add 'variants: a compare variant without layout and bypass of its own compares the variant layout with the bypass of the variant' $false (
@@ -1711,9 +1711,13 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'variants: a compare variant with a bypass or a layout of its own keeps it, and its layout is learned as written' $false (
         ((& $byId $cv 'cmp-own-dry').compare.Bypass -join ',') -ceq 'bus' -and (& $byId $cv 'cmp-own-dry').compare.OwnBypass -and -not (& $byId $cv 'cmp-other-t').compare.SameLayout -and
         (& $needs $cv.Config (& $byId $cv 'cmp-other-t')) -ceq 'gain|Gain=0.5;Trim=0.25,bus|,gain|,gain|Gain=0.25')
+    $otherDry = & $byId $cv 'cmp-other-dry'
+    & $add "variants: a compare variant with a layout of its own keeps the scenario's bypass as written, also under a variant that bypasses every FX ($($otherDry ? ($otherDry.compare.Bypass -join ',') : 'none'))" $true (
+        $null -ne $otherDry -and ($otherDry.bypass -join ',') -ceq '*' -and ($otherDry.compare.Bypass -join ',') -ceq '' -and -not $otherDry.compare.SameLayout)
     # Checked once per item, before the matrix: one problem, not one per leg; a layout that is not there is its own problem only
     $twice = & $with { param($c) $s = & $scenario $c 'chain'; $s['compare'] = 'none'; $s['variants'] = @((& $v 'a'), (& $v 'a')) }
-    & $add "variants: a variant id used twice in a scenario of four legs is one problem ($(@($twice.Problems) -join ' | '))" $true (@($twice.Problems | Where-Object { $_ -like "*variant id 'a' is used twice*" }).Count -eq 1)
+    & $add "variants: a variant id used twice in a scenario of four legs is one problem in all, the second is not expanded ($(@($twice.Problems) -join ' | '))" $true (
+        @($twice.Problems).Count -eq 1 -and @($twice.Problems)[0] -like "*variant id 'a' is used twice*")
     $noLayout = try { & $with { param($c) $s = & $scenario $c 'bus'; $s['layout'] = 'nowhere'; & $renderOnly $s; $s['variants'] = @((& $v 'a' (& $gainP ([ordered]@{ Trim = 0.25 })))) } } catch { "threw: $($_.Exception.Message)" }
     & $add "variants: of a scenario whose layout is not defined only that is said, nothing throws ($(($noLayout -is [string]) ? $noLayout : (@($noLayout.Problems) -join ' | ')))" $true (
         $noLayout -isnot [string] -and @($noLayout.Problems).Count -eq 1 -and @($noLayout.Problems)[0] -like "*layout 'nowhere' is not defined in layouts*")
@@ -1805,7 +1809,8 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     $same = { param($x, $y) [string]::Equals($x, $y, [StringComparison]::OrdinalIgnoreCase) }
     $ent = { param([string]$Plugin, [string]$EntryKey) [pscustomobject]@{ Key = $EntryKey; Plugin = $Plugin; State = ''; Params = [ordered]@{} } }
     $chk = { param([string[]]$Clean, [string[]]$Fail = @(), [string[]]$FromOutside = @()) $bl = @{}; foreach ($k in $Clean) { $bl[$k] = @('x') }; [pscustomobject]@{ Fail = $Fail; Foreign = $FromOutside; Blocks = $bl } }
-    $verdict = { param($BatchEntries, $CheckResult, [hashtable]$ModuleList, [string]$LaunchFailed = '') Get-HarnessLearnVerdict -Variants $BatchEntries -Check $CheckResult -LaunchWhy $LaunchFailed -Installed $inst -Seen $ModuleList -SameFile $same }
+    $jsTable = @{ js = [pscustomobject]@{ Name = 'JS: js'; AddName = 'JS:js.jsfx'; Ident = 'js.jsfx' } }
+    $verdict = { param($BatchEntries, $CheckResult, [hashtable]$ModuleList, [string]$LaunchFailed = '') Get-HarnessLearnVerdict -Variants $BatchEntries -Check $CheckResult -LaunchWhy $LaunchFailed -Installed $inst -Jsfx $jsTable -Seen $ModuleList -SameFile $same }
     $aOnly = @((& $ent 'a' 'a|x'), (& $ent 'js' 'js|'))
     $ok = & $verdict $aOnly (& $chk @('a|x', 'js|')) @{ 'A.vst3' = @($binA) }
     & $add 'learn verdict: a batch whose plugins loaded from the private copy passes, also when the binary of a plugin of another batch was not seen; its facts are about its own binaries' $false (
@@ -1822,10 +1827,35 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'learn verdict: an fx_ident outside the private copy is Foreign as well' $true ($identForeign.Foreign -and $identForeign.Commit.Count -eq 0)
     $failed = & $verdict @((& $ent 'a' 'a|x'), (& $ent 'b' 'b|y')) (& $chk @('a|x') @('b (variant 2) is offline')) @{ 'A.vst3' = @($binA) }
     & $add 'learn verdict: a failed entry is FAIL before an unseen binary, and the clean entries of the batch are committed' $true ($failed.Status -ceq 'FAIL' -and ($failed.Commit -join ',') -ceq 'a|x')
+    $foreignFail = & $verdict $aOnly (& $chk @('js|') @('a (variant 1) is offline') @('a was loaded from S:\x')) @{ 'A.vst3' = @($binA) }
+    $foreignNoLaunch = & $verdict $aOnly $null @{ 'B.vst3' = @('S:\VST3\B.vst3') } 'timed out after 30 s'
+    & $add "learn verdict: Foreign comes first, before a failed entry and before a failed launch ($($foreignFail.Status): $($foreignFail.Detail) / $($foreignNoLaunch.Status): $($foreignNoLaunch.Detail))" $true (
+        $foreignFail.Status -ceq 'INCOMPLETE' -and $foreignFail.Detail -ceq 'not the private copy: a was loaded from S:\x' -and $foreignFail.Foreign -and $foreignFail.Commit.Count -eq 0 -and
+        $foreignNoLaunch.Status -ceq 'INCOMPLETE' -and $foreignNoLaunch.Detail -clike 'not the private copy: a module named B.vst3 *' -and $foreignNoLaunch.Foreign)
+    $stranger = & $verdict @((& $ent 'a' 'a|x'), (& $ent 'zz' 'zz|')) (& $chk @('a|x', 'zz|')) @{ 'A.vst3' = @($binA) }
+    & $add "learn verdict: an entry of a plugin neither installed nor a JSFX is never committed, whatever its check said ($($stranger.Commit -join ','))" $true (($stranger.Commit -join ',') -ceq 'a|x')
     $noLaunch = & $verdict $aOnly $null @{} 'timed out after 30 s'
     & $add 'learn verdict: a launch that failed is INCOMPLETE and commits nothing' $true ($noLaunch.Status -ceq 'INCOMPLETE' -and $noLaunch.Detail -ceq 'the learn launch failed: timed out after 30 s' -and $noLaunch.Commit.Count -eq 0 -and -not $noLaunch.Foreign)
     $jsOnly = & $verdict @((& $ent 'js' 'js|')) (& $chk @('js|')) @{}
     & $add 'learn verdict: a batch of JSFX only has no binary to prove and passes on fx_ident' $false ($jsOnly.Status -ceq 'PASS' -and $jsOnly.Modules.Verdict -ceq 'NoBinary' -and $jsOnly.Detail -clike '*no plugin binary to check (only JSFX)*')
+    # Which failed launch stops learning: one launch of a batch as its Lua step ends (no REAPER, no ini written)
+    $stopDir = Join-Path $Tmp 'learn-stop'
+    $null = New-Item -ItemType Directory -Force -Path $stopDir
+    $stopOf = {
+        param([string]$RunStatus, [bool]$Stuck = $false)
+        $luaEnd = [pscustomobject]@{ Run = [pscustomobject]@{ Status = $RunStatus; StillRunning = $Stuck; Modules = @{} }; Result = @{}; Why = "the launch ended so: $RunStatus" }
+        $luaStub = { $luaEnd }.GetNewClosure() # made here: a closure takes the variables of the scope it is made in
+        $ctxL = @{ Work = $stopDir; Files = [Collections.Generic.List[string]]::new(); States = @{}; Jsfx = $jsTable; Installed = @{}; Limits = @{ learnTimeoutSec = 30 }; Blocks = @{}; LearnReads = @{}; Names = @{}; AddNames = @{} }
+        $o = try {
+            Invoke-WithModuleStub 'Invoke-HarnessLearn' 'Set-HarnessAudioConfig' { } {
+                Invoke-WithModuleStub 'Invoke-HarnessLearn' 'Invoke-HarnessLuaStep' $luaStub { Invoke-HarnessLearn -Ctx $ctxL -Variants @(& $ent 'js' 'js|') -BatchNo 2 -BatchCount 3 }
+            }
+        } catch { [pscustomobject]@{ Stop = "threw: $($_.Exception.Message)" } }
+        "$RunStatus$($Stuck ? '+StillRunning' : '')=$($o.Stop)"
+    }
+    $stops = @((& $stopOf 'LockBusy'), (& $stopOf 'SkipMarker'), (& $stopOf 'Blocked'), (& $stopOf 'Timeout' $true), (& $stopOf 'Timeout'), (& $stopOf 'Modal'), (& $stopOf 'Error')) -join ', '
+    & $add "learn stop: a launch that was blocked (a busy lock, a skip marker, an earlier process not ended) or could not be ended stops learning; one that timed out, stuck on a dialog or broke does not ($stops)" $true (
+        $stops -ceq 'LockBusy=launch, SkipMarker=launch, Blocked=launch, Timeout+StillRunning=launch, Timeout=, Modal=, Error=')
 
     # The latency of a plugin that only reports it
     $plugins = [ordered]@{ d = [pscustomobject]@{ ExpectPdc = 'report' }; n = [pscustomobject]@{ ExpectPdc = 64 }; z = [pscustomobject]@{ ExpectPdc = 0 } }
@@ -1844,6 +1874,12 @@ function Get-VariantCases([string]$Tmp, [string]$RepoRoot) {
     $pf = Get-HarnessPdcFacts (& $facts '512') '' $pl $plugins
     & $add 'latency: the facts list each FX whose latency is only reported, with what it reported (null when nothing)' $false (
         $pf.Count -eq 1 -and $pf[0].track -ceq 'V' -and $pf[0].index -eq 0 -and $pf[0].plugin -ceq 'd' -and $pf[0].pdc -eq 512 -and $null -eq (Get-HarnessPdcFacts (& $facts '') '' $pl $plugins)[0].pdc)
+    $scenarioModule = (Get-Command Get-HarnessPdcFacts).Module
+    $gapOf = { param([string]$Judged) & $scenarioModule { param($st) $g = [Collections.Generic.List[string]]::new(); $g.Add('x was not read'); Get-HarnessGapOutcome $st 'judged' $g @() } $Judged }
+    $gapFail = & $gapOf 'FAIL'
+    $gapPass = & $gapOf 'PASS'
+    & $add "latency: a reading that is not there makes a PASS INCOMPLETE and leaves a FAIL a FAIL, saying so ($($gapFail.Status): $($gapFail.Detail))" $true (
+        $gapFail.Status -ceq 'FAIL' -and $gapFail.Detail -ceq 'judged; no evidence: x was not read' -and $gapPass.Status -ceq 'INCOMPLETE' -and $gapPass.Detail -ceq 'judged; no evidence: x was not read')
     $reopenPdc = Test-HarnessReopenFacts -Facts @{ before_t0_fx0_pdc = '64'; after1_t0_fx0_pdc = '32' } -Cycles 1
     & $add 'latency: a latency that changes on reopen is still a problem of savereopen' $true (($reopenPdc -join ';') -ceq "t0_fx0_pdc changed on reopen 1 of 1: '64' -> '32'")
     $cfgPdc = & $with { param($c) $c['plugins']['delay']['expectPdc'] = 'report' }
@@ -2268,6 +2304,12 @@ function Get-RenderCases([string]$Tmp, [string]$RepoRoot) {
     $ln = @([IO.File]::ReadAllLines($manifest))
     & $add 'keep: a line an earlier write left unfinished stays on a line of its own, and the next line starts after it' $false (
         $kn.Status -ceq 'PASS' -and $ln.Count -eq 7 -and $ln[5] -ceq '{"schema":1,"cut' -and $(try { (ConvertFrom-HarnessJson $ln[6])['round'] -eq 5 } catch { $false }))
+    # What was kept but cannot be described makes a PASS INCOMPLETE (above); a FAIL stays FAIL, and says so
+    & $mk
+    $holdingSix = { param([string]$Path) if ($Path -clike '*run6?gone-256.wav') { throw 'the file is in use by another process' }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $keptFail = Invoke-WithModuleStub 'Save-HarnessKeptRender' 'Get-HarnessSha256' $holdingSix { Save-HarnessKeptRender -Keep $keep -Ctx $ctx -Scenario $sc -Round 6 -Status 'FAIL' -Detail 'differs' }
+    & $add "keep: a FAIL whose kept file cannot be read stays FAIL, its detail saying what was not read ($($keptFail.Detail))" $true (
+        $keptFail.Status -ceq 'FAIL' -and $keptFail.Detail -ceq 'differs; kept, but gone-256.wav could not be read: the file is in use by another process')
     $cases
 }
 

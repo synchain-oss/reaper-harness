@@ -225,15 +225,16 @@ function Test-HarnessLearnReport {
 }
 
 # Pure function: the outcome of one learn batch from what its launch showed. Check: Test-HarnessLearnReport of it ($null
-# when the launch failed: LaunchWhy); Installed: VST3 id -> install row; Seen: the module list of the launch. In this
-# order: a tested binary from outside the private copy (any installed binary in the module list, also in a batch of
-# JSFX only, or an fx_ident) is INCOMPLETE and commits nothing (Foreign); a launch that failed is INCOMPLETE; an entry
-# that failed is FAIL; a binary of a plugin of this batch never seen loaded is INCOMPLETE (binaries of plugins of other
-# batches may be unseen). Commit: the keys of entries that failed nothing whose plugin was proven in this launch (a VST3
-# by its binary Private in the module list, a JSFX by fx_ident and its saved block). Modules: the module verdict over
-# the binaries of this batch's plugins (NoBinary when it has none).
+# when the launch failed: LaunchWhy); Installed: VST3 id -> install row; Jsfx: JSFX id -> row; Seen: the module list of
+# the launch. In this order: a tested binary from outside the private copy (any installed binary in the module list,
+# also in a batch of JSFX only, or an fx_ident) is INCOMPLETE and commits nothing (Foreign); a launch that failed is
+# INCOMPLETE; an entry that failed is FAIL; a binary of a plugin of this batch never seen loaded is INCOMPLETE
+# (binaries of plugins of other batches may be unseen). Commit: the keys of entries that failed nothing whose plugin was
+# proven in this launch (a VST3 by its binary Private in the module list, a JSFX of Jsfx by fx_ident and its saved
+# block; a plugin that is neither is never committed). Modules: the module verdict over the binaries of this batch's
+# plugins (NoBinary when it has none).
 function Get-HarnessLearnVerdict {
-    param([Parameter(Mandatory)][object[]]$Variants, $Check = $null, [string]$LaunchWhy = '', [hashtable]$Installed = @{}, [hashtable]$Seen = @{}, [scriptblock]$SameFile = $null)
+    param([Parameter(Mandatory)][object[]]$Variants, $Check = $null, [string]$LaunchWhy = '', [hashtable]$Installed = @{}, [hashtable]$Jsfx = @{}, [hashtable]$Seen = @{}, [scriptblock]$SameFile = $null)
     $same = $SameFile ?? ${function:Test-HarnessSameFile}
     $none = [pscustomobject]@{ Verdict = 'NoBinary'; Binaries = [ordered]@{} }
     $every = @{}
@@ -250,7 +251,7 @@ function Get-HarnessLearnVerdict {
     $commit = @(if (-not $why.Count -and $Check) {
             foreach ($v in $Variants) {
                 $vst = $Installed.ContainsKey($v.Plugin) ? $Installed[$v.Plugin] : $null
-                if ($Check.Blocks.ContainsKey($v.Key) -and (-not $vst -or $mod.Binaries[$vst.BinaryLeaf] -ceq 'Private')) { $v.Key }
+                if ($Check.Blocks.ContainsKey($v.Key) -and ($vst ? ($mod.Binaries[$vst.BinaryLeaf] -ceq 'Private') : $Jsfx.ContainsKey($v.Plugin))) { $v.Key }
             }
         })
     $proof = ($mod.Verdict -ceq 'NoBinary') ? 'no plugin binary to check (only JSFX), each JSFX found at its private path (fx_ident)' : 'every tested binary loaded from the private copy (module list and fx_ident)'
@@ -292,7 +293,7 @@ function Invoke-HarnessLearn {
         $Saved = (Test-Path -LiteralPath $saveAs) ? (Get-HarnessFxBlocks ([IO.File]::ReadAllText($saveAs))) : $null
         $learnCheck = Test-HarnessLearnReport -Variants $Variants -Installed $Ctx.Installed -Jsfx $Ctx.Jsfx -States $Ctx.States -Report $lua.Result -Saved $Saved -TrackNames $learnNames -SameFile $same
     }
-    $judged = Get-HarnessLearnVerdict -Variants $Variants -Check $learnCheck -LaunchWhy ([string]$lua.Why) -Installed $Ctx.Installed -Seen $lua.Run.Modules -SameFile $same
+    $judged = Get-HarnessLearnVerdict -Variants $Variants -Check $learnCheck -LaunchWhy ([string]$lua.Why) -Installed $Ctx.Installed -Jsfx $Ctx.Jsfx -Seen $lua.Run.Modules -SameFile $same
     foreach ($k in $judged.Commit) { $Ctx.Blocks[$k] = $learnCheck.Blocks[$k]; $Ctx.LearnReads[$k] = $learnCheck.Reads[$k] }
     # Names come from what was installed, per plugin; a plugin with an entry committed has its name
     foreach ($v in @($Variants | Where-Object { $_.Key -cin $judged.Commit })) { $Ctx.Names[$v.Plugin] = $learnCheck.Names[$v.Plugin]; $Ctx.AddNames[$v.Plugin] = $learnCheck.AddNames[$v.Plugin] }

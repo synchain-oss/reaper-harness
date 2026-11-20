@@ -21,6 +21,7 @@
 #       every launch shows every configured binary)
 #       PdcUnread: no latency is read (pdc= stays empty), in the learn step and in device, savereopen and transport
 #       LearnNoResult (n): the n-th learn launch since Set-FakeReaper writes no result
+#       LearnNoModules (n): the module list of the n-th learn launch since Set-FakeReaper shows no binary at all
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
 #   ConvertFrom-FakeLua <text>                        reads a job file written by ConvertTo-HarnessLuaTable
 
@@ -69,7 +70,13 @@ $script:LearnLaunches = 0
 $script:JobBinaries = $null # the binaries the learn step of the last launch added (OwnModules)
 function Set-FakeReaper([hashtable]$Spec) { $script:Spec = $Spec; $script:LearnLaunches = 0 }
 function Get-FakeReaperLauncher { { param($psi) Invoke-FakeLaunch $psi } }
-function Get-FakeModuleSampler { { param($proc) ($script:Spec['OwnModules'] -and $null -ne $script:JobBinaries) ? @($script:JobBinaries) : @(Get-FakeBinaries) } }
+function Get-FakeModuleSampler {
+    {
+        param($proc)
+        if ($null -ne $script:JobBinaries -and $script:Spec['LearnNoModules'] -eq $script:LearnLaunches) { return , @() }
+        ($script:Spec['OwnModules'] -and $null -ne $script:JobBinaries) ? @($script:JobBinaries) : @(Get-FakeBinaries)
+    }
+}
 function Get-FakeBinary([string]$Bundle) { [IO.Path]::Combine($script:Spec.CfgDir, 'plugins', $Bundle, 'Contents', 'x86_64-win', $Bundle) }
 function Get-FakePdcText($fx) { $script:Spec['PdcUnread'] ? '' : "$(Get-FakePdc $fx)" }
 

@@ -909,7 +909,8 @@ function ConvertTo-Variants($ScenarioRaw, [string]$Path, $Layouts, $PluginTable,
         $variantRaw = $ScenarioRaw['variants'][$i]
         $vp = "$Path.variants[$i]"
         $vid = [string]$variantRaw['id']
-        if ($ids.ContainsKey($vid)) { $Problems.Add("${vp}: variant id '$vid' is used twice") }
+        $twice = $ids.ContainsKey($vid)
+        if ($twice) { $Problems.Add("${vp}: variant id '$vid' is used twice") }
         $ids[$vid] = $true
         $over = [ordered]@{}
         $rawFx = Get-Or $variantRaw 'fx' ([ordered]@{})
@@ -924,7 +925,8 @@ function ConvertTo-Variants($ScenarioRaw, [string]$Path, $Layouts, $PluginTable,
             $over[$pluginId] = [pscustomobject]@{ State = $vState; Params = $vParams }
         }
         $bypass = ConvertTo-Bypass (Get-Or $variantRaw 'bypass' $null) "$vp.bypass" $used $Problems @($PluginTable.get_Keys())
-        [pscustomobject]@{ Id = $vid; Fx = $over; Bypass = $bypass }
+        # Checked like the others, but not expanded: its id would clash again in every leg of a matrix
+        if (-not $twice) { [pscustomobject]@{ Id = $vid; Fx = $over; Bypass = $bypass } }
     }
     , @($list)
 }

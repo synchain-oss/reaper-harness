@@ -360,8 +360,9 @@ function Invoke-HarnessSuite {
                         elseif ($learnStop -ceq 'threw') { $learnHalt = "not run: learning stopped on an error (see the $rowId row)" }
                     }
                     $row = [ordered]@{ id = $rowId; kind = 'learn'; status = $o.Status; seconds = [math]::Round($t0.Elapsed.TotalSeconds, 1); detail = (Hide-HarnessPaths $o.Detail) }
-                    # No path in these today (counts, verdicts, file names, state names); masked like every other row all the same
-                    if ($o.PSObject.Properties['Facts']) { $row.facts = Hide-HarnessFacts $o.Facts }
+                    # No path in these today (counts, verdicts, file names, state names); masked like every other row all the same.
+                    # A batch not started, or one that threw, has its place and size all the same, and nothing learned.
+                    $row.facts = Hide-HarnessFacts ($o.PSObject.Properties['Facts'] ? $o.Facts : [ordered]@{ variants = @($batch.Entries).Count; batch = $batch.No; batches = $plan.Count; learned = 0 })
                     $rows.Add($row); $learnRows.Add($row)
                     Write-HarnessLine ("  [{0}] {1}  {2} s  {3}" -f $o.Status, $rowId, $row.seconds, $o.Detail)
                 }

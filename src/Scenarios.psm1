@@ -745,7 +745,8 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
     $idents = @{ 'harness-block-probe' = $Ctx.ToolJsfx['harness-block-probe'].Ident; 'harness-feed' = $Ctx.ToolJsfx['harness-feed'].Ident }
     $gap = Test-HarnessTransportSetup -Facts $f -Scenario $s -Idents $idents -FxCount @($Layout.Tracks[$Job.track].Fx).Count
     $gap = @($gap) + @($noEvidence)
-    if ($gap.Count) { return New-HarnessOutcome INCOMPLETE ($gap -join '; ') }
+    $reportOnly = Get-HarnessPdcFacts $f '' $Layout $Ctx.Config.Plugins
+    if ($gap.Count) { return New-HarnessOutcome INCOMPLETE ($gap -join '; ') ($reportOnly.Count ? [ordered]@{ pdc = $reportOnly } : $null) }
     $perState = [Collections.Generic.List[object]]::new()
     $judged = for ($i = 0; $i -lt $s.states.Count; $i++) {
         $st = $s.states[$i]
@@ -760,7 +761,6 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
         $j
     }
     $seen = [ordered]@{ track = $s.track; runFxWhenStopped = $rfs; runFxAfterStopMs = $f['cfg_runafterstop']; settleSamples = $f['settle']; feed = $feed; states = $perState.ToArray() }
-    $reportOnly = Get-HarnessPdcFacts $f '' $Layout $Ctx.Config.Plugins
     if ($reportOnly.Count) { $seen.pdc = $reportOnly }
     New-HarnessOutcome (Get-HarnessOutcomeStatus @($judged | ForEach-Object { $_.Status })) (@($judged | ForEach-Object { $_.Line }) -join ' | ') $seen
 }

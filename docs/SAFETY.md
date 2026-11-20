@@ -268,8 +268,9 @@ proves which file was loaded, in two independent ways:
   `moduleinfo.json`.
 
 Plugin scanning happens in a separate process, so only launches that instantiate the plugin can show it in the
-module list; the learn launch always does. If a future REAPER resolves duplicate names differently, the result is
-INCOMPLETE with the reason, never a PASS about the wrong build.
+module list; the first learn launch always does (it holds every plugin), a later one only for the plugins of its
+settings. If a future REAPER resolves duplicate names differently, the result is INCOMPLETE with the reason, never a
+PASS about the wrong build.
 
 ## Keeping other plugins out
 
@@ -301,10 +302,10 @@ guard, lock and the watchdog like any other and is proven on its own (see above)
 failed nothing (an offline plugin is not) and its plugin was proven in that launch; the clean settings of a launch
 with failed ones are taken too, and the row is FAIL. A launch that failed (a timeout, a dialog, no result) leaves its
 settings unlearned and the next launch still runs. Learning stops at a tested binary from outside the private copy
-and at an unexpected error, and then nothing that needs learning runs; it stops at a launch that was blocked (a skip
-marker, a busy lock) or could not be ended as well. The launches it did not start are INCOMPLETE rows. A scenario runs
-only when every setting it needs was taken; otherwise it is INCOMPLETE and names the learn row. A kind of an extension
-runs only when every learn row passed.
+(that launch takes nothing, not even its clean settings) and at an unexpected error, and then nothing that needs
+learning runs; it stops at a launch that was blocked (a skip marker, a busy lock) or could not be ended as well. The
+launches it did not start are INCOMPLETE rows. A scenario runs only when every setting it needs was taken; otherwise
+it is INCOMPLETE and names the learn row. A kind of an extension runs only when every learn row passed.
 
 A named state is a block REAPER saved for you (see [CONFIG.md](CONFIG.md#states)). It is not added by name: the
 project the learn launch opens already holds the block, REAPER loads it as it loads any saved project, and the block
