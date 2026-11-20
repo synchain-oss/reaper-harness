@@ -91,10 +91,10 @@ Some parameters cannot go into `params`, and `settable` is false for them:
   and a parameter that could not be read cleanly (`problem`).
 
 Listing and sweeps run in the learn launch, within `limits.learnTimeoutSec` ([CONFIG.md](CONFIG.md#limits)): raise it
-for a plugin with thousands of parameters or a large sweep. Measured on REAPER 7.82: the launch of a listing took 6.1 s
-for plugins with 17, 86 and 614 parameters, with a sweep of two parameters at five values too, as long as a learn launch
-of the same plugin with no listing; a launch that REAPER's evaluation reminder ended was done once more and took 10.1 s
-([validation record](validation/2026-11-20-param-listing.md)). A plugin with thousands of parameters was not listed.
+for a plugin with thousands of parameters or a large sweep. Measured on REAPER 7.82: the launch of a listing took 6.1 to 7.3 s
+for plugins with 17, 86 and 614 parameters, with a sweep of two or three parameters at five values too, about as long as
+a learn launch of the same plugin with no listing; a launch that REAPER's evaluation reminder ended was done once more and
+took 10.1 to 13.8 s ([validation record](validation/2026-11-20-param-listing.md)). A plugin with thousands of parameters was not listed.
 
 ## 4. Run
 
