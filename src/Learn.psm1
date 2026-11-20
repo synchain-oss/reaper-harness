@@ -330,8 +330,10 @@ function Invoke-HarnessLearn {
 # parameter has no name; an instance to sweep was not added, is not the plugin that was learned (its name, binary and
 # class ID, or its JSFX path) or a swept value was not read back. A parameter whose value is not a number from 0 to 1,
 # that has no display text, or whose name is not exact (a control character, or not UTF-8) gets a problem of its own and
-# counts in Unclean. REAPER's own parameters (host): an ident starting with ':', or without idents the last three named
-# Bypass, Wet and Delta. Settable: what a configuration can set by name and learn finds (the first of that name).
+# counts in Unclean. REAPER's own parameters (host): an ident that is ':bypass', ':wet' or ':delta' (case-sensitive), with
+# nothing or the parameter's own index in decimal in front (REAPER 7.82 gives '612:wet' to parameter 612, and
+# '<index>:<number>' to the plugin's own), or without idents the last three named Bypass, Wet and Delta. Settable: what a
+# configuration can set by name and learn finds (the first of that name).
 # DisplayUsable: a display text a configuration can give as it is (exact, at most 128 characters, no path in it).
 function Read-HarnessParamListing {
     param([Parameter(Mandatory)][hashtable]$Report, [Parameter(Mandatory)][string]$Key, [hashtable]$Sweep = $null, $Installed = $null, $Jsfx = $null, [scriptblock]$SameFile = $null)
@@ -363,7 +365,7 @@ function Read-HarnessParamListing {
         $exact = [string]$Report["${q}exact"] -ceq 'true'
         if (-not $exact) { $why.Add('its name has a control character or is not UTF-8') }
         $paramId = $Report.ContainsKey("${q}ident") ? [string]$Report["${q}ident"] : $null
-        $byReaper = ($null -ne $paramId) ? $paramId.StartsWith(':') : ($lastThree -and $p -ge $count - 3)
+        $byReaper = ($null -ne $paramId) ? ($paramId -cmatch "^(${p})?:(bypass|wet|delta)$") : ($lastThree -and $p -ge $count - 3)
         if ($byReaper) { $null = $hostBy.Add((($null -ne $paramId) ? 'ident' : 'names')) }
         $sameAs = $first.ContainsKey($name) ? $first[$name] : $null
         if ($null -eq $sameAs) { $first[$name] = $p }

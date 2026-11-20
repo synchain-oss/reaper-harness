@@ -82,9 +82,11 @@ Some parameters cannot go into `params`, and `settable` is false for them:
   of the first) and are not settable;
 - REAPER's own parameters: REAPER adds `Bypass`, `Wet` and `Delta` at the end of every plugin; REAPER 7.82 gives them the
   identifiers `<index>:bypass`, `<index>:wet` and `<index>:delta`, and a plugin's own parameters `<index>:<number>`
-  ([validation record](validation/2026-11-20-param-listing.md)). They are `host` and are set through `bypass` of a
-  variant, not through `params`. Without identifiers, the last three are taken as REAPER's when they are named exactly
-  so (`hostBy` says which rule applied);
+  ([validation record](validation/2026-11-20-param-listing.md)). A parameter is `host` when its identifier is
+  `:bypass`, `:wet` or `:delta` (case-sensitive) with nothing or its own index in front (`612:wet` of parameter 612,
+  not `5:wet` of parameter 6); a parameter without an identifier is `host` when it is one of the last three and they
+  are named exactly `Bypass`, `Wet` and `Delta` (`hostBy` says which rule applied). REAPER's own are set through
+  `bypass` of a variant, not through `params`;
 - a name longer than 128 characters or with a control character, a name or display text with a path in it (masked),
   and a parameter that could not be read cleanly (`problem`).
 

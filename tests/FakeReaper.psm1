@@ -25,7 +25,8 @@
 #       Params (REAPER name -> a list of @{ Name; Value }): the parameters of that plugin in order, with their defaults;
 #       names may repeat (it sets and reads the first of a name, as the driver does) and it saves them as index=value
 #       pairs. Without it a plugin takes any name it is given and saves name=value pairs. HostParams: those plugins end
-#       with REAPER's Bypass, Wet and Delta (idents :bypass, :wet, :delta); nparams counts the parameters an instance has.
+#       with REAPER's Bypass, Wet and Delta; nparams counts the parameters an instance has. Idents are REAPER 7.82's:
+#       <index>:<1000 + index> for a plugin's own parameters, <index>:bypass, <index>:wet, <index>:delta for REAPER's.
 #       A parameter listing (job entries with list, sweep) is reported like the driver does, after the save. Faults, in
 #       the first listed entry: ListInexact (the name of parameter 1 is not exact), ListDrop (no display of parameter
 #       1), ListError (the listing stops with an error), ListCountEnd (the count at the end is one more), SweepNoAdd
@@ -174,16 +175,16 @@ function New-FakeParamList([string]$reaperName) {
     $given = $script:Spec['Params']
     if (-not $given -or -not $given.Contains($reaperName)) { return $null }
     $out = [Collections.Generic.List[object]]::new()
-    foreach ($e in @($given[$reaperName])) { $out.Add([pscustomobject]@{ Name = [string]$e['Name']; Value = [double]$e['Value']; Ident = "$($out.Count)" }) }
-    if ($script:Spec['HostParams']) { foreach ($h in 'Bypass', 'Wet', 'Delta') { $out.Add([pscustomobject]@{ Name = $h; Value = (($h -ceq 'Wet') ? 1.0 : 0.0); Ident = ":$($h.ToLowerInvariant())" }) } }
+    foreach ($e in @($given[$reaperName])) { $out.Add([pscustomobject]@{ Name = [string]$e['Name']; Value = [double]$e['Value']; Ident = "$($out.Count):$(1000 + $out.Count)" }) }
+    if ($script:Spec['HostParams']) { foreach ($h in 'Bypass', 'Wet', 'Delta') { $out.Add([pscustomobject]@{ Name = $h; Value = (($h -ceq 'Wet') ? 1.0 : 0.0); Ident = "$($out.Count):$($h.ToLowerInvariant())" }) } }
     , $out
 }
 
-# Every parameter of an instance, in order (Name, Value, Ident); without a list, those it was given (ident = index)
+# Every parameter of an instance, in order (Name, Value, Ident as above); without a list, those it was given
 function Get-FakeParamRows($fx) {
     if ($fx.List) { return , @($fx.List) }
     $pos = 0
-    , @(foreach ($pn in @($fx.Params.get_Keys())) { [pscustomobject]@{ Name = [string]$pn; Value = [double]$fx.Params[$pn]; Ident = "$pos" }; $pos++ })
+    , @(foreach ($pn in @($fx.Params.get_Keys())) { [pscustomobject]@{ Name = [string]$pn; Value = [double]$fx.Params[$pn]; Ident = "$($pos):$(1000 + $pos)" }; $pos++ })
 }
 
 # The index of the first parameter of that name, as findParam finds it; -1 when there is none

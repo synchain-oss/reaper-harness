@@ -2024,9 +2024,25 @@ function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
         $pathName.Params[0].masked -and -not $pathName.Params[0].settable -and $pathName.Params[0].displayUsable -and
         $pathName.Params[1].masked -and -not $pathName.Params[1].settable -and -not $pathName.Params[1].displayUsable -and
         -not $pathName.Params[2].masked -and $pathName.Params[2].settable)
+    # REAPER's own by ident: ':bypass', ':wet' or ':delta', with the parameter's own index in front or nothing. REAPER 7.82
+    # gives every parameter '<index>:<word or number>': the plugin's own its VST3 parameter ID, REAPER's three the words
+    $hostAt = { param($res) @($res.Params | Where-Object { $_.host } | ForEach-Object { $_.index }) -join ',' }
+    $asReaper = & $read (& $base @(@(for ($i = 0; $i -lt 611; $i++) { & $one $i "P$i" -Ident "${i}:$(97695900 + $i)" }) + @(
+                (& $one 611 'Bypass' '0.000000000' 'normal' '611:bypass'), (& $one 612 'Wet' '1.000000000' '100' '612:wet'), (& $one 613 'Delta' '0.000000000' 'normal' '613:delta'))))
+    & $add "listing: an ident '<index>:bypass', '<index>:wet' or '<index>:delta' with the parameter's own index is REAPER's own, not settable ('612:wet' of 614 parameters, as REAPER 7.82 gives it; host at $(& $hostAt $asReaper))" $true (
+        -not $asReaper.Problem -and $asReaper.Params.Count -eq 614 -and $asReaper.Params[612].ident -ceq '612:wet' -and $asReaper.Params[611].host -and $asReaper.Params[612].host -and
+        $asReaper.Params[613].host -and -not $asReaper.Params[612].settable -and -not $asReaper.Params[613].settable -and ($asReaper.HostBy -join ',') -ceq 'ident')
     $hostIdent = & $read (& $base @((& $one 0 'Gain'), (& $one 1 'Wet' '1.000000000' '100.0' ':wet')))
-    & $add "listing: a parameter whose ident starts with ':' is REAPER's own, not settable ($($hostIdent.HostBy -join ','))" $true (
+    & $add "listing: an ident ':wet' with nothing in front is REAPER's own, not settable ($($hostIdent.HostBy -join ','))" $true (
         $hostIdent.Params[1].host -and -not $hostIdent.Params[1].settable -and -not $hostIdent.Params[0].host -and ($hostIdent.HostBy -join ',') -ceq 'ident')
+    $otherIndex = & $read (& $base @((& $one 0 'Gain' -Ident '0:1000'), (& $one 1 'Bypass' -Ident '11:bypass'), (& $one 2 'Wet' -Ident '5:wet'), (& $one 3 'Delta' -Ident '2:delta')))
+    & $add "listing: an ident of REAPER's words with another index than the parameter's own is not REAPER's own, nor are the last three by their names ('11:bypass' at 1, '5:wet' at 2, '2:delta' at 3; host at $(& $hostAt $otherIndex))" $true (
+        -not $otherIndex.Problem -and (& $hostAt $otherIndex) -ceq '' -and @($otherIndex.HostBy).Count -eq 0 -and @($otherIndex.Params | Where-Object { $_.settable }).Count -eq 4)
+    & $add "listing: a plugin's own ident '<index>:<number>' (its VST3 parameter ID) is not REAPER's own, at its own index too ('15:97695915'; host at $(& $hostAt $asReaper))" $true (
+        -not $asReaper.Problem -and @($asReaper.Params | Where-Object { $_.index -lt 611 -and $_.host }).Count -eq 0 -and $asReaper.Params[15].ident -ceq '15:97695915' -and $asReaper.Params[15].settable)
+    $otherForm = & $read (& $base @((& $one 0 'Gain' -Ident '0:gain'), (& $one 1 'Wet' -Ident '1:Wet'), (& $one 2 'Delta' -Ident ':DELTA'), (& $one 3 'Wet 2' -Ident '3:wetx'), (& $one 4 'Mix' -Ident 'wet')))
+    & $add "listing: an ident with another word, REAPER's word in another case, more after it or no colon is not REAPER's own ('0:gain', '1:Wet', ':DELTA', '3:wetx', 'wet'; host at $(& $hostAt $otherForm))" $true (
+        -not $otherForm.Problem -and (& $hostAt $otherForm) -ceq '' -and @($otherForm.HostBy).Count -eq 0)
     $noIdent = & $read (& $base @((& $one 0 'Gain' -Ident $null), (& $one 1 'Bypass' -Ident $null), (& $one 2 'Wet' -Ident $null), (& $one 3 'Delta' -Ident $null)))
     $notLast = & $read (& $base @((& $one 0 'Bypass' -Ident $null), (& $one 1 'Wet' -Ident $null), (& $one 2 'Delta' -Ident $null), (& $one 3 'Gain' -Ident $null)))
     & $add "listing: without idents the last three named Bypass, Wet and Delta are REAPER's own; the same names elsewhere are not ($($noIdent.HostBy -join ','))" $true (

@@ -1459,7 +1459,7 @@ try {
         & $holds { $lrBack['listing']['kind'] -ceq 'params' -and $null -eq $lrBack['listing']['values'] -and $lrBack['listing']['readAt']['sr'] -eq 48000 -and $lrBack['listing']['readAt']['block'] -eq 512 -and
             (@($lrBack['listing']['plugins'] | ForEach-Object { $_['id'] }) -join ',') -ceq 'gain,bus,delay' -and
             (& $field 'index') -ceq '0|1|2|3|4|5|6' -and (& $field 'name') -ceq 'Gain|Gain|Path <path>|Mode|Bypass|Wet|Delta' -and (& $field 'normalized') -ceq '0.5|0.25|0|1|0|1|0' -and
-            (& $field 'display') -ceq '0.50|0.25|0.00|1.00|0.00|1.00|0.00' -and (& $field 'ident') -ceq '0|1|2|3|:bypass|:wet|:delta' -and (& $field 'host') -ceq 'False|False|False|False|True|True|True' -and
+            (& $field 'display') -ceq '0.50|0.25|0.00|1.00|0.00|1.00|0.00' -and (& $field 'ident') -ceq '0:1000|1:1001|2:1002|3:1003|4:bypass|5:wet|6:delta' -and (& $field 'host') -ceq 'False|False|False|False|True|True|True' -and
             $lg['paramCount'] -eq 7 -and $lg['nparams'] -eq 7 -and (@($lg['hostBy']) -join ',') -ceq 'ident' -and $lg['listed'] -and $lg['status'] -ceq 'PASS' -and $lg['bundle'] -ceq 'Fixture Gain.vst3' -and
             $lg['class']['name'] -ceq 'Fixture Gain' -and $lg['classFrom'] -ceq 'moduleinfo' -and $lg['blockSha256'] -cmatch '^[0-9a-f]{64}$' -and $lg['pdc'] -eq 0 -and
             @(@($lrBack['listing']['plugins']) | Where-Object { $_['paramCount'] -ne $_['nparams'] -or -not $_['listed'] }).Count -eq 0 })
