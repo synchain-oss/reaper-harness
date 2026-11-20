@@ -575,6 +575,35 @@ $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '
 Write-Case 'entry script: a usage error exits 64 and the console shows no path' $true ($u.Exit -eq 64 -and $u.Out -clike "USAGE: extension path '<path>' must be relative*" -and $u.Out -cnotlike '*my files*')
 $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'doctor.ps1'), '-Config', $pathInConfig.Config)
 Write-Case 'doctor: a usage error exits 64 and the console shows no path' $true ($u.Exit -eq 64 -and $u.Out -clike "USAGE: extension path '<path>' must be relative*" -and $u.Out -cnotlike '*my files*')
+# A parameter listing asked for wrongly through run.ps1: 64 before anything starts, so no result file and no work directory
+# (each in a result directory of its own, so one that wrongly runs does not turn the next red)
+$listArgs = { param([string]$ListResults) @('-NoProfile', '-NonInteractive', '-File', (Join-Path $RepoRoot 'run.ps1'), '-Config', $configFile, '-CfgDir', $CfgA, '-PluginDir', $suite.PluginDir, '-ResultDir', $ListResults, '-ReaperExe', (Join-Path $Work 'no-reaper.exe')) }
+$listCase = 0
+$listNames = Join-Path $Work 'list-names.txt'
+[IO.File]::WriteAllText($listNames, "Gain`n")
+$listWrong = [ordered]@{
+    '-List foo'                                          = @('-List', 'foo')
+    '-ListValues x'                                      = @('-List', 'params', '-ListPlugin', 'gain', '-ListParam', 'Gain', '-ListValues', 'x')
+    '-ListParam with two plugins'                        = @('-List', 'params', '-ListPlugin', 'gain,bus', '-ListParam', 'Gain')
+    '-ListParam with -ListParamFile'                     = @('-List', 'params', '-ListPlugin', 'gain', '-ListParam', 'Gain', '-ListParamFile', $listNames)
+    '-ListPlugin without -List'                          = @('-ListPlugin', 'gain')
+    '-Only with -List'                                   = @('-List', 'params', '-Only', 'x')
+    '-Repeat 1 with -List'                               = @('-List', 'params', '-Repeat', '1')
+    '-ListPlugin naming a plugin the configuration lacks' = @('-List', 'params', '-ListPlugin', 'nope')
+}
+foreach ($wrong in $listWrong.GetEnumerator()) {
+    $listCase++
+    $listUsage = Join-Path $Work "list-usage-$listCase"
+    $u = Invoke-Native -Exe $pwshExe -Arguments ((& $listArgs $listUsage) + $wrong.Value)
+    Write-Case "entry script: $($wrong.Key) exits 64 with USAGE, no result file and no work directory" $true ($u.Exit -eq 64 -and $u.Out -clike 'USAGE: *' -and -not (Test-Path -LiteralPath $listUsage))
+}
+$listUsage = Join-Path $Work 'list-usage-sweep'
+$u = Invoke-Native -Exe $pwshExe -Arguments ((& $listArgs $listUsage) + @('-List', 'params', '-ListPlugin', 'gain', '-ListParam', 'Gain', '-ListValues', '0,0.5,1'))
+$written = @(Get-ChildItem -LiteralPath $listUsage -Filter '*.json' -ErrorAction SilentlyContinue)
+$skippedListing = try { (ConvertFrom-HarnessJson ([IO.File]::ReadAllText($written[0].FullName)))['listing'] } catch { $null }
+Write-Case "entry script: -List params with a sweep given as run.ps1 options gets as far as the preflight: SKIPPED without reaper.exe, a result file named -list-params.json with an empty listing" $false (
+    $u.Exit -eq 3 -and $written.Count -eq 1 -and $written[0].Name -cmatch '^\d{8}-\d{6}-fixture-[0-9a-f]{12}-list-params\.json$' -and
+    $null -ne $skippedListing -and $skippedListing['kind'] -ceq 'params' -and ($skippedListing['values'] -join ',') -ceq '0,0.5,1' -and @($skippedListing['plugins']).Count -eq 0)
 # A plugin binary somebody holds open: its hash cannot be read, in the preflight, before any result exists
 $lockedBinary = @(Get-ChildItem -LiteralPath $suite.PluginDir -Recurse -File | Where-Object { $_.Extension -ceq '.vst3' })[0].FullName
 $holder = [IO.File]::Open($lockedBinary, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
@@ -693,6 +722,7 @@ Write-Case 'end to end: the work files of an all-green round are removed' $false
 $extRow = @($rowsOut | Where-Object { $_.id -ceq 'ext-count' })[0]
 Write-Case 'end to end: a local path in the facts of an extension is masked in the row and in the result file' $true ($extRow.facts.count -eq 3 -and $extRow.facts.workDir -ceq '<path>' -and $json -cnotlike '*brien*')
 Write-Case 'result file: a run with nothing wrong has no error' $false ($back.Contains('error') -and $null -eq $back['error'] -and $null -eq $r.error)
+Write-Case 'result file: a run that lists nothing has a listing of null' $false ($back.Contains('listing') -and $null -eq $back['listing'] -and $null -eq $r.listing)
 Write-Case 'result file: each run lists the launches retried after the licence reminder (none here)' $false ($back['runs'][0].Contains('retries') -and @($back['runs'][0]['retries']).Count -eq 0)
 # Only a JSFX, no plugin binary: learning does not ask the module list, which would have nothing to prove, and says so
 $jsOnly = & $writeVariant { param($c) & $noExt $c; $c.plugins = @{ delay = $c.plugins['delay'] }; $c.layouts = @{ js = @{ tracks = @(@{ name = 'Voice'; source = $true; fx = @(@{ plugin = 'delay' }) }) } }; $c.scenarios = @(@{ id = 'js-only'; kind = 'render'; layout = 'js' }); $c.negative = @() }
@@ -1402,6 +1432,122 @@ try { $null = & $reportRenderRun @{ CopiesAtStart = $copiesAtStart } } finally {
 Write-Case "end to end: an old copy of a report is gone before the REAPER of a judged render starts ($($copiesAtStart -join ','))" $true (($copiesAtStart -join ',') -ceq '0')
 Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
     $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
+
+# ---- listing parameters ----
+# Fixture Gain with parameters of its own: a name used twice, one with a path in it, REAPER's three at the end
+$gainName = 'VST3: Fixture Gain (Fixture Audio)'
+$listSpec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; HostParams = $true
+    Params = @{ $gainName = @(@{ Name = 'Gain'; Value = 0.5 }, @{ Name = 'Gain'; Value = 0.25 }, @{ Name = 'Path //server/x'; Value = 0 }, @{ Name = 'Mode'; Value = 1 }) } }
+$setList = { param([hashtable]$More = @{}) $spec = $listSpec.Clone(); foreach ($k in @($More.get_Keys())) { $spec[$k] = $More[$k] }; Set-FakeReaper $spec }
+$listE2e = $e2e.Clone(); $listE2e.ResultDir = Join-Path $Work 'e2e-list'
+$listRun = { param([hashtable]$Bound = @{ List = 'params' }, [hashtable]$Cfg = $listE2e) Invoke-HarnessSuite @Cfg -List (Test-HarnessListRequest -Bound $Bound) -SelfTestHooks $hooks -KeepWork }
+$listedOf = { param($Res, [string]$PluginId) @($Res.listing['plugins'] | Where-Object { $_['id'] -ceq $PluginId })[0] }
+$paramsRow = { param($Res) & $rowOf $Res 'params' }
+& $setList
+try {
+    $lr = & $listRun
+    $lrPath = Write-HarnessResult -Data $lr -ResultDir $listE2e.ResultDir
+    $lrJson = [IO.File]::ReadAllText($lrPath)
+    $lrBack = ConvertFrom-HarnessJson $lrJson
+    $lg = @($lrBack['listing']['plugins'] | Where-Object { $_['id'] -ceq 'gain' })[0]
+    $lgParams = @($lg['params'])
+    $field = { param([string]$Name) @($lgParams | ForEach-Object { [string]$_[$Name] }) -join '|' }
+    Write-Case "listing end to end: -List params is one learn launch: rows learn and params PASS and nothing else, module check PASS, default directory unchanged ($(& $rowIds $lr); $((& $paramsRow $lr).detail))" $false (
+        & $holds { $lr.verdict -ceq 'PASS' -and (& $rowIds $lr) -ceq 'learn,params' -and (& $paramsRow $lr).status -ceq 'PASS' -and @($lr.runs).Count -eq 1 -and $lr.launches -eq 1 -and
+            $lr.runs[0].moduleCheck.status -ceq 'PASS' -and $lr.runs[0].defaultCfgDir.unchanged -and $lr.runs[0].reaperProcessesLeft -eq 0 -and (Split-Path -Leaf $lrPath) -cmatch '^\d{8}-\d{6}-fixture-[0-9a-f-]+-list-params\.json$' })
+    Write-Case "listing end to end: every parameter with its index, name, value and display as REAPER read it; paramCount equals nparams ($(& $field 'name'))" $false (
+        & $holds { $lrBack['listing']['kind'] -ceq 'params' -and $null -eq $lrBack['listing']['values'] -and $lrBack['listing']['readAt']['sr'] -eq 48000 -and $lrBack['listing']['readAt']['block'] -eq 512 -and
+            (@($lrBack['listing']['plugins'] | ForEach-Object { $_['id'] }) -join ',') -ceq 'gain,bus,delay' -and
+            (& $field 'index') -ceq '0|1|2|3|4|5|6' -and (& $field 'name') -ceq 'Gain|Gain|Path <path>|Mode|Bypass|Wet|Delta' -and (& $field 'normalized') -ceq '0.5|0.25|0|1|0|1|0' -and
+            (& $field 'display') -ceq '0.50|0.25|0.00|1.00|0.00|1.00|0.00' -and (& $field 'ident') -ceq '0:1000|1:1001|2:1002|3:1003|4:bypass|5:wet|6:delta' -and (& $field 'host') -ceq 'False|False|False|False|True|True|True' -and
+            $lg['paramCount'] -eq 7 -and $lg['nparams'] -eq 7 -and (@($lg['hostBy']) -join ',') -ceq 'ident' -and $lg['listed'] -and $lg['status'] -ceq 'PASS' -and $lg['bundle'] -ceq 'Fixture Gain.vst3' -and
+            $lg['class']['name'] -ceq 'Fixture Gain' -and $lg['classFrom'] -ceq 'moduleinfo' -and $lg['blockSha256'] -cmatch '^[0-9a-f]{64}$' -and $lg['pdc'] -eq 0 -and
+            @(@($lrBack['listing']['plugins']) | Where-Object { $_['paramCount'] -ne $_['nparams'] -or -not $_['listed'] }).Count -eq 0 })
+    Write-Case "listing end to end: a name used twice points at the first; a name with a path in it is masked, and no path is in the file; only the first Gain and Mode are settable ($(& $field 'settable'))" $true (
+        & $holds { (& $field 'sameNameAs') -ceq '|0|||||' -and (& $field 'masked') -ceq 'False|False|True|False|False|False|False' -and (& $field 'settable') -ceq 'True|False|False|True|False|False|False' -and
+            $lrJson -cnotlike '*//server*' -and $lrJson -cnotmatch '[A-Za-z]:\\\\' })
+    # The tie: the listing's block hash is the one a kept render's manifest has for the same plugin with no params and no
+    # state (the stand-in saves the same state every time). The ordinary run's learn launch lists nothing.
+    $tieCfg = & $writeVariant { param($c) & $noExt $c; $c.layouts = @{ tie = @{ tracks = @(@{ name = 'Voice'; source = $true; fx = @(@{ plugin = 'gain' }, @{ plugin = 'bus' }) }) } }; $c.scenarios = @(@{ id = 'tie-kept'; kind = 'render'; layout = 'tie'; compare = 'none'; keep = $true }); $c.negative = @() }
+    $tieCfg.ReaperExe = $pwshExe; $tieCfg.ResultDir = Join-Path $Work 'e2e-tie'
+    $tieRun = Invoke-HarnessSuite @tieCfg -NoNegative -SelfTestHooks $hooks -KeepWork
+    $tieJob = try { ConvertFrom-FakeLua ([IO.File]::ReadAllText((Join-Path @(Get-ChildItem -LiteralPath (Join-Path $tieCfg.ResultDir 'work') -Directory)[0].FullName '_learn-1.job.lua'))) } catch { @{ fx = @() } }
+    Write-Case "listing end to end: an ordinary run lists nothing: no entry of its learn job asks for a listing or a sweep, and its listing is null ($(@($tieJob['fx']).Count) entries)" $true (
+        & $holds { $tieRun.verdict -ceq 'PASS' -and @($tieJob['fx']).Count -ge 2 -and @($tieJob['fx'] | Where-Object { $_.Contains('list') -or $_.Contains('sweep') }).Count -eq 0 -and $null -eq $tieRun.listing })
+    $tieList = & $listRun @{ List = 'params' } $tieCfg
+    $tieFx = try {
+        $tieKeep = @(Get-ChildItem -LiteralPath (Join-Path $tieCfg.ResultDir 'renders') -Directory)[0].FullName
+        @((ConvertFrom-HarnessJson @([IO.File]::ReadAllText((Join-Path $tieKeep 'manifest.jsonl')) -split "`n" | Where-Object { $_ })[0])['fx'])
+    } catch { @() }
+    $tieOf = { param([string]$PluginId) [string](@($tieFx | Where-Object { $_['plugin'] -ceq $PluginId })[0])['blockSha256'] }
+    Write-Case "listing end to end: the block hash of a listed plugin is the blockSha256 a kept render's manifest has for it with no params and no state ($(& $tieOf 'gain'))" $true (
+        & $holds { $tieRun.verdict -ceq 'PASS' -and $tieList.verdict -ceq 'PASS' -and (& $tieOf 'gain') -cmatch '^[0-9a-f]{64}$' -and (& $tieOf 'gain') -ceq (& $listedOf $tieList 'gain')['blockSha256'] -and
+            (& $tieOf 'bus') -ceq (& $listedOf $tieList 'bus')['blockSha256'] -and (& $tieOf 'gain') -cne (& $tieOf 'bus') })
+    # A sweep of one plugin: only that plugin is installed and learned, one entry in the learn job, swept on it
+    $sw = Invoke-HarnessSuite @listE2e -List (Test-HarnessListRequest -Bound @{ List = 'params'; ListPlugin = 'gain'; ListParam = 'Gain'; ListValues = '0,0.5,1' }) -SelfTestHooks $hooks -KeepWork -InformationVariable swSaid
+    $swJob = try { ConvertFrom-FakeLua ([IO.File]::ReadAllText((Join-Path @(Get-ChildItem -LiteralPath (Join-Path $listE2e.ResultDir 'work') -Directory | Sort-Object Name)[-1].FullName '_learn-1.job.lua'))) } catch { @{ fx = @() } }
+    $swGain = & $listedOf $sw 'gain'
+    $swValues = { param($Sweep) @($Sweep['values'] | ForEach-Object { "$($_['normalized'])/$($_['readNormalized'])/$($_['display'])/$($_['displayUsable'])" }) -join ',' }
+    Write-Case "listing end to end: -ListPlugin gain -ListParam Gain -ListValues 0,0.5,1 sets and reads each value on a fresh instance ($(try { & $swValues @($swGain['sweeps'])[0] } catch { 'no sweep' }))" $false (
+        & $holds { $sw.verdict -ceq 'PASS' -and @($swGain['sweeps']).Count -eq 1 -and @($swGain['sweeps'])[0]['name'] -ceq 'Gain' -and @($swGain['sweeps'])[0]['index'] -eq 0 -and
+            (& $swValues @($swGain['sweeps'])[0]) -ceq '0/0/0.00/True,0.5/0.5/0.50/True,1/1/1.00/True' -and ($sw.listing['values'] -join ',') -ceq '0,0.5,1' -and (& $paramsRow $sw).detail -ceq '1 plugin listed, 7 parameters, 1 swept at 3 values' })
+    Write-Case "listing end to end: -ListPlugin picks what is installed and learned: one plugin in the result, one entry in the learn job, the sweep on it ($(@($sw.plugins | ForEach-Object { $_['name'] }) -join ', '))" $false (
+        & $holds { @($sw.plugins).Count -eq 1 -and @($sw.listing['plugins']).Count -eq 1 -and @($swJob['fx']).Count -eq 1 -and $swJob['fx'][0]['list'] -and (@($swJob['fx'][0]['sweep']['names']) -join ',') -ceq 'Gain' -and
+            (@($swJob['fx'][0]['sweep']['values']) -join ',') -ceq '0,0.5,1' })
+    $swLines = @($swSaid | ForEach-Object { [string]$_.MessageData })
+    Write-Case "listing end to end: the console says what is listed and swept before the launch, then the params row and a line per plugin ($(@($swLines | Where-Object { $_ -clike '*swept*' }) -join ' | '))" $false (
+        $swLines -ccontains 'listing the parameters of 1 plugin in one learn launch (1 parameter swept at 3 values)' -and $swLines -ccontains '  [PASS] params  1 plugin listed, 7 parameters, 1 swept at 3 values' -and
+        $swLines -ccontains '    gain: 7 parameters (3 of them REAPER''s own, 2 settable), 1 name used more than once, 1 swept at 3 values')
+    $nf = & $listRun @{ List = 'params'; ListPlugin = 'gain'; ListParamFile = (& { $f = Join-Path $Work 'sweep-names.txt'; [IO.File]::WriteAllText($f, "Mode`nVolume`n"); $f }) }
+    Write-Case "listing end to end: a swept name the plugin does not have is notFound and the params row FAILs ($((& $paramsRow $nf).detail))" $true (
+        & $holds { $nf.verdict -ceq 'FAIL' -and (& $paramsRow $nf).status -ceq 'FAIL' -and (@((& $listedOf $nf 'gain')['notFound']) -join ',') -ceq 'Volume' -and @((& $listedOf $nf 'gain')['sweeps']).Count -eq 1 -and
+            @((& $listedOf $nf 'gain')['sweeps'])[0]['values'].Count -eq 5 -and (& $rowOf $nf 'learn').status -ceq 'PASS' })
+    $factsOf = { param($Res) try { $f = (& $paramsRow $Res).facts; "plugins=$($f.plugins) listed=$($f.listed) params=$($f.params) sweeps=$($f.sweeps) notFound=$(@($f.notFound) -join '|')" } catch { 'no facts' } }
+    Write-Case "listing end to end: the facts of the params row count the plugins, those listed, their parameters, the sweeps and the names not found ($(& $factsOf $lr); $(& $factsOf $nf))" $false (
+        & $holds { (& $factsOf $lr) -ceq "plugins=3 listed=3 params=$((@($lr.listing['plugins'] | ForEach-Object { [int]$_['paramCount'] }) | Measure-Object -Sum).Sum) sweeps=0 notFound=" -and
+            (& $factsOf $sw) -ceq 'plugins=1 listed=1 params=7 sweeps=1 notFound=' -and (& $factsOf $nf) -ceq 'plugins=1 listed=1 params=7 sweeps=1 notFound=Volume' })
+    $whyOf = @{ ListError = '*the driver stopped listing: driver.lua:1: listing stopped*'; SweepError = '*the driver stopped sweeping: driver.lua:1: sweep stopped*' }
+    foreach ($fault in 'ListError', 'ListCountEnd', 'SweepNoAdd', 'SweepOtherName', 'SweepOtherBinary', 'SweepError') {
+        & $setList @{ $fault = $true }
+        $fr = & $listRun @{ List = 'params'; ListPlugin = 'gain'; ListParam = 'Mode'; ListValues = '0,1' }
+        Write-Case "listing end to end: $fault makes the listing of that plugin INCOMPLETE, not listed, with the reason; no parameter of it in the result ($((& $paramsRow $fr).detail))" $true (
+            & $holds { $fr.verdict -ceq 'INCOMPLETE' -and (& $paramsRow $fr).status -ceq 'INCOMPLETE' -and -not (& $listedOf $fr 'gain')['listed'] -and (& $listedOf $fr 'gain')['why'] -clike 'not listed: *' -and
+                @((& $listedOf $fr 'gain')['params']).Count -eq 0 -and (& $rowOf $fr 'learn').status -ceq 'PASS' -and
+                (-not $whyOf.ContainsKey($fault) -or (& $listedOf $fr 'gain')['why'] -clike $whyOf[$fault]) })
+    }
+    foreach ($fault in 'ListDrop', 'ListInexact') {
+        & $setList @{ $fault = $true }
+        $fr = & $listRun @{ List = 'params'; ListPlugin = 'gain' }
+        Write-Case "listing end to end: $fault makes one parameter unclean: INCOMPLETE, the plugin listed with every parameter, that one not settable ($((& $paramsRow $fr).detail))" $true (
+            & $holds { $fr.verdict -ceq 'INCOMPLETE' -and (& $paramsRow $fr).status -ceq 'INCOMPLETE' -and (& $listedOf $fr 'gain')['listed'] -and @((& $listedOf $fr 'gain')['params']).Count -eq 7 -and
+                (& $listedOf $fr 'gain')['why'] -ceq '1 parameter could not be read cleanly' -and @((& $listedOf $fr 'gain')['params'])[1]['problem'] -and @((& $listedOf $fr 'gain')['params'] | Where-Object { $_['problem'] }).Count -eq 1 })
+    }
+    # A plugin learn could not add: the learn row FAILs, that plugin is not listed and points at it, the others are listed
+    $noBus = $plugins.Clone(); $noBus.Remove('VST3: Fixture Bus (Fixture Audio)')
+    & $setList @{ Plugins = $noBus }
+    $lf = & $listRun
+    Write-Case "listing end to end: a plugin learn could not add makes the learn row FAIL; it is not listed, pointing at the learn row; the others are listed ($((& $paramsRow $lf).detail))" $true (
+        & $holds { $lf.verdict -ceq 'FAIL' -and (& $rowOf $lf 'learn').status -ceq 'FAIL' -and -not (& $listedOf $lf 'bus')['listed'] -and (& $listedOf $lf 'bus')['why'] -ceq 'not listed: its learn entry did not pass (see the learn row)' -and
+            (& $listedOf $lf 'gain')['listed'] -and (& $listedOf $lf 'delay')['listed'] -and (& $paramsRow $lf).status -ceq 'INCOMPLETE' })
+    # A listing checks the bundles of the plugins it lists only: one of another plugin missing does not skip it
+    & $setList
+    $gainOnlyDir = Join-Path $Work 'list-plugins-gain-only'
+    $null = New-Item -ItemType Directory -Force -Path $gainOnlyDir
+    Copy-Item -LiteralPath (Join-Path $listE2e.PluginDir 'Fixture Gain.vst3') -Destination $gainOnlyDir -Recurse
+    $gainOnlyCfg = $listE2e.Clone(); $gainOnlyCfg.PluginDir = $gainOnlyDir
+    $oneOk = & $listRun @{ List = 'params'; ListPlugin = 'gain' } $gainOnlyCfg
+    $allSkip = & $listRun @{ List = 'params' } $gainOnlyCfg
+    Write-Case "listing end to end: with the bus bundle missing, -ListPlugin gain lists gain (PASS) and listing every plugin is SKIPPED ($($oneOk.verdict) $(@($oneOk.skipReasons) -join '; '); $($allSkip.verdict) $(@($allSkip.skipReasons) -join '; '))" $true (
+        & $holds { $oneOk.verdict -ceq 'PASS' -and @($oneOk.skipReasons).Count -eq 0 -and @($oneOk.listing['plugins']).Count -eq 1 -and (& $listedOf $oneOk 'gain')['listed'] -and
+            $allSkip.verdict -ceq 'SKIPPED' -and @($allSkip.skipReasons -match '^plugin bus: bundle Fixture Bus\.vst3 not found').Count -eq 1 })
+    # A round that breaks before its listing is read still says what it listed: no plugin, and why
+    $realListing = Get-Command Get-HarnessParamListing -CommandType Function
+    $listingBreaks = { param($ctx, $request, [string]$notRead = '') if (-not $notRead) { throw 'the listing broke' }; & $realListing -Ctx $ctx -Request $request -NotRead $notRead }.GetNewClosure()
+    $broke = Invoke-WithSuiteCommand 'Get-HarnessParamListing' $listingBreaks { & $listRun }
+    Write-Case "listing end to end: a round that breaks before its listing is read is INCOMPLETE, and its listing has every plugin not listed, saying why ($(& $rowIds $broke))" $true (
+        & $holds { $broke.verdict -ceq 'INCOMPLETE' -and (& $rowIds $broke) -ceq 'learn,round-error' -and (& $rowOf $broke 'round-error').detail -clike '*the listing broke' -and
+            @($broke.listing['plugins']).Count -eq 3 -and @($broke.listing['plugins'] | Where-Object { $_['listed'] -or $_['why'] -cne 'not listed: the round stopped before the listing was read' }).Count -eq 0 })
+} finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
 
 # ---- what a round counts as left behind ----
 $oneScenario = @{ Only = '^chain-offline-48000$'; NoNegative = $true }

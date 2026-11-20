@@ -50,6 +50,11 @@ Start from [CONFIG.md](CONFIG.md) and check every change without REAPER:
 pwsh D:\tools\reaper-harness\doctor.ps1 -Config tests\reaper-harness.json
 ```
 
+`doctor.ps1` never starts REAPER, so it cannot tell you the names of a plugin's parameters. To write `params`,
+list them with `run.ps1 -List params` (one launch of REAPER under every guard of a run, no scenario run;
+[USAGE.md](USAGE.md#listing-parameters)): every parameter's name, value and display text, and with a sweep the
+values that give the display texts you want. Its result file ends in `-list-params.json`.
+
 What follows walks through [`examples/scvb/reaper-harness.json`](../examples/scvb/reaper-harness.json). The plugins
 there are an input plugin (last on each vocal track), an output plugin (first on the vocal bus) and a read-only
 monitor. Instances find each other at run time by a group number.
@@ -233,7 +238,7 @@ pwsh D:\tools\reaper-harness\run.ps1 -Config tests\reaper-harness.json -CfgDir D
 - `-PluginDir` is your build output; the harness copies the bundles into the private directory and proves in every
   round that REAPER loaded those copies, not an installed release of the same plugin.
 - The console prints one line per row and the result file name. [RESULTS.md](RESULTS.md) describes the file; it
-  holds no local paths, only bundle names and hash prefixes.
+  holds no local paths, only bundle names and hash prefixes. Its `listing` is null except in a parameter listing.
 - PASS is the only green. INCOMPLETE means no conclusion (something could not run or could not be proven); it is
   never a PASS and never something to loosen criteria for. Run again first: REAPER's evaluation reminder can make a
   single launch INCOMPLETE now and then. SKIPPED means the suite did not start at all (a skip marker, another

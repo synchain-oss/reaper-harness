@@ -319,6 +319,9 @@ other tracks, other plugins and file paths in it never reach the console, the lo
 itself only goes into projects in the work directory. A JSFX shipped with the tool is copied into the private
 configuration directory and checked by the name REAPER shows and by its path there.
 
+A [parameter listing](#listing-parameters) is read in the learn launch, after the project is saved; the blocks
+learned are the same with or without it.
+
 A path in a recorded title is masked from its drive letter, `\\` or `//` up to the next double quote or the end of the
 title: a path can hold spaces, and a user name is often right after one. Everything else that reaches a result file or
 the console (reasons, exception messages, the facts of a row, usage errors) is masked the same way, see
@@ -327,6 +330,24 @@ the console (reasons, exception messages, the facts of a row, usage errors) is m
 The self-test exercises this with real message boxes. A session without a desktop (a service, for example some CI
 runners) cannot show them: the self-test then states that those cases did not run. The classification in the table
 above is a pure function and is tested everywhere.
+
+## Listing parameters
+
+`run.ps1 -List params` has no launch path of its own. It is a round of the same run with only the learn launch in it:
+every guard, lock, the watchdog and the module check apply, the default resource directory is listed before and
+after, and `-Only`, `-NoNegative` and `-Repeat` are refused with it. The driver reads the parameters after the learn
+project is saved, so the blocks REAPER saved are those of a plain learn, and the listing itself only reads. A sweep
+sets values only on an instance of its own, added on a track of its own at the end of the project and deleted again;
+that instance must show the name of the plugin learned and an `fx_ident` naming the private copy and the class ID from
+`moduleinfo.json` (a JSFX: its path in the private `Effects` directory), or the plugin is not listed. The project is
+not saved again; REAPER's save prompt on quitting is answered No as always ([dialogs](#dialogs)).
+
+A plugin that was not listed, or whose parameters were not all read cleanly, is INCOMPLETE, never PASS; a swept name
+the plugin does not have is FAIL. An error in the listing of one plugin is that plugin's, not the learn row's.
+Parameter names and display texts come from the plugin and are masked like any other text; a parameter with a path in
+its name or display text is marked `masked` and is never `settable`. The listing reads nothing of REAPER's plugin
+scan cache: names, class IDs and versions come from the plugin as REAPER loaded it and from `moduleinfo.json`, as in
+any run.
 
 ## No evidence is not a pass
 
@@ -346,6 +367,12 @@ above is a pure function and is tested everywhere.
   the tool, and then there is no binary to prove: learning does not ask the module list at all, its facts say
   `modules: NoBinary`, and each JSFX is proven by its path in the private configuration directory (`fx_ident` and
   the saved block) instead.
+- A parameter listing proves each plugin it lists, or that plugin is `INCOMPLETE`, never `PASS`: its learn entry did
+  not pass, the driver stopped listing it with an error, the count of its parameters is missing, not a whole number
+  or changed while it was read, a parameter has no name, an instance to sweep could not be added, is not the plugin
+  learned (its name, its binary and class ID, or its JSFX path) or reports no parameter index, a swept value was not
+  read back as a number from 0 to 1 with its display text, or a parameter's value is not from 0 to 1, its display
+  text is missing or its name is not exact. With no plugin to list the `params` row is `INCOMPLETE` too.
 
 ## Scripts
 

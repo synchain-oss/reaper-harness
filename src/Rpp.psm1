@@ -45,6 +45,12 @@ function Format-Number([double]$Value) { $Value.ToString('R', $script:Inv) }
 # render's manifest hashes this text, which ties what was read back to what was rendered.
 function Get-HarnessBlockText([string[]]$BlockLines) { -join @($BlockLines | ForEach-Object { "      $_`n" }) }
 
+# The SHA-256 of that text (UTF-8 without BOM), 64 lower-case hex digits: what a kept render's manifest and a parameter
+# listing record as blockSha256, so the two can be compared
+function Get-HarnessBlockTextSha([string[]]$BlockLines) {
+    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.UTF8Encoding]::new($false).GetBytes((Get-HarnessBlockText $BlockLines)))).ToLowerInvariant()
+}
+
 # Whether an FX is written bypassed: its own flag, or the scenario's bypass ('*' = every FX, or plugin ids)
 function Test-HarnessFxBypassed($Effect, [string[]]$Bypass = @()) { [bool]($Effect.Bypass -or ('*' -cin $Bypass) -or ($Effect.Plugin -cin $Bypass)) }
 
@@ -261,4 +267,4 @@ function Get-HarnessFxBlocks([Parameter(Mandatory)][AllowEmptyString()][string]$
 }
 
 Export-ModuleMember -Function New-HarnessProjectText, New-HarnessLearnProjectText, Get-HarnessFxBlocks, ConvertFrom-HarnessRppTokens, Get-HarnessFolderFlags, ConvertTo-HarnessLuaTable,
-    ConvertTo-HarnessLuaValue, Write-HarnessText, Get-HarnessBlockText, Test-HarnessFxBypassed
+    ConvertTo-HarnessLuaValue, Write-HarnessText, Get-HarnessBlockText, Get-HarnessBlockTextSha, Test-HarnessFxBypassed

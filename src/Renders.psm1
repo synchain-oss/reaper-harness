@@ -114,7 +114,7 @@ function Get-HarnessFxFacts([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$L
                     track = $t.Name; index = $i; plugin = $fx.Plugin; bundle = ($vst ? $vst.Bundle : $null); jsfx = ($js ? $js.Jsfx : $null); name = ($read ? $read.Name : $null)
                     sha256 = ($vst ? $vst.Sha256.Substring(0, 12) : ($js ? $js.Sha256.Substring(0, 12) : $null)); bypass = (Test-HarnessFxBypassed $fx $Bypass)
                     state = ($fx.State ? $fx.State : $null); stateSha256 = (($fx.State -and $Ctx.States.Contains($sk)) ? $Ctx.States[$sk].Sha : $null)
-                    blockSha256 = ($Ctx.Blocks.ContainsKey($fx.Variant) ? [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.UTF8Encoding]::new($false).GetBytes((Get-HarnessBlockText $Ctx.Blocks[$fx.Variant])))).ToLowerInvariant() : $null)
+                    blockSha256 = ($Ctx.Blocks.ContainsKey($fx.Variant) ? (Get-HarnessBlockTextSha $Ctx.Blocks[$fx.Variant]) : $null)
                     params = @(foreach ($pn in $fx.Params.get_Keys()) {
                             $back = ($read -and $read.Params.Contains($pn)) ? $read.Params[$pn] : $null
                             [ordered]@{ name = $pn; normalized = $fx.Params[$pn].Normalized; display = $fx.Params[$pn].Display; readNormalized = ($back ? $back.Read : $null); readDisplay = ($back ? $back.Display : $null) }

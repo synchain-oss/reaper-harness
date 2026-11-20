@@ -6,6 +6,16 @@ stays backward compatible or raises that number, and the entry of that version s
 
 ## Unreleased
 
+- `run.ps1 -List params` lists the parameters of the plugins of a configuration instead of testing: one launch of
+  REAPER under every guard of a run, in which learning reads, after the save, each parameter's index, name, normalized
+  value, display text and REAPER's identifier, and tells which can go into `params` (`settable`: not a name used
+  twice, not one of REAPER's own Bypass, Wet and Delta, nothing masked). `-ListPlugin` picks plugins; `-ListParam` or
+  `-ListParamFile` with `-ListValues` sweep parameters of one plugin on an instance of their own and read back the
+  value and display text of each value. A row `params` judges the listing; the result file
+  (`...-list-params.json`) holds it in `listing`, a new field that is null in every other run, so `schema` stays 1.
+  The listing's `blockSha256` (the plugin's block at its defaults) equals the `blockSha256` of a kept render's manifest
+  for an FX of that plugin with no `params` and no `state`, when the plugin saves the same state every time (some store
+  a time or a random id).
 - A track can play a WAV file of your own instead of the test signal (`layouts.<id>.tracks[].file`): pcm16, pcm24 or
   float32, 1 or 2 channels, at the rate of every scenario that uses it. It is checked before REAPER starts, copied into
   the work directory each round (the copy's hash and header checked again; a copy that cannot be read back or whose

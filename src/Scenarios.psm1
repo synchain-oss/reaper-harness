@@ -99,6 +99,7 @@ function New-HarnessContext {
         Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new(); ToolJsfx = $ToolJsfx
         SourceCopies = @{} # file key -> the checked copy of this round (Copy-HarnessSourceFiles)
         LearnReads = @{} # variant key -> what the learn launch read back (Invoke-HarnessLearn)
+        Listing = @{} # variant key -> what a parameter listing read of it (Invoke-HarnessLearn -WithListing)
         LearnBatchOf = @{}; LearnBatchCount = 0 # variant key -> the learn batch planned to learn it, and how many there are
         Retries = [Collections.Generic.List[object]]::new() # launches started once more (see Invoke-HarnessLaunch)
         Started = [Collections.Generic.List[object]]::new() # every process started: Pid, StartUtc

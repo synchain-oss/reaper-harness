@@ -39,6 +39,8 @@ $script:StatePattern = '^[a-z0-9][a-z0-9-]{0,39}$'
 $script:TrackNamePattern = '^[^"\u0000-\u001f]{1,64}$'
 $script:ChannelPattern = '^(L|R|[1-9][0-9]?)$'
 $script:FieldPattern = '^[A-Za-z_][A-Za-z0-9_]{0,63}$'
+# A parameter name a configuration can set (a parameter listing says which names match it)
+$script:ParamNamePattern = '^[^\u0000-\u001f]{1,128}$'
 # Stem files are named after their track: plain ASCII without characters Windows refuses, not ending in a space or a dot
 # (a name of one character included, so "." is no stem name)
 $script:StemNamePattern = '^(?:[A-Za-z0-9()+_-]|[A-Za-z0-9()+_.-][A-Za-z0-9 ()+_.-]*[A-Za-z0-9()+_-])$'
@@ -56,7 +58,7 @@ function New-HarnessSpec {
     $mode = SStr -Enum $script:Modes -Doc 'offline: full-speed offline render; 1x: REAPER''s 1x offline render, at real-time speed but still offline; online: online render, in real time. Whether a plugin is told it runs offline depends on REAPER''s preference to inform plugins of the offline rendering state, which the tool does not set'
     $range = SArr (SNum -400 24) -Min 2 -Max 2 -Doc '[min, max] in dB'
     $defs.paramValue = SAny @((SNum 0 1), (SObj ([ordered]@{ normalized = (SNum 0 1); display = (SStr '^[^\u0000-\u001f]{0,128}$') }) @('normalized'))) 'a normalized value 0..1, or { normalized, display }'
-    $params = SMap '^[^\u0000-\u001f]{1,128}$' (SRef paramValue) -Doc 'parameter name -> value, set by name and read back by the Lua driver'
+    $params = SMap $script:ParamNamePattern (SRef paramValue) -Doc 'parameter name -> value, set by name and read back by the Lua driver'
     $relPath = SStr '^[^\u0000-\u001f]{1,260}$' -Doc 'a path relative to the configuration file, inside its directory'
     $defs.stateSource = SAny @(
         (SObj ([ordered]@{ template = $relPath; track = (SStr $script:TrackNamePattern -Doc 'name of the track in the template project'); fx = (SInt 1 1000 -Doc 'which FX of that track, counted from 1') }) @('template', 'track', 'fx'))
@@ -217,6 +219,7 @@ function New-HarnessSpec {
 
 $script:Spec = New-HarnessSpec
 function Get-HarnessConfigSpec { $script:Spec }
+function Get-HarnessParamNamePattern { $script:ParamNamePattern }
 
 # Negative variant of a kind: the same fields without matrix, keep and variants, plus expect and expectDetail (both required).
 function Get-NegativeKindSpec([string]$Kind) {
@@ -1084,4 +1087,4 @@ function Read-HarnessConfigExtensions([Parameter(Mandatory)][string]$Path) {
 }
 
 Export-ModuleMember -Function Read-HarnessConfig, Read-HarnessConfigExtensions, Test-HarnessConfigData, Get-HarnessConfigSpec, ConvertTo-HarnessJsonSchema, Get-HarnessBuiltinNegatives,
-    Get-HarnessConfigDefaults, Get-HarnessDryLayout, Stop-Usage, Find-RoutingCycle, ConvertTo-ChannelNumber
+    Get-HarnessConfigDefaults, Get-HarnessDryLayout, Stop-Usage, Find-RoutingCycle, ConvertTo-ChannelNumber, Get-HarnessParamNamePattern
