@@ -80,15 +80,19 @@ Some parameters cannot go into `params`, and `settable` is false for them:
 
 - a name used by more than one parameter: learning sets the first of them, so the others have `sameNameAs` (the index
   of the first) and are not settable;
-- REAPER's own parameters: REAPER adds `Bypass`, `Wet` and `Delta` at the end of every plugin (identifiers `:bypass`,
-  `:wet`, `:delta`); they are `host` and are set through `bypass` of a variant, not through `params`. Without
-  identifiers, the last three are taken as REAPER's when they are named exactly so (`hostBy` says which rule applied);
+- REAPER's own parameters: REAPER adds `Bypass`, `Wet` and `Delta` at the end of every plugin; REAPER 7.82 gives them the
+  identifiers `<index>:bypass`, `<index>:wet` and `<index>:delta`, and a plugin's own parameters `<index>:<number>`
+  ([validation record](validation/2026-11-20-param-listing.md)). They are `host` and are set through `bypass` of a
+  variant, not through `params`. Without identifiers, the last three are taken as REAPER's when they are named exactly
+  so (`hostBy` says which rule applied);
 - a name longer than 128 characters or with a control character, a name or display text with a path in it (masked),
   and a parameter that could not be read cleanly (`problem`).
 
 Listing and sweeps run in the learn launch, within `limits.learnTimeoutSec` ([CONFIG.md](CONFIG.md#limits)): raise it
-for a plugin with thousands of parameters or a large sweep. How long a listing takes on REAPER has not been measured
-yet.
+for a plugin with thousands of parameters or a large sweep. Measured on REAPER 7.82: the launch of a listing took 6.1 s
+for plugins with 17, 86 and 614 parameters, with a sweep of two parameters at five values too, as long as a learn launch
+of the same plugin with no listing; a launch that REAPER's evaluation reminder ended was done once more and took 10.1 s
+([validation record](validation/2026-11-20-param-listing.md)). A plugin with thousands of parameters was not listed.
 
 ## 4. Run
 
