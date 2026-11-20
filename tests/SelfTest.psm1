@@ -1534,9 +1534,10 @@ end
     # entry's and not the step's, and a sweep works on a fresh instance of its own that it removes again
     $driverAll = [IO.File]::ReadAllText((Join-Path $RepoRoot 'lua/driver.lua'))
     $saveAt = $learnStep.IndexOf('Main_SaveProjectEx')
-    & $add 'driver: the learn step lists and sweeps only after the save, each call through pcall, an error reported as the entry''s lerror' $true (
+    & $add 'driver: the learn step lists and sweeps only after the save, each call through pcall, an error reported as the entry''s lerror (listing) or serror (sweep)' $true (
         $saveAt -gt 0 -and $learnStep.IndexOf('pcall(listParams, ') -gt $saveAt -and $learnStep.IndexOf('pcall(sweepParams, ') -gt $saveAt -and
-        @([regex]::Matches($driverAll, '(?<!function )\b(listParams|sweepParams)\(')).Count -eq 0 -and @([regex]::Matches($learnStep, 'if not ok then put\("fx" \.\. n \.\. "_lerror", err\) end')).Count -eq 2)
+        @([regex]::Matches($driverAll, '(?<!function )\b(listParams|sweepParams)\(')).Count -eq 0 -and @([regex]::Matches($learnStep, 'pcall\(listParams, [^\n]*\n\s*if not ok then put\("fx" \.\. n \.\. "_lerror", err\) end')).Count -eq 1 -and
+        @([regex]::Matches($learnStep, 'pcall\(sweepParams, [^\n]*\n\s*if not ok then put\("fx" \.\. n \.\. "_serror", err\) end')).Count -eq 1)
     $listBody = [regex]::Match($driverAll, '(?s)\nlocal function listParams\(key, track, idx\)\r?\n.*?\r?\nend\r?\n').Value
     & $add 'driver: a listing only reads (it sets nothing), and reads the count once more after the last parameter' $true (
         $listBody -and $listBody -cnotmatch 'Set\w*\(' -and $listBody -cmatch '(?s)for p = 0, count - 1 do.*\n    end\r?\n    put\(key \.\. "lcount_end", reaper\.TrackFX_GetNumParams\(track, idx\)\)')
@@ -1954,8 +1955,8 @@ function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'list request: a value given twice (0 and -0 too) is a usage error' $true ((Test-Usage { & $req (& $sweepOf @{ ListValues = '0.5,0.25,0.5' }) } '*0.5 is given twice*') -and (Test-Usage { & $req (& $sweepOf @{ ListValues = '0,-0' }) } '*is given twice*'))
     $values = { param([int]$n) (@(for ($i = 0; $i -lt $n; $i++) { ($i / 1000).ToString([Globalization.CultureInfo]::InvariantCulture) }) -join ',') }
     & $add 'list request: 101 values are fine, 102 are a usage error' $true (@((& $req (& $sweepOf @{ ListValues = (& $values 101) }))['Values']).Count -eq 101 -and (Test-Usage { & $req (& $sweepOf @{ ListValues = (& $values 102) }) } '*at most 101 values*'))
-    & $add 'list request: a name of 256 characters is fine; 257, an empty one or one with a control character is a usage error' $true (
-        @((& $req (& $sweepOf @{ ListParam = ('n' * 256) })).Params)[0].Length -eq 256 -and (Test-Usage { & $req (& $sweepOf @{ ListParam = ('n' * 257) }) } '*parameter name 1 to sweep is empty, longer than 256*') -and
+    & $add 'list request: a name of 128 characters (as a configuration takes) is fine; 129, an empty one or one with a control character is a usage error' $true (
+        @((& $req (& $sweepOf @{ ListParam = ('n' * 128) })).Params)[0].Length -eq 128 -and (Test-Usage { & $req (& $sweepOf @{ ListParam = ('n' * 129) }) } '*parameter name 1 to sweep is empty, longer than 128*') -and
         (Test-Usage { & $req (& $sweepOf @{ ListParam = '' }) } '*parameter name 1 to sweep is empty*') -and (Test-Usage { & $req (& $sweepOf @{ ListParam = "a`tb" }) } '*control character*') -and
         (Test-Usage { & $req (& $sweepOf @{ ListParam = "ab`n" }) } '*control character*'))
     & $add 'list request: -ListParam and -ListParamFile together are a usage error' $true (Test-Usage { & $req (& $sweepOf @{ ListParamFile = 'x.txt' }) } '*-ListParam and -ListParamFile do not go together*')
@@ -2003,6 +2004,9 @@ function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
         (& $whole (& $mut { param($r) $r.fx1_lcount = '-1' }) '*not a whole number*') -and (& $whole (& $mut { param($r) $r.fx1_lcount = '65537'; $r.fx1_lcount_end = '65537' }) '*from 0 to 65536'))
     & $add 'listing: a count at the end other than at the start is a problem of the whole listing' $true (& $whole (& $mut { param($r) $r.fx1_lcount_end = '4' }) "the parameter count changed while it was read (3, then '4')")
     & $add 'listing: the driver stopping with an error is a problem of the whole listing, with its message' $true (& $whole (& $mut { param($r) $r.fx1_lerror = 'driver.lua:9: boom' }) 'the driver stopped listing: driver.lua:9: boom')
+    & $add 'listing: the driver stopping with an error while sweeping is a problem of the whole listing, next to an error while listing' $true (
+        (& $whole (& $mut { param($r) $r.fx1_serror = 'driver.lua:9: sweep boom' }) 'the driver stopped sweeping: driver.lua:9: sweep boom') -and
+        (& $whole (& $mut { param($r) $r.fx1_lerror = 'driver.lua:8: list boom'; $r.fx1_serror = 'driver.lua:9: sweep boom' }) '*stopped listing: driver.lua:8: list boom*stopped sweeping: driver.lua:9: sweep boom*'))
     $bad1 = { param([scriptblock]$Edit) $res = & $mut $Edit; [pscustomobject]@{ Res = $res; P = ($res.Params.Count -eq 3 ? $res.Params[1] : $null) } }
     $noValue = & $bad1 { param($r) $r.Remove('fx1_l1_value') }
     $high = & $bad1 { param($r) $r.fx1_l1_value = '1.200000000' }
@@ -2040,8 +2044,8 @@ function Get-ListingCases([string]$Tmp, [string]$RepoRoot) {
         -not $otherIndex.Problem -and (& $hostAt $otherIndex) -ceq '' -and @($otherIndex.HostBy).Count -eq 0 -and @($otherIndex.Params | Where-Object { $_.settable }).Count -eq 4)
     & $add "listing: a plugin's own ident '<index>:<number>' (its VST3 parameter ID) is not REAPER's own, at its own index too ('15:97695915'; host at $(& $hostAt $asReaper))" $true (
         -not $asReaper.Problem -and @($asReaper.Params | Where-Object { $_.index -lt 611 -and $_.host }).Count -eq 0 -and $asReaper.Params[15].ident -ceq '15:97695915' -and $asReaper.Params[15].settable)
-    $otherForm = & $read (& $base @((& $one 0 'Gain' -Ident '0:gain'), (& $one 1 'Wet' -Ident '1:Wet'), (& $one 2 'Delta' -Ident ':DELTA'), (& $one 3 'Wet 2' -Ident '3:wetx'), (& $one 4 'Mix' -Ident 'wet')))
-    & $add "listing: an ident with another word, REAPER's word in another case, more after it or no colon is not REAPER's own ('0:gain', '1:Wet', ':DELTA', '3:wetx', 'wet'; host at $(& $hostAt $otherForm))" $true (
+    $otherForm = & $read (& $base @((& $one 0 'Gain' -Ident '0:gain'), (& $one 1 'Wet' -Ident '1:Wet'), (& $one 2 'Delta' -Ident ':DELTA'), (& $one 3 'Wet 2' -Ident '3:wetx'), (& $one 4 'Mix' -Ident 'wet'), (& $one 5 'Wet 3' -Ident "5:wet`n")))
+    & $add "listing: an ident with another word, REAPER's word in another case, more after it (a line break too) or no colon is not REAPER's own ('0:gain', '1:Wet', ':DELTA', '3:wetx', 'wet', '5:wet' and a line break; host at $(& $hostAt $otherForm))" $true (
         -not $otherForm.Problem -and (& $hostAt $otherForm) -ceq '' -and @($otherForm.HostBy).Count -eq 0)
     $noIdent = & $read (& $base @((& $one 0 'Gain' -Ident $null), (& $one 1 'Bypass' -Ident $null), (& $one 2 'Wet' -Ident $null), (& $one 3 'Delta' -Ident $null)))
     $notLast = & $read (& $base @((& $one 0 'Bypass' -Ident $null), (& $one 1 'Wet' -Ident $null), (& $one 2 'Delta' -Ident $null), (& $one 3 'Gain' -Ident $null)))

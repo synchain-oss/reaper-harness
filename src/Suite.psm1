@@ -242,7 +242,8 @@ function Select-HarnessScenarios {
 # do not go with it (-Repeat 1 neither: given is given). A sweep needs exactly one plugin. Invoke-HarnessSuite checks
 # the ids against the configuration.
 $script:ListOptions = 'ListPlugin', 'ListParam', 'ListParamFile', 'ListValues'
-$script:SweepNamePattern = '\A[^\u0000-\u001f]{1,256}\z'
+# A sweep is for writing a configuration: its names follow the configuration's parameter-name rule, anchored with \A..\z
+$script:SweepNamePattern = (Get-HarnessParamNamePattern) -replace '^\^', '\A' -replace '\$$', '\z'
 $script:SweepDefault = 0, 0.25, 0.5, 0.75, 1
 function Test-HarnessListRequest {
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Bound)
@@ -271,7 +272,7 @@ function Test-HarnessListRequest {
         if ($sweep.Count -lt 1 -or $sweep.Count -gt 32) { Stop-Usage "-ListParamFile: 1 to 32 parameter names, one a line (found $($sweep.Count))" }
         $once = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         for ($i = 0; $i -lt $sweep.Count; $i++) {
-            if ($sweep[$i] -cnotmatch $script:SweepNamePattern) { Stop-Usage "parameter name $($i + 1) to sweep is empty, longer than 256 characters or has a control character" }
+            if ($sweep[$i] -cnotmatch $script:SweepNamePattern) { Stop-Usage "parameter name $($i + 1) to sweep is empty, longer than 128 characters or has a control character" }
             if (-not $once.Add($sweep[$i])) { Stop-Usage "parameter name $($i + 1) to sweep is given twice" }
         }
         if ($null -eq $ids -or $ids.Count -ne 1) { Stop-Usage 'a sweep (-ListParam or -ListParamFile) needs exactly one plugin in -ListPlugin' }

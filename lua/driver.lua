@@ -248,7 +248,8 @@ local steps = {}
 -- fx<n>_p<k>=<normalized read back> or missing, fx<n>_p<k>_display=<text read back>; fx<n>_pdc once every
 -- parameter is set (a latency can depend on them). An entry with list = true is listed after the save (listParams),
 -- one with sweep is swept (sweepParams): the saved blocks are those of a plain learn. An error there is that entry's
--- fx<n>_lerror, not the step's. Quitting then brings up the save prompt, which the runner answers No.
+-- fx<n>_lerror (listing) or fx<n>_serror (sweep, so one does not overwrite the other), not the step's. Quitting
+-- then brings up the save prompt, which the runner answers No.
 function steps.learn()
     if job.project then
         openAndWait(job.project)
@@ -305,7 +306,7 @@ function steps.learn()
     for n, e in ipairs(job.fx) do
         if added[n] and e.sweep then
             local ok, err = pcall(sweepParams, "fx" .. n .. "_", e)
-            if not ok then put("fx" .. n .. "_lerror", err) end
+            if not ok then put("fx" .. n .. "_serror", err) end
         end
     end
 end

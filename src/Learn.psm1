@@ -326,7 +326,7 @@ function Invoke-HarnessLearn {
 # Pure function: the listing the driver reported for learn entry Key ("fx<n>_"). Sweep: @{ Names; Values } or $null;
 # Installed: the install row of a VST3 (Binary, Info.Cid), or Jsfx: the row of a JSFX (Ident); SameFile as above.
 # Returns @{ Count; Nparams; Params; Sweeps; NotFound; Unclean; HostBy; Problem }. Problem, and nothing else is kept,
-# when: the driver stopped listing; the count is missing, not a whole number up to 65536 or not the same at the end; a
+# when: the driver stopped listing or sweeping; the count is missing, not a whole number up to 65536 or not the same at the end; a
 # parameter has no name; an instance to sweep was not added, is not the plugin that was learned (its name, binary and
 # class ID, or its JSFX path) or a swept value was not read back. A parameter whose value is not a number from 0 to 1,
 # that has no display text, or whose name is not exact (a control character, or not UTF-8) gets a problem of its own and
@@ -342,6 +342,7 @@ function Read-HarnessParamListing {
     $inv = [Globalization.CultureInfo]::InvariantCulture
     $problems = [Collections.Generic.List[string]]::new()
     if ($Report.ContainsKey("${Key}lerror")) { $problems.Add("the driver stopped listing: $($Report["${Key}lerror"])") }
+    if ($Report.ContainsKey("${Key}serror")) { $problems.Add("the driver stopped sweeping: $($Report["${Key}serror"])") }
     $countText = [string]$Report["${Key}lcount"]
     $count = ($countText -cmatch '^\d{1,5}$' -and [int]$countText -le 65536) ? [int]$countText : -1
     if ($count -lt 0) { $problems.Add("the parameter count '$countText' is not a whole number from 0 to 65536") }
@@ -365,7 +366,7 @@ function Read-HarnessParamListing {
         $exact = [string]$Report["${q}exact"] -ceq 'true'
         if (-not $exact) { $why.Add('its name has a control character or is not UTF-8') }
         $paramId = $Report.ContainsKey("${q}ident") ? [string]$Report["${q}ident"] : $null
-        $byReaper = ($null -ne $paramId) ? ($paramId -cmatch "^(${p})?:(bypass|wet|delta)$") : ($lastThree -and $p -ge $count - 3)
+        $byReaper = ($null -ne $paramId) ? ($paramId -cmatch "\A(${p})?:(bypass|wet|delta)\z") : ($lastThree -and $p -ge $count - 3)
         if ($byReaper) { $null = $hostBy.Add((($null -ne $paramId) ? 'ident' : 'names')) }
         $sameAs = $first.ContainsKey($name) ? $first[$name] : $null
         if ($null -eq $sameAs) { $first[$name] = $p }
