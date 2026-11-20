@@ -31,7 +31,9 @@ param(
     [switch]$NoNegative,
     [string]$BuildLabel = '',
     [switch]$KeepWork,
-    [string]$List = '', # every -List option is a plain string: Test-HarnessListRequest checks them (64), not the binder (1)
+    # Every -List option is a plain string, so Test-HarnessListRequest checks its value (64), not the binder (1). An option
+    # given no value at all (-List as the last argument) is still refused by the binder (1), as every option is.
+    [string]$List = '',
     [string]$ListPlugin = '',
     [string]$ListParam = '',
     [string]$ListParamFile = '',

@@ -367,6 +367,12 @@ any run.
   the tool, and then there is no binary to prove: learning does not ask the module list at all, its facts say
   `modules: NoBinary`, and each JSFX is proven by its path in the private configuration directory (`fx_ident` and
   the saved block) instead.
+- A parameter listing proves each plugin it lists, or that plugin is `INCOMPLETE`, never `PASS`: its learn entry did
+  not pass, the driver stopped listing it with an error, the count of its parameters is missing, not a whole number
+  or changed while it was read, a parameter has no name, an instance to sweep could not be added, is not the plugin
+  learned (its name, its binary and class ID, or its JSFX path) or reports no parameter index, a swept value was not
+  read back as a number from 0 to 1 with its display text, or a parameter's value is not from 0 to 1, its display
+  text is missing or its name is not exact. With no plugin to list the `params` row is `INCOMPLETE` too.
 
 ## Scripts
 

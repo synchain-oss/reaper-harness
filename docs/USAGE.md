@@ -145,6 +145,10 @@ need to.
 A listing (`-List params`) exits like a run: 0 when every plugin was listed cleanly, 1 when a swept name is not a
 parameter of the plugin or learning failed, 2 when a plugin could not be listed or read cleanly.
 
+An option given without its value (`-Config` or `-List` as the last argument, for example) never reaches the tool:
+PowerShell refuses it (`Missing an argument for parameter ...`) and exits 1, not 64. Nothing was started and no result
+file was written.
+
 `doctor.ps1` exits 0 when ready, 2 when the check itself stopped on an unexpected error, 3 when `run.ps1` would be SKIPPED, 64 when refused.
 
 ## Self-test
