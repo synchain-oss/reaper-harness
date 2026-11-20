@@ -1506,12 +1506,14 @@ try {
     Write-Case "listing end to end: the facts of the params row count the plugins, those listed, their parameters, the sweeps and the names not found ($(& $factsOf $lr); $(& $factsOf $nf))" $false (
         & $holds { (& $factsOf $lr) -ceq "plugins=3 listed=3 params=$((@($lr.listing['plugins'] | ForEach-Object { [int]$_['paramCount'] }) | Measure-Object -Sum).Sum) sweeps=0 notFound=" -and
             (& $factsOf $sw) -ceq 'plugins=1 listed=1 params=7 sweeps=1 notFound=' -and (& $factsOf $nf) -ceq 'plugins=1 listed=1 params=7 sweeps=1 notFound=Volume' })
-    foreach ($fault in 'ListError', 'ListCountEnd', 'SweepNoAdd', 'SweepOtherName', 'SweepOtherBinary') {
+    $whyOf = @{ ListError = '*the driver stopped listing: driver.lua:1: listing stopped*'; SweepError = '*the driver stopped sweeping: driver.lua:1: sweep stopped*' }
+    foreach ($fault in 'ListError', 'ListCountEnd', 'SweepNoAdd', 'SweepOtherName', 'SweepOtherBinary', 'SweepError') {
         & $setList @{ $fault = $true }
         $fr = & $listRun @{ List = 'params'; ListPlugin = 'gain'; ListParam = 'Mode'; ListValues = '0,1' }
         Write-Case "listing end to end: $fault makes the listing of that plugin INCOMPLETE, not listed, with the reason; no parameter of it in the result ($((& $paramsRow $fr).detail))" $true (
             & $holds { $fr.verdict -ceq 'INCOMPLETE' -and (& $paramsRow $fr).status -ceq 'INCOMPLETE' -and -not (& $listedOf $fr 'gain')['listed'] -and (& $listedOf $fr 'gain')['why'] -clike 'not listed: *' -and
-                @((& $listedOf $fr 'gain')['params']).Count -eq 0 -and (& $rowOf $fr 'learn').status -ceq 'PASS' })
+                @((& $listedOf $fr 'gain')['params']).Count -eq 0 -and (& $rowOf $fr 'learn').status -ceq 'PASS' -and
+                (-not $whyOf.ContainsKey($fault) -or (& $listedOf $fr 'gain')['why'] -clike $whyOf[$fault]) })
     }
     foreach ($fault in 'ListDrop', 'ListInexact') {
         & $setList @{ $fault = $true }

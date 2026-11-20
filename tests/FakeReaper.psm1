@@ -31,7 +31,8 @@
 #       the first listed entry: ListInexact (the name of parameter 1 is not exact), ListDrop (no display of parameter
 #       1), ListError (the listing stops with an error), ListCountEnd (the count at the end is one more), SweepNoAdd
 #       (the first instance to sweep is not added), SweepOtherName (the instances to sweep show another name),
-#       SweepOtherBinary (their fx_ident names another binary)
+#       SweepOtherBinary (their fx_ident names another binary), SweepError (the sweep stops with an error after its
+#       first instance)
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
 #   ConvertFrom-FakeLua <text>                        reads a job file written by ConvertTo-HarnessLuaTable
 
@@ -492,6 +493,7 @@ function Add-FakeListing($job, $report, $made) {
                 $back = Get-FakeParamValue $fresh $swept[$s - 1]
                 foreach ($kv in "v$k=$(Format-Fake $back)", "v${k}_display=$(Get-FakeDisplay $fresh $swept[$s - 1] $back)", "v${k}_dexact=true") { $report.Add($q + $kv) }
             }
+            if (& $fault 'SweepError') { $report.Add("${key}serror=driver.lua:1: sweep stopped"); break }
         }
         $faulty = $false
     }
