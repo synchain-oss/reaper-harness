@@ -89,7 +89,7 @@ directory. Each line:
 | `variant` | the id of the [variant](CONFIG.md#variants), null without one |
 | `layout`, `kind` | the layout and `render` |
 | `status`, `detail` | the outcome of the row, after keeping: `; not kept: <reason>` when a file could not be moved there, `; kept, but <file> could not be read: <reason>` when a kept file could not be described (its fields stay null from there on); either makes the row INCOMPLETE, a FAIL stays FAIL |
-| `output` | the master: `path` (null when nothing was kept), `sha256` (all 64 hex digits), `frames`, `channels`, `sampleRate`, `format`, `peakDb` (over the finite samples; null when none is above zero), `nanCount`, `infCount` |
+| `output` | the master: `path` (null when nothing was kept), `sha256` (all 64 hex digits, of the whole file: REAPER writes the time of the render into the file, so two renders of identical audio differ here; compare decoded samples to tell whether the audio is the same), `frames`, `channels`, `sampleRate`, `format`, `peakDb` (over the finite samples; null when none is above zero), `nanCount`, `infCount` |
 | `stems` | the same per stem, with `track` first |
 | `render` | `sr`, `block`, `mode`, `channels`, `host` (`anticipativeFx`, `runFxWhenStopped`, `informOfflineState`) |
 | `sources` | per source track of the layout: `track`, `file` (as in `sources` of the result) or null, `signal` (`seconds`, `seed`, `noiseDb`, `sine` with `hz` and `db` or null) or null |
