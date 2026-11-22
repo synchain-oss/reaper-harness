@@ -446,6 +446,15 @@ loses the rest. The row's `facts.tail` gives the tail, the length the files were
 last 100 ms of the master and of each stem (`endPeakDb`: how far the tail decayed; only recorded, never judged). Only
 `render` scenarios and their negative cases have a tail; on other kinds `tailSeconds` is an unknown key.
 
+Measured on REAPER 7.82 (48 kHz, a 180 s stereo file, a tail of 3 s, the JSFX of the tool delaying by 8192 samples
+without reporting it): the master and the stem had exactly 8784000 frames, the end of the file (its last impulse, at its
+last frame) lay 8192 frames into the tail, and what followed was silence; with the effect bypassed the whole tail was
+exactly 0, so the items played their source once. The same held at the blocks 512, 2048 and 333 (none divides the
+length), for a mono file on the two-channel render, with the delay reported as latency (the tail then held nothing of the
+source), and in the render modes `offline`, `1x` and `online`, whose files held the same samples as the offline one. The
+JSFX leaves values of at most 1.5e-16 where its source is exactly 0, so its `endPeakDb` reads -316.478174 and not null
+([validation record](validation/2026-11-22-repeat-report-tail.md)).
+
 ### variants
 
 `"variants": [ ... ]` renders one `render` scenario once per variant: the same layout, with some plugins set

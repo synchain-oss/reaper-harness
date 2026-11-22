@@ -157,11 +157,16 @@ are bit-identical too and would read as a deterministic plugin; with it they FAI
 way. Its line ends `; reported: bit-identical`, or `; reported: not bit-identical, residual ...` with the residual
 peak, its RMS against the reference, where it is largest and where the first difference is;
 `facts.comparison` of the row has the numbers ([RESULTS.md](RESULTS.md#a-row-scenarios)), and with `keep` the
-manifest line has them too, with both renders when they differ ([CONFIG.md](CONFIG.md#keep)). Keep it out of a
-scenario with many [variants](CONFIG.md#variants): each variant renders twice. The comparer looks for the best lag by
+manifest line has them too, with both renders when they differ ([CONFIG.md](CONFIG.md#keep)). One identical pair says
+something about that pair only: a plugin that draws random numbers can render identically once and differently the next
+time (Airwindows Consolidated at its default state was identical in 4 of 13 pairs, [validation
+record](validation/2026-11-22-repeat-report-tail.md#2-a-repeat-that-reports-airwindows-consolidated-at-its-default-state)),
+so render the pair more than once, in scenarios of their own or in more runs, before calling a plugin deterministic.
+Keep it out of a scenario with many [variants](CONFIG.md#variants): each variant renders twice. The comparer looks for the best lag by
 going over the two files 2 x `limits.lagSearch` + 1 times (129 times at the default 64), which takes time on long
 files; the residual itself is measured at the expected lag, so `limits.lagSearch` 0 gives the same residual sooner,
-its best lag then reading 0. The example
+its best lag then reading 0. Measured on two renders of 180 s, stereo, float32, 48 kHz: the comparison took about 28 s at
+the default and 1.5 s with `lagSearch` 0 ([validation record](validation/2026-11-22-repeat-report-tail.md)). The example
 [file-source-variants](../examples/file-source-variants/reaper-harness.json) has such a scenario, next to five
 variants of a plugin compared with dry and a render with a tail.
 
