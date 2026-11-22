@@ -1194,7 +1194,8 @@ Write-Case 'end to end: keep on a scenario that is not a render is a usage error
 # The stand-in's Drift sets one sample of every channel after the bus plugin (frame 100) to the number of the render
 # times 2^-10: two renders through it differ there by exactly 2^-10 (-60.21 dBFS) and nowhere else, while the gain
 # plugin stays deterministic. The delay JSFX at 64 samples, its latency not reported, moves the end of the test signal
-# (24000 frames at 48000 Hz) into a tail of 0.01 s (480 frames).
+# (24000 frames at 48000 Hz) into a tail of 0.01 s (480 frames). In 'aside' the track with the bus plugin is kept out
+# of the master: its stem drifts while the master stays bit-identical.
 $driftStep = [Math]::Pow(2, -10)
 $plainSet = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs }
 $repChange = {
@@ -1208,6 +1209,7 @@ $repChange = {
         louder = [ordered]@{ tracks = @([ordered]@{ name = 'Voice'; source = $true; fx = @([ordered]@{ plugin = 'gain'; params = @{ Trim = 0.75 } }) }) }
         late   = [ordered]@{ tracks = @([ordered]@{ name = 'Voice'; source = $true; fx = @($lateDelay) }) }
         mixed  = [ordered]@{ tracks = @([ordered]@{ name = 'Voice'; source = $true; file = 'sources/voice.wav'; fx = @([ordered]@{ plugin = 'gain' }) }, [ordered]@{ name = 'Pad'; source = $true; signal = @{ seed = 3 } }) }
+        aside  = [ordered]@{ tracks = @([ordered]@{ name = 'Voice'; source = $true; fx = @([ordered]@{ plugin = 'gain' }) }, [ordered]@{ name = 'Side'; source = $true; signal = @{ seed = 3 }; masterSend = $false; fx = @([ordered]@{ plugin = 'bus' }) }) }
     }
     $c.scenarios = @(
         [ordered]@{ id = 'rep-same'; kind = 'render'; layout = 'steady'; compare = 'repeat'; maxDiffDb = 'report' },
@@ -1219,13 +1221,18 @@ $repChange = {
         [ordered]@{ id = 'rep-keep-same'; kind = 'render'; layout = 'steady'; compare = 'repeat'; maxDiffDb = 'report'; keep = $true },
         [ordered]@{ id = 'rep-keep-drift'; kind = 'render'; layout = 'drifty'; compare = 'repeat'; maxDiffDb = 'report'; keep = $true },
         [ordered]@{ id = 'rep-keep-first'; kind = 'render'; layout = 'steady'; compare = 'repeat'; maxDiffDb = 'report'; keep = $true; keepFirst = $true },
+        [ordered]@{ id = 'rep-keep-stem'; kind = 'render'; layout = 'aside'; compare = 'repeat'; maxDiffDb = 'report'; keep = $true; stems = @('Voice', 'Side') },
+        [ordered]@{ id = 'rep-keep-dry'; kind = 'render'; layout = 'louder'; maxDiffDb = 'report'; keep = $true },
+        [ordered]@{ id = 'rep-keep-variant'; kind = 'render'; layout = 'louder'; compare = [ordered]@{ bypass = $true }; maxDiffDb = 'report'; keep = $true },
         [ordered]@{ id = 'tail-delay'; kind = 'render'; layout = 'late'; compare = 'none'; notSilent = $true; tailSeconds = 0.01 },
         [ordered]@{ id = 'tail-bypass'; kind = 'render'; layout = 'late'; compare = 'none'; notSilent = $true; bypass = $true; tailSeconds = 0.01 },
         [ordered]@{ id = 'tail-dry'; kind = 'render'; layout = 'steady'; tailSeconds = 0.01 },
         [ordered]@{ id = 'tail-dry-twin'; kind = 'render'; layout = 'steady' },
         [ordered]@{ id = 'tail-repeat'; kind = 'render'; layout = 'steady'; compare = 'repeat'; maxDiffDb = 'report'; tailSeconds = 0.01 },
+        [ordered]@{ id = 'tail-variant'; kind = 'render'; layout = 'steady'; compare = [ordered]@{ bypass = $true }; maxDiffDb = 'report'; tailSeconds = 0.01 },
         [ordered]@{ id = 'tail-stems'; kind = 'render'; layout = 'pair'; compare = 'none'; stems = @('A', 'B'); tailSeconds = 0.01 },
-        [ordered]@{ id = 'tail-kept'; kind = 'render'; layout = 'mixed'; sr = 44100; compare = 'none'; tailSeconds = 0.1; keep = $true })
+        [ordered]@{ id = 'tail-kept'; kind = 'render'; layout = 'mixed'; sr = 44100; compare = 'none'; tailSeconds = 0.1; keep = $true },
+        [ordered]@{ id = 'tail-keep-late'; kind = 'render'; layout = 'late'; compare = 'none'; notSilent = $true; tailSeconds = 0.01; keep = $true })
     $c.negative = @(
         [ordered]@{ id = 'rep-stems-judged'; kind = 'render'; layout = 'pair'; compare = 'repeat'; maxDiffDb = 'report'; stems = @('A', [ordered]@{ track = 'B'; maxDiffDb = -200 }); expect = 'FAIL'; expectDetail = '\| stem B: identical=no ' },
         [ordered]@{ id = 'rep-judged'; kind = 'render'; layout = 'drifty'; compare = 'repeat'; expect = 'FAIL'; expectDetail = '^identical=no lag=0 ' })
@@ -1252,7 +1259,7 @@ $repRow = { param([string]$RowId) @($repRun.runs[0].scenarios | Where-Object { $
 $repNotPass = @(& $safe { $repRun.runs[0].scenarios | Where-Object { $_.status -cne 'PASS' } | ForEach-Object { "$($_.id)=$($_.status): $($_.detail)" } })
 Write-SafeCase "end to end: report and tail: every row passes, the two negative cases turned red for their reasons" { "$repWhy$(& $rowIds $repRun); $($repNotPass -join ' | ')" } $false {
     $repRun.verdict -ceq 'PASS' -and $repNotPass.Count -eq 0 -and (& $rowIds $repRun) -ceq ('learn,rep-same,rep-drift,rep-stems,rep-alone,rep-variants-a,rep-variants-b,rep-dry,rep-keep-same,rep-keep-drift,rep-keep-first,' +
-        'tail-delay,tail-bypass,tail-dry,tail-dry-twin,tail-repeat,tail-stems,tail-kept,rep-stems-judged,rep-judged') }
+        'rep-keep-stem,rep-keep-dry,rep-keep-variant,tail-delay,tail-bypass,tail-dry,tail-dry-twin,tail-repeat,tail-variant,tail-stems,tail-kept,tail-keep-late,rep-stems-judged,rep-judged') }
 $repWork = & $safe { @(Get-ChildItem -LiteralPath (Join-Path $repMain.ResultDir 'work') -Directory)[-1].FullName }
 $wavIn = { param([string]$Leaf) Read-HarnessWav (Join-Path $repWork $Leaf) }
 $sameRow = & $safe { & $repRow 'rep-same' }
@@ -1313,18 +1320,43 @@ $repKept = [string[]]@(& $safe { Get-ChildItem -LiteralPath $repKeepDir -Recurse
 # The comparison of a line against the one of its row, both as JSON, without first (only the line has it)
 $noFirst = { param($Cmp) $back = ConvertFrom-HarnessJson (ConvertTo-HarnessJsonText -Value $Cmp); $back.Remove('first'); ConvertTo-HarnessJsonText -Value $back }
 $keepSame = & $safe { & $repEntry 'rep-keep-same' }; $keepDrift = & $safe { & $repEntry 'rep-keep-drift' }; $keepForced = & $safe { & $repEntry 'rep-keep-first' }
-Write-SafeCase "end to end: report and keep: two identical renders keep only the second, comparison.first is null, the first stays a work file; two that differ keep both; keepFirst keeps both anyway" { "$($repKept -join ', ')" } $false {
-    ($repKept -join ',') -ceq 'manifest.jsonl,run1/rep-keep-drift-first.wav,run1/rep-keep-drift.wav,run1/rep-keep-first-first.wav,run1/rep-keep-first.wav,run1/rep-keep-same.wav,run1/tail-kept.wav' -and
+Write-SafeCase "end to end: report and keep: two identical renders keep only the second, comparison.first is null, the first stays a work file; two that differ keep both; keepFirst keeps both anyway; a stem that differs keeps the first with its stems; against dry or a variant only the render is kept" { "$($repKept -join ', ')" } $false {
+    ($repKept -join ',') -ceq ('manifest.jsonl,run1/rep-keep-drift-first.wav,run1/rep-keep-drift.wav,run1/rep-keep-dry.wav,run1/rep-keep-first-first.wav,run1/rep-keep-first.wav,run1/rep-keep-same.wav,' +
+        'run1/rep-keep-stem-first-stem-Side.wav,run1/rep-keep-stem-first-stem-Voice.wav,run1/rep-keep-stem-first.wav,run1/rep-keep-stem-stem-Side.wav,run1/rep-keep-stem-stem-Voice.wav,run1/rep-keep-stem.wav,' +
+        'run1/rep-keep-variant.wav,run1/tail-keep-late.wav,run1/tail-kept.wav') -and
     $keepSame['comparison'] -is [System.Collections.IDictionary] -and $keepSame['comparison'].Contains('first') -and $null -eq $keepSame['comparison']['first'] -and (Test-Path -LiteralPath (Join-Path $repWork 'rep-keep-same-first.wav')) -and
     -not (Test-Path -LiteralPath (Join-Path $repWork 'rep-keep-drift-first.wav')) -and $keepForced['comparison'] -is [System.Collections.IDictionary] -and $keepForced['comparison']['first'] -is [System.Collections.IDictionary] -and $keepForced['comparison']['first']['path'] -ceq 'run1/rep-keep-first-first.wav' -and $keepForced['comparison']['master']['identical'] -eq $true }
 $keptFirst = & $safe { $keepDrift['comparison']['first'] }
-Write-SafeCase "end to end: report and keep: the line's comparison is the row's, with the first render described like a kept file (path, sha256 of the file on disk, frames, format, peak)" { ($keptFirst -is [System.Collections.IDictionary]) ? "$($keptFirst['path'])" : 'the line has no comparison.first' } $false {
+Write-SafeCase "end to end: report and keep: the line's comparison is the row's, with the first render described like a kept file (path, sha256 of the file on disk, frames, channels, rate, format, peak, NaN and Inf counts)" { ($keptFirst -is [System.Collections.IDictionary]) ? "$($keptFirst['path'])" : 'the line has no comparison.first' } $false {
     $keepDrift['comparison'] -is [System.Collections.IDictionary] -and $keepSame['comparison'] -is [System.Collections.IDictionary] -and $keptFirst -is [System.Collections.IDictionary] -and
     (& $noFirst $keepDrift['comparison']) -ceq (& $noFirst (& $factOf (& $repRow 'rep-keep-drift') 'comparison')) -and (& $noFirst $keepSame['comparison']) -ceq (& $noFirst (& $factOf (& $repRow 'rep-keep-same') 'comparison')) -and
     $keptFirst['path'] -ceq 'run1/rep-keep-drift-first.wav' -and $keptFirst['sha256'] -ceq (& $hashOf (Join-Path $repKeepDir 'run1/rep-keep-drift-first.wav')) -and $keptFirst['frames'] -eq 24000 -and
-    $keptFirst['channels'] -eq 2 -and $keptFirst['format'] -ceq 'float32' -and $null -ne $keptFirst['peakDb'] -and $keptFirst['nanCount'] -eq 0 -and $keptFirst.Contains('stems') -and @($keptFirst['stems']).Count -eq 0 -and
+    $keptFirst['channels'] -eq 2 -and $keptFirst['sampleRate'] -eq 48000 -and $keptFirst['format'] -ceq 'float32' -and $null -ne $keptFirst['peakDb'] -and $keptFirst['nanCount'] -eq 0 -and $keptFirst['infCount'] -eq 0 -and
+    $keptFirst.Contains('stems') -and @($keptFirst['stems']).Count -eq 0 -and
     $keepDrift['comparison']['master']['identical'] -eq $false -and $keepDrift['render']['tailSeconds'] -eq 0 -and $keepDrift['render']['tailFrames'] -eq 0 -and
     (& $factOf (& $repRow 'rep-keep-drift') 'kept')['comparison']['first']['path'] -ceq "renders/$repStamp/run1/rep-keep-drift-first.wav" }
+# A stem compared with the reference that differs while the master is identical: the first render is kept with the
+# stems it rendered, each described like a kept file, and the row's copy names them under renders/
+$keepStem = & $safe { & $repEntry 'rep-keep-stem' }
+$stemFirst = & $safe { $keepStem['comparison']['first'] }
+$stemFirstStems = @(& $safe { $stemFirst['stems'] })
+$stemRowFirst = & $safe { (& $factOf (& $repRow 'rep-keep-stem') 'kept')['comparison']['first'] }
+Write-SafeCase "end to end: report and keep: a stem that differs next to an identical master keeps the first render and its stems (<id>-first-stem-<track>.wav), each in comparison.first.stems like a kept file, under renders/ in the row's copy" { "$((& $repRow 'rep-keep-stem').detail)" } $false {
+    (& $repRow 'rep-keep-stem').status -ceq 'PASS' -and $keepStem['comparison'] -is [System.Collections.IDictionary] -and $keepStem['comparison']['master']['identical'] -eq $true -and
+    (@($keepStem['comparison']['stems'] | ForEach-Object { "$($_['track'])=$($_['identical'])" }) -join ',') -ceq 'Voice=True,Side=False' -and
+    $stemFirst -is [System.Collections.IDictionary] -and $stemFirst['path'] -ceq 'run1/rep-keep-stem-first.wav' -and $stemFirst['sha256'] -ceq (& $hashOf (Join-Path $repKeepDir 'run1/rep-keep-stem-first.wav')) -and
+    (@($stemFirstStems | ForEach-Object { "$($_['track'])=$($_['path'])" }) -join ',') -ceq 'Voice=run1/rep-keep-stem-first-stem-Voice.wav,Side=run1/rep-keep-stem-first-stem-Side.wav' -and
+    @($stemFirstStems | Where-Object { $_['sha256'] -cne (& $hashOf (Join-Path $repKeepDir $_['path'])) -or $_['frames'] -ne 24000 -or $_['channels'] -ne 2 -or $_['sampleRate'] -ne 48000 -or $_['format'] -cne 'float32' -or
+            $null -eq $_['peakDb'] -or $_['nanCount'] -ne 0 -or $_['infCount'] -ne 0 }).Count -eq 0 -and
+    $stemRowFirst['path'] -ceq "renders/$repStamp/run1/rep-keep-stem-first.wav" -and
+    (@($stemRowFirst['stems'] | ForEach-Object { $_['path'] }) -join ',') -ceq "renders/$repStamp/run1/rep-keep-stem-first-stem-Voice.wav,renders/$repStamp/run1/rep-keep-stem-first-stem-Side.wav" }
+# Against dry or a variant there is no first render: a kept row that reports and differs keeps the render alone
+$keepDry = & $safe { & $repEntry 'rep-keep-dry' }; $keepVariant = & $safe { & $repEntry 'rep-keep-variant' }
+Write-SafeCase "end to end: report and keep: a kept render that reports against dry or against a variant and differs is PASS, and its line has comparison.first null" { "$((& $repRow 'rep-keep-dry').detail) / $((& $repRow 'rep-keep-variant').detail)" } $false {
+    (& $repRow 'rep-keep-dry').status -ceq 'PASS' -and (& $repRow 'rep-keep-variant').status -ceq 'PASS' -and
+    @($keepDry, $keepVariant | Where-Object { $_ -isnot [System.Collections.IDictionary] -or $_['status'] -cne 'PASS' -or $_['comparison'] -isnot [System.Collections.IDictionary] -or -not $_['comparison'].Contains('first') -or
+            $null -ne $_['comparison']['first'] -or $_['comparison']['master']['identical'] -ne $false }).Count -eq 0 -and
+    $keepDry['comparison']['against'] -ceq 'dry' -and $keepVariant['comparison']['against'] -ceq 'variant' }
 # The tail: each item is longer by it and plays its source once; the render is checked to have that length
 $tailRow = & $safe { & $repRow 'tail-delay' }
 $tailFacts = & $safe { & $factOf $tailRow 'tail' }
@@ -1351,9 +1383,21 @@ Write-SafeCase 'end to end: tail: both renders of a reporting repeat have the ta
     (& $repRow 'tail-repeat').status -ceq 'PASS' -and $tailRepCmp['master']['identical'] -eq $true -and $tailRepCmp['master']['frames'] -eq 24480 -and $tailRepCmp['master']['referenceFrames'] -eq 24480 -and
     (& $factOf (& $repRow 'tail-repeat') 'tail')['renderFrames'] -eq 24480 }
 $tailStemFacts = & $safe { & $factOf (& $repRow 'tail-stems') 'tail' }
-Write-SafeCase 'end to end: tail: the master and every stem have the tail; each stem has its end level' $null $false {
+# The peak of the last 100 ms of a render, read here sample by sample
+$endPeakOf = {
+    param([string]$Leaf)
+    $endWav = & $wavIn $Leaf
+    $endFrom = $endWav.Frames - [Math]::Min($endWav.Frames, [long][Math]::Round(0.1 * $endWav.Rate, [MidpointRounding]::AwayFromZero))
+    $endTop = 0.0
+    for ($k = $endFrom * $endWav.Channels; $k -lt $endWav.Samples.Length; $k++) { $endTop = [Math]::Max($endTop, [Math]::Abs($endWav.Samples[$k])) }
+    ($endTop -gt 0) ? [Math]::Round(20 * [Math]::Log10($endTop), 6) : $null
+}
+$stemEnds = @(& $safe { foreach ($endLeaf in 'Master', 'A', 'B') { & $endPeakOf "tail-stems-stem-$endLeaf.wav" } })
+Write-SafeCase 'end to end: tail: the master and every stem have the tail; the master and each stem have the end level of their own file (three levels, none null, all different)' { "$($stemEnds -join ' / ')" } $false {
     (& $repRow 'tail-stems').status -ceq 'PASS' -and @('Master', 'A', 'B' | Where-Object { (Read-HarnessWavHeader (Join-Path $repWork "tail-stems-stem-$_.wav")).Frames -ne 24480 }).Count -eq 0 -and
-    (@($tailStemFacts['stems'] | ForEach-Object { $_['track'] }) -join ',') -ceq 'A,B' -and @($tailStemFacts['stems'] | Where-Object { -not $_.Contains('endPeakDb') }).Count -eq 0 }
+    (@($tailStemFacts['stems'] | ForEach-Object { $_['track'] }) -join ',') -ceq 'A,B' -and $stemEnds.Count -eq 3 -and @($stemEnds | Where-Object { $null -eq $_ }).Count -eq 0 -and
+    @($stemEnds | Select-Object -Unique).Count -eq 3 -and $tailStemFacts['endPeakDb'] -eq $stemEnds[0] -and @($tailStemFacts['stems'])[0]['endPeakDb'] -eq $stemEnds[1] -and
+    @($tailStemFacts['stems'])[1]['endPeakDb'] -eq $stemEnds[2] }
 $tailKept = & $safe { & $repEntry 'tail-kept' }
 $keptRpp = & $safe { [IO.File]::ReadAllText((Join-Path $repWork 'tail-kept.rpp')) }
 $lengthLine = { param([long]$LengthFrames, [int]$LengthRate) "\n      LENGTH $([regex]::Escape((Get-HarnessItemLength $LengthFrames $LengthRate).ToString('R', $inv)))\n      LOOP 0\n" }
@@ -1361,22 +1405,38 @@ Write-SafeCase "end to end: tail: a kept render with a tail at 44100 Hz: the lin
     $tailKept['render']['tailSeconds'] -eq 0.1 -and $tailKept['render']['tailFrames'] -eq 4410 -and $tailKept['output']['frames'] -eq $voiceFrames + 4410 -and $tailKept['render'].Contains('endPeakDb') -and
     $null -eq $tailKept['render']['endPeakDb'] -and $null -eq $tailKept['comparison'] -and @($tailKept['sources'])[0]['file']['frames'] -eq $voiceFrames -and
     (& $trackPart $keptRpp 'Voice') -cmatch (& $lengthLine ($voiceFrames + 4410) 44100) -and (& $trackPart $keptRpp 'Pad') -cmatch (& $lengthLine (22050 + 4410) 44100) }
+$lateKept = & $safe { & $repEntry 'tail-keep-late' }
+$lateTail = & $safe { & $factOf (& $repRow 'tail-keep-late') 'tail' }
+Write-SafeCase "end to end: tail and keep: a kept render whose end is audible: the line's render.endPeakDb is the row's tail.endPeakDb, the level of the delayed end of the signal" { "line $(& $safe { $lateKept['render']['endPeakDb'] }), row $(& $safe { $lateTail['endPeakDb'] })" } $false {
+    (& $repRow 'tail-keep-late').status -ceq 'PASS' -and $sigEndPeak -gt 0 -and $lateTail['endPeakDb'] -eq [Math]::Round(20 * [Math]::Log10($sigEndPeak), 6) -and
+    $lateKept['render']['endPeakDb'] -eq $lateTail['endPeakDb'] -and $lateKept['render']['tailFrames'] -eq 480 -and $lateKept['output']['frames'] -eq 24480 }
 $isTailed = { param([string]$RppName) ($RppName -clike 'tail-*' -and $RppName -cnotlike 'tail-dry-twin*') -or $RppName -clike '*-tail480.rpp' }
 $rppAll = @(& $safe { Get-ChildItem -LiteralPath $repWork -Filter '*.rpp' })
 $loopWrong = @(& $safe { $rppAll | Where-Object { ([IO.File]::ReadAllText($_.FullName) -cmatch '(?m)^      LOOP 0$') -ne (& $isTailed $_.Name) } | ForEach-Object { $_.Name } })
 Write-SafeCase "end to end: tail: a project has LOOP lines exactly when it renders a tail, the references and first renders included; without one the text is as before" { "$($loopWrong -join ', ')" } $false {
-    $loopWrong.Count -eq 0 -and @($rppAll | Where-Object { & $isTailed $_.Name }).Count -eq 8 -and @($rppAll | Where-Object { [IO.File]::ReadAllText($_.FullName) -cmatch 'LOOP [^0]' }).Count -eq 0 }
+    $loopWrong.Count -eq 0 -and @($rppAll | Where-Object { & $isTailed $_.Name }).Count -eq 11 -and @($rppAll | Where-Object { [IO.File]::ReadAllText($_.FullName) -cmatch 'LOOP [^0]' }).Count -eq 0 }
 # A render that is shorter than asked: the tail was not rendered, which is no evidence (REAPER ignoring the longer item)
 $lostCfg = & $repCfgIn 'e2e-report-lost'
 Set-FakeReaper ($plainSet + @{ TailLost = $true })
 $lostRun = $null; $lostWhy = ''
-try { $lostRun = Invoke-HarnessSuite @lostCfg -Only '^tail-(delay|stems)$' -NoNegative -SelfTestHooks $hooks }
+try { $lostRun = Invoke-HarnessSuite @lostCfg -Only '^tail-(delay|dry|repeat|variant|stems)$' -NoNegative -SelfTestHooks $hooks }
 catch { $lostWhy = $_.Exception.Message }
 finally { Set-FakeReaper $plainSet }
 $lostRows = @(& $safe { $lostRun.runs[0].scenarios | Where-Object { $_.kind -ceq 'render' } | ForEach-Object { "$($_.id)=$($_.status): $($_.detail)" } })
+$lostOf = { param([string]$RowId) @($lostRows | Where-Object { $_.StartsWith("$RowId=") }) -join ' | ' }
+$lostEnd = ' has 24000 frames, not 24480: the tail was not rendered as asked'
 Write-SafeCase "end to end: tail: a render without the tail it was asked for is INCOMPLETE, the master or a stem named with its frames" { "$lostWhy$($lostRows -join ' | ')" } $true {
-    $lostRun.verdict -ceq 'INCOMPLETE' -and ($lostRows -join ' | ') -ceq ('tail-delay=INCOMPLETE: the render tail-delay.wav has 24000 frames, not 24480: the tail was not rendered as asked | ' +
-        'tail-stems=INCOMPLETE: the render tail-stems-stem-Master.wav has 24000 frames, not 24480: the tail was not rendered as asked') }
+    $lostRun.verdict -ceq 'INCOMPLETE' -and $lostRows.Count -eq 5 -and (& $lostOf 'tail-delay') -ceq "tail-delay=INCOMPLETE: the render tail-delay.wav$lostEnd" -and
+    (& $lostOf 'tail-stems') -ceq "tail-stems=INCOMPLETE: the render tail-stems-stem-Master.wav$lostEnd" }
+# The references are checked for the tail like the render: the one that lacks it is named, before the render is made
+foreach ($lostWant in @(
+        @{ L = 'the dry reference'; W = 'tail-dry=INCOMPLETE: the dry reference render failed: the render _dry-steady-48000-512-offline-2-tail480.wav' }
+        @{ L = 'the first render of a repeat'; W = 'tail-repeat=INCOMPLETE: the first render failed: the render tail-repeat-first.wav' }
+        @{ L = 'the render of the variant compared with'; W = 'tail-variant=INCOMPLETE: the variant render failed: the render tail-variant-variant.wav' })) {
+    $lostId = $lostWant.W.Split('=')[0]
+    Write-SafeCase "end to end: tail: $($lostWant.L) without the tail it was asked for makes the scenario INCOMPLETE, naming that render" { & $lostOf $lostId } $true {
+        (& $lostOf $lostId) -ceq "$($lostWant.W)$lostEnd" }
+}
 # Either render of a repeat that wrote no file
 $skipRows = @(foreach ($skipAt in 1, 2) {
         $skipCfg = & $repCfgIn "e2e-report-skip$skipAt"
@@ -1581,6 +1641,21 @@ foreach ($c in $renderBad) {
 }
 Write-Case "end to end: a judged render leaves no copy of a report in the results, whatever its outcome ($($leftAfter -join ', '))" $true (
     $rr.Run.verdict -ceq 'PASS' -and $leftAfter.Count -eq $renderBad.Count + 1 -and @($leftAfter | Where-Object { $_ -cnotlike '*=0' }).Count -eq 0)
+# A render judged by a report gets its tail as well, and its length is checked as any render's: without the tail it is
+# INCOMPLETE (the driver's render step, not -renderproject)
+$reportTailCfg = & $writeVariant { param($c) & $reportRenderChange $c; $c.scenarios[0].compare = 'none'; $c.scenarios[0].tailSeconds = 0.01 }
+$reportTailCfg.ReaperExe = $pwshExe; $reportTailCfg.ResultDir = Join-Path $Work 'e2e-report-tail'
+$judgedTail = @(foreach ($lose in $false, $true) {
+        Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; EnvName = 'FIXTURE_REPORT_JSON'; EnvSeen = $envSeen; TailLost = $lose }
+        try { $judgedRun = Invoke-HarnessSuite @reportTailCfg -NoNegative -SelfTestHooks $hooks; [pscustomobject]@{ Verdict = $judgedRun.verdict; Row = @($judgedRun.runs[0].scenarios | Where-Object { $_.id -ceq 'chain-report' })[0] } }
+        catch { [pscustomobject]@{ Verdict = "threw: $($_.Exception.Message)"; Row = $null } }
+        finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+    })
+Write-SafeCase 'end to end: tail: a render judged by a report renders its tail: PASS, the render as long as the source and the tail, the growth over the render recorded' { "$($judgedTail[0].Verdict): $($judgedTail[0].Row.detail)" } $false {
+    $judgedTail[0].Verdict -ceq 'PASS' -and $judgedTail[0].Row.status -ceq 'PASS' -and $judgedTail[0].Row.detail -clike 'frames=24480 *| report gain.blocks=* (+10) *' -and
+    $judgedTail[0].Row.facts['tail']['renderFrames'] -eq 24480 -and $judgedTail[0].Row.facts['report']['gain']['blocks']['delta'] -eq 10 }
+Write-SafeCase 'end to end: tail: a render judged by a report without the tail it was asked for is INCOMPLETE, as any render' { "$($judgedTail[1].Verdict): $($judgedTail[1].Row.detail)" } $true {
+    $judgedTail[1].Verdict -ceq 'INCOMPLETE' -and $judgedTail[1].Row.status -ceq 'INCOMPLETE' -and $judgedTail[1].Row.detail -ceq 'the render chain-report.wav has 24000 frames, not 24480: the tail was not rendered as asked' }
 # The licence reminder ends a launch after it saved its copy, and the launch started once more cannot save: the copy of
 # the first one must not prove the states
 $nagSpec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs }

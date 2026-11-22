@@ -1266,7 +1266,8 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a tail on a layout without a source track (no layout may lack one)'; E = { param($c) $c['layouts']['chain']['tracks'][0]['source'] = $false; (& $scenario $c 'chain-repeat')['tailSeconds'] = 0.5 }; M = 'layouts.chain: no track has source: true' }
         @{ L = 'keepFirst without keep'; E = { param($c) $s = & $scenario $c 'chain-repeat'; $s['maxDiffDb'] = 'report'; $s['keepFirst'] = $true }; M = 'keepFirst: needs keep true, compare "repeat" and maxDiffDb "report"' }
         @{ L = 'keepFirst on a render compared with dry'; E = { param($c) $s = & $scenario $c 'bus'; $s['maxDiffDb'] = 'report'; $s['keep'] = $true; $s['keepFirst'] = $true }; M = 'keepFirst: needs keep true, compare "repeat"' }
-        @{ L = 'keepFirst on a repeat that judges its residual'; E = { param($c) $s = & $scenario $c 'chain-repeat'; $s['keep'] = $true; $s['keepFirst'] = $false }; M = 'keepFirst: needs keep true' }
+        @{ L = 'keepFirst on a repeat that judges its residual'; E = { param($c) $s = & $scenario $c 'chain-repeat'; $s['keep'] = $true; $s['keepFirst'] = $true }; M = 'keepFirst: needs keep true' }
+        @{ L = 'keepFirst false where it cannot act (the key itself needs a kept repeat that reports)'; E = { param($c) (& $scenario $c 'bus')['keepFirst'] = $false }; M = 'keepFirst: needs keep true' }
         @{ L = 'keepFirst that is not a boolean'; E = { param($c) (& $scenario $c 'chain-repeat')['keepFirst'] = 'yes' }; M = 'keepFirst: must be true or false' }
         @{ L = 'keepFirst in a negative case'; E = { param($c) $c['negative'][0]['keepFirst'] = $true }; M = "unknown key 'keepFirst'" }
         @{ L = 'keepFirst on a device scenario'; E = { param($c) (& $scenario $c 'bus-device')['keepFirst'] = $true }; M = "unknown key 'keepFirst'" }
@@ -2912,10 +2913,11 @@ function Get-ExampleCases([string]$RepoRoot) {
     $fsvConf = Read-HarnessConfig -Path $fsvFile # a problem is a usage error, which fails the group
     $fsvRows = @($fsvConf.Scenarios)
     $fsvVariants = @($fsvRows | Where-Object { $_.baseId -ceq 'verb' })
-    & $add "example: the file-source configuration validates: one plugin on a track that plays a file, five variants compared with dry and their residual reported, a reported repeat, a render with a tail ($(@($fsvRows | ForEach-Object { $_.id }) -join ', '))" $false (
+    & $add "example: the file-source configuration validates: one plugin on a track that plays a file, five variants compared with dry and their residual reported, a reported repeat, a render with a tail, none of them may be silent ($(@($fsvRows | ForEach-Object { $_.id }) -join ', '))" $false (
         @($fsvConf.Plugins.get_Keys()).Count -eq 1 -and $fsvConf.Layouts['voice'].Tracks[0].File -ceq 'sources/voice.wav' -and $fsvVariants.Count -eq 5 -and
         @($fsvVariants | Where-Object { $_.compare.Kind -cne 'dry' -or $_.maxDiffDb -cne 'report' }).Count -eq 0 -and
-        @($fsvRows | Where-Object { $_.compare.Kind -ceq 'repeat' -and $_.maxDiffDb -ceq 'report' }).Count -eq 1 -and @($fsvRows | Where-Object { $_.tailFrames -eq 144000 }).Count -eq 1)
+        @($fsvRows | Where-Object { $_.compare.Kind -ceq 'repeat' -and $_.maxDiffDb -ceq 'report' }).Count -eq 1 -and @($fsvRows | Where-Object { $_.tailFrames -eq 144000 }).Count -eq 1 -and
+        @($fsvRows | Where-Object { -not $_.notSilent }).Count -eq 0)
     $fsvSchemaOk = try { Test-Json -Json $fsvText -Schema ([IO.File]::ReadAllText((Join-Path $RepoRoot 'schema/config.schema.json'))) -ErrorAction Stop } catch { $false }
     & $add 'example: the file-source configuration names a placeholder plugin and no local path, and the schema accepts it' $false (
         $fsvText -cmatch '"bundle": "My Reverb\.vst3"' -and $fsvText -cnotmatch '[A-Za-z]:[\\/]' -and $fsvSchemaOk)
