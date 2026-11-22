@@ -81,7 +81,8 @@ function Get-HarnessFolderFlags([object[]]$Tracks) {
 # that play a file (the others get Seconds). Stems: track names rendered as stems: the render then writes
 # <RenderName>-stem-<track>.wav per stem and <RenderName>-stem-Master.wav (REAPER's "master mix + stems of selected
 # tracks"; Get-HarnessRunFiles in Scenarios.psm1 expects these names). NoItems: no track plays anything (the transport
-# kind: what a track gets comes through its input).
+# kind: what a track gets comes through its input). NoLoop: every item plays its source once (LOOP 0), so an item
+# longer than its source (a render with a tail) is silent after it, whatever REAPER's preferences say.
 function New-HarnessProjectText {
     param(
         [Parameter(Mandatory)]$Layout,
@@ -99,7 +100,8 @@ function New-HarnessProjectText {
         [double]$VolumeScale = 1.0,
         [string[]]$Stems = @(),
         [switch]$NoFx,
-        [switch]$NoItems
+        [switch]$NoItems,
+        [switch]$NoLoop
     )
     $flags = Get-HarnessFolderFlags $Layout.Tracks
     $sb = [Text.StringBuilder]::new()
@@ -149,6 +151,7 @@ function New-HarnessProjectText {
             & $add '    <ITEM'
             & $add '      POSITION 0'
             & $add "      LENGTH $(Format-Number ($Lengths.ContainsKey($t.Name) ? $Lengths[$t.Name] : $Seconds))"
+            if ($NoLoop) { & $add '      LOOP 0' }
             & $add '      <SOURCE WAVE'
             & $add "        FILE $(ConvertTo-RppString ($Sources.ContainsKey($t.Name) ? $Sources[$t.Name] : $SourceWav))"
             & $add '      >'

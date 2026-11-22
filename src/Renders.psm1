@@ -12,6 +12,8 @@
 #                               appends its manifest line (written and flushed at once, every string masked). The
 #                               first one checks that renders/<stamp> is under the result directory (real paths) and
 #                               claims it by creating the manifest: a run of the same second finds it and keeps nothing.
+#                               A repeat that reports its residual keeps its first render too (run<k>/<id>-first.wav
+#                               and -first-stem-<track>.wav) when the two differ, or always with keepFirst.
 #                               Returns Status and Detail of the row (INCOMPLETE added when something could not be
 #                               kept or a kept file could not be read, FAIL stays FAIL) and the Record.
 #   Move-HarnessKeptFile        one file, only to a place under the result directory, never over another (pure on files)
@@ -112,6 +114,7 @@ function Get-HarnessFxFacts([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$L
                 $pdc = 0
                 [ordered]@{
                     track = $t.Name; index = $i; plugin = $fx.Plugin; bundle = ($vst ? $vst.Bundle : $null); jsfx = ($js ? $js.Jsfx : $null); name = ($read ? $read.Name : $null)
+                    version = ($vst ? $vst.Info.Version : $null)
                     sha256 = ($vst ? $vst.Sha256.Substring(0, 12) : ($js ? $js.Sha256.Substring(0, 12) : $null)); bypass = (Test-HarnessFxBypassed $fx $Bypass)
                     state = ($fx.State ? $fx.State : $null); stateSha256 = (($fx.State -and $Ctx.States.Contains($sk)) ? $Ctx.States[$sk].Sha : $null)
                     blockSha256 = ($Ctx.Blocks.ContainsKey($fx.Variant) ? (Get-HarnessBlockTextSha $Ctx.Blocks[$fx.Variant]) : $null)
@@ -153,8 +156,20 @@ function Get-HarnessKeepRefusal([Parameter(Mandatory)]$Keep) {
 
 function Get-HarnessWorse([string]$A, [string]$B) { foreach ($x in 'FAIL', 'INCOMPLETE') { if ($x -cin $A, $B) { return $x } }; 'PASS' }
 
+# Whether the first render of a repeat is kept as well (pure): only when the residual is reported (Comparison: the
+# row's comparison, $null when nothing reports), always with keepFirst, else when the master or a stem compared with
+# the reference is not known to be bit-identical.
+function Test-HarnessKeepFirst($Scenario, $Comparison) {
+    if ($null -eq $Comparison -or $Scenario.compare.Kind -cne 'repeat') { return $false }
+    if ($Scenario.PSObject.Properties['keepFirst'] -and $Scenario.keepFirst) { return $true }
+    foreach ($x in @($Comparison['master']) + @($Comparison['stems'])) { if ($null -eq $x -or $x['identical'] -ne $true) { return $true } }
+    $false
+}
+
+# Comparison and Tail: the row's comparison and tail facts ($null when it has none), written into the line.
 function Save-HarnessKeptRender {
-    param([Parameter(Mandatory)]$Keep, [Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario, [int]$Round = 1, [Parameter(Mandatory)][string]$Status, [string]$Detail = '')
+    param([Parameter(Mandatory)]$Keep, [Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario, [int]$Round = 1, [Parameter(Mandatory)][string]$Status, [string]$Detail = '',
+          $Comparison = $null, $Tail = $null)
     $s = $Scenario
     try {
         # The refusal is set before the claim counts as done: a claim that threw is tried again, never taken as made
@@ -165,20 +180,34 @@ function Save-HarnessKeptRender {
         $stemTracks = @($s.stems | ForEach-Object { $_.Track })
         $files = Get-HarnessRunFiles $Ctx.Work $s.id $stemTracks
         # The master of a render with stems is <id>-stem-Master.wav in the work directory; kept, it is <id>.wav
-        $plan = @([pscustomobject]@{ From = $files.Wav; Leaf = "$($s.id).wav"; Track = '' }) + @(foreach ($t in $stemTracks) { [pscustomobject]@{ From = $files.Stems[$t]; Leaf = "$($s.id)-stem-$t.wav"; Track = $t } })
-        $out = @(foreach ($p in $plan) {
-                $keptRel = "run$Round/$($p.Leaf)"
-                $dest = Join-Path $Keep.Dir $keptRel
-                $kept = $false
-                # No file (the render failed): nothing to move; the line still says how the scenario ended
-                if (-not $Keep.Refused -and (Test-Path -LiteralPath $p.From -PathType Leaf)) {
-                    $why = Move-HarnessKeptFile -From $p.From -To $dest -ResultDir $Keep.ResultDir
-                    if ($why) { $problems.Add($why) } else { $kept = $true; while ($Ctx.Files.Remove($p.From)) { } }
-                }
-                $facts = Get-HarnessKeptFileFacts $dest ($kept ? $keptRel : '') $unread
-                if ($p.Track) { $named = [ordered]@{ track = $p.Track }; foreach ($k in $facts.get_Keys()) { $named[$k] = $facts[$k] }; $facts = $named }
-                $facts
-            })
+        $planOf = { param($From, [string]$Name)
+            @([pscustomobject]@{ From = $From.Wav; Leaf = "$Name.wav"; Track = '' }) + @(foreach ($t in $From.Stems.get_Keys()) { [pscustomobject]@{ From = $From.Stems[$t]; Leaf = "$Name-stem-$t.wav"; Track = $t } }) }
+        $move = { param($p)
+            $keptRel = "run$Round/$($p.Leaf)"
+            $dest = Join-Path $Keep.Dir $keptRel
+            $kept = $false
+            # No file (the render failed): nothing to move; the line still says how the scenario ended
+            if (-not $Keep.Refused -and (Test-Path -LiteralPath $p.From -PathType Leaf)) {
+                $why = Move-HarnessKeptFile -From $p.From -To $dest -ResultDir $Keep.ResultDir
+                if ($why) { $problems.Add($why) } else { $kept = $true; while ($Ctx.Files.Remove($p.From)) { } }
+            }
+            $facts = Get-HarnessKeptFileFacts $dest ($kept ? $keptRel : '') $unread
+            if ($p.Track) { $named = [ordered]@{ track = $p.Track }; foreach ($k in $facts.get_Keys()) { $named[$k] = $facts[$k] }; $facts = $named }
+            $facts
+        }
+        $out = @(foreach ($p in (& $planOf $files $s.id)) { & $move $p })
+        # The first render of a reported repeat, with its stems compared with the reference: kept next to the second
+        # when the two differ (or with keepFirst), described in comparison.first; else a work file
+        $cmp = $null
+        if ($null -ne $Comparison) {
+            $cmp = [ordered]@{}; foreach ($k in $Comparison.get_Keys()) { $cmp[$k] = $Comparison[$k] }
+            $cmp.first = $null
+            if (Test-HarnessKeepFirst $s $Comparison) {
+                $firstFiles = Get-HarnessRunFiles $Ctx.Work "$($s.id)-first" @($s.stems | Where-Object { $_.Compare -eq 'reference' } | ForEach-Object { $_.Track })
+                $firstOut = @(foreach ($p in (& $planOf $firstFiles "$($s.id)-first")) { & $move $p })
+                $cmp.first = $firstOut[0]; $cmp.first['stems'] = @($firstOut | Select-Object -Skip 1)
+            }
+        }
         # The layout as rendered (the variant's, when it is one); a plugin whose latency is only reported has it read at
         # learning: a kept render without that reading is not described in full
         $scenarioLayout = Get-HarnessScenarioLayout $Ctx.Config $s
@@ -191,8 +220,10 @@ function Save-HarnessKeptRender {
             variant = ($s.PSObject.Properties['variant'] ? $s.variant : $null); layout = $s.layout; kind = $s.kind
             status = $Status; detail = $Detail; output = $out[0]; stems = @($out | Select-Object -Skip 1)
             render = [ordered]@{ sr = $s.sr; block = $s.block; mode = $s.mode; channels = ($s.mono ? 1 : 2)
+                tailSeconds = ($s.PSObject.Properties['tailSeconds'] ? [double]$s.tailSeconds : 0.0); tailFrames = ($s.PSObject.Properties['tailFrames'] ? [long]$s.tailFrames : [long]0)
+                endPeakDb = (($Tail -is [Collections.IDictionary]) ? $Tail['endPeakDb'] : $null)
                 host = [ordered]@{ anticipativeFx = [bool]$s.host.AnticipativeFx; runFxWhenStopped = [bool]$s.host.RunFxWhenStopped; informOfflineState = [bool]$s.host.InformOfflineState } }
-            sources = (Get-HarnessSourceFacts $Ctx $scenarioLayout); fx = $fxFacts
+            comparison = $cmp; sources = (Get-HarnessSourceFacts $Ctx $scenarioLayout); fx = $fxFacts
         }
         foreach ($k in $Keep.Run.get_Keys()) { $record[$k] = $Keep.Run[$k] }
         $record = Hide-HarnessFacts $record # every string of the line, keys too: details carry exception texts, names come from plugins
@@ -217,7 +248,8 @@ function Save-HarnessKeptRender {
 # The row's copy of a manifest line: paths relative to the result directory instead of the manifest's directory.
 function ConvertTo-HarnessKeptFacts([Parameter(Mandatory)]$Entry, [Parameter(Mandatory)][string]$Rel) {
     $copy = ConvertFrom-HarnessJson (ConvertTo-HarnessJsonText -Value $Entry)
-    foreach ($f in @($copy['output']) + @($copy['stems'])) { if ($f -and $f['path']) { $f['path'] = "$Rel/$($f['path'])" } }
+    $first = ($copy['comparison'] -is [Collections.IDictionary]) ? $copy['comparison']['first'] : $null
+    foreach ($f in @($copy['output']) + @($copy['stems']) + @($first) + @($first ? $first['stems'] : @())) { if ($f -and $f['path']) { $f['path'] = "$Rel/$($f['path'])" } }
     $copy
 }
 

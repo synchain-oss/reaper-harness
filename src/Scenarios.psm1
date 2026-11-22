@@ -7,7 +7,8 @@
 # Built-in kinds (handlers in $script:Handlers):
 #   render      render a layout (and the stems asked for) and compare with the same layout without FX (dry), the
 #               same render again (repeat) or another variant (layout / block / mode / bypass), or judge it on its
-#               own (none)
+#               own (none); the residual may be reported instead of judged (maxDiffDb "report"), and every render of
+#               it may run past the end of its sources (tailSeconds)
 #   device      device block size, sample rate and anticipative FX setting read back; every FX reports the
 #               configured latency; FX with a named state are saved back unchanged
 #   savereopen  FX state survives save and reopen (cycles times); the reopened project renders bit-identical to the
@@ -273,10 +274,13 @@ function Get-HarnessRunFiles([string]$Work, [string]$Name, [string[]]$Stems = @(
 # Writes the project and sets the audio configuration; returns the project path, the path of its (master) render and
 # Stems (track name -> path of its stem), named as Get-HarnessRunFiles says. A track with a file plays the round's
 # checked copy; a file at another rate than -Sr, or with more channels than -Channels, throws before the project is written.
+# TailFrames: every item is that many frames longer than its source and plays it once (LOOP 0); Frames is then the
+# length the render must have (the longest source and the tail), 0 without a tail or without items.
 function New-HarnessRun {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)]$Layout, [int]$Sr = 48000, [int]$Block = 512,
           [string]$Mode = 'offline', [int]$Channels = 2, [string[]]$Bypass = @(), [double]$VolumeScale = 1.0, [int]$OffsetSamples = 0, [switch]$NoFx,
-          [hashtable]$Blocks = $null, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true, [bool]$InformOfflineState = $true, [switch]$NoItems)
+          [hashtable]$Blocks = $null, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true, [bool]$InformOfflineState = $true, [switch]$NoItems,
+          [long]$TailFrames = 0)
     $files = Get-HarnessRunFiles $Ctx.Work $Name $Stems
     $Project = $files.Project
     $Wav = $files.Wav
@@ -284,6 +288,10 @@ function New-HarnessRun {
     foreach ($f in @($Wav) + @($stemFiles.get_Values())) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
     $sources = @{}
     $lengths = @{}
+    $tailed = $TailFrames -gt 0 -and -not $NoItems
+    # The frames of the test signal as its writer counts them (round half to even); an offset does not change them
+    $sigFrames = [long][Math]::Round([double]$Ctx.Signal.Seconds * $Sr)
+    $longest = [long]0
     foreach ($t in $Layout.Tracks) {
         $file = Get-HarnessTrackFile $t
         # A file plays as it is, in place of the test signal: never shifted (OffsetSamples), checked copy only, and for
@@ -293,30 +301,40 @@ function New-HarnessRun {
             if ($copy.File.Rate -ne $Sr) { throw "source $($copy.File.Rel) is at $($copy.File.Rate) Hz and the render runs at $Sr Hz: nothing is resampled" }
             if ($copy.File.Channels -gt $Channels) { throw "source $($copy.File.Rel) has $($copy.File.Channels) channels and the render $($Channels): nothing is mixed down" }
             $sources[$t.Name] = $copy.Path; $lengths[$t.Name] = $copy.Length
+            if ($tailed) { $lengths[$t.Name] = Get-HarnessItemLength ($copy.File.Frames + $TailFrames) $Sr; $longest = [Math]::Max($longest, $copy.File.Frames + $TailFrames) }
         }
         elseif ($t.Source -and $null -ne $t.Signal) { $sources[$t.Name] = Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples -Spec $t.Signal }
+        if ($tailed -and $t.Source -and -not $file) { $lengths[$t.Name] = Get-HarnessItemLength ($sigFrames + $TailFrames) $Sr; $longest = [Math]::Max($longest, $sigFrames + $TailFrames) }
     }
     $Text = New-HarnessProjectText -Layout $Layout -Blocks ($Blocks ?? $Ctx.Blocks) -SourceWav (Get-HarnessSignal $Ctx $Sr $Channels $OffsetSamples) -Sources $sources -Lengths $lengths -RenderDir $Ctx.Work -RenderName $Name `
-        -SampleRate $Sr -Channels $Channels -Mode $Mode -Bypass $Bypass -Seconds $Ctx.Signal.Seconds -VolumeScale $VolumeScale -Stems $Stems -NoFx:$NoFx -NoItems:$NoItems
+        -SampleRate $Sr -Channels $Channels -Mode $Mode -Bypass $Bypass -Seconds $Ctx.Signal.Seconds -VolumeScale $VolumeScale -Stems $Stems -NoFx:$NoFx -NoItems:$NoItems -NoLoop:$tailed
     Write-HarnessText -Path $Project -Text $Text
     Set-HarnessAudioConfig -Sr $Sr -Block $Block -AnticipativeFx $AnticipativeFx -RunFxWhenStopped $RunFxWhenStopped -InformOfflineState $InformOfflineState
     $Ctx.Files.Add($Project); $Ctx.Files.Add($Wav); foreach ($f in $stemFiles.get_Values()) { $Ctx.Files.Add($f) }
-    [pscustomobject]@{ Project = $Project; Wav = $Wav; Stems = $stemFiles }
+    [pscustomobject]@{ Project = $Project; Wav = $Wav; Stems = $stemFiles; Frames = ($tailed ? $longest : [long]0) }
 }
 
-# What a render left undone: its file or a further file (a stem) is not there. $null when they all are.
-function Get-HarnessRenderGap([string]$Wav, [string[]]$Also = @()) {
+# What a render left undone: its file or a further file (a stem) is not there, or (Frames above 0: a render with a
+# tail) one of them has not exactly Frames frames. $null when nothing is missing. Files are named by their leaf.
+function Get-HarnessRenderGap([string]$Wav, [string[]]$Also = @(), [long]$Frames = 0) {
     if (-not (Test-Path -LiteralPath $Wav)) { return 'the render produced no file' }
     $missing = @($Also | Where-Object { -not (Test-Path -LiteralPath $_) } | ForEach-Object { Split-Path -Leaf $_ })
     if ($missing.Count) { return "the render produced no stem file $($missing -join ', ')" }
+    if ($Frames -gt 0) {
+        foreach ($out in @($Wav) + $Also) {
+            $leaf = Split-Path -Leaf $out
+            try { $n = (Read-HarnessWavHeader $out).Frames } catch { return "the render $leaf cannot be read: $($_.Exception.Message)" }
+            if ($n -ne $Frames) { return "the render $leaf has $n frames, not ${Frames}: the tail was not rendered as asked" }
+        }
+    }
     $null
 }
 
-# Renders a project. Also: further files the render must produce (stems).
-function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Label = 'render', [string[]]$Also = @()) {
+# Renders a project. Also: further files the render must produce (stems). Frames: the length they must have (a tail).
+function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Label = 'render', [string[]]$Also = @(), [long]$Frames = 0) {
     $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label $Label -HostArgs @{ ReaperArgs = @('-renderproject', $Project); TimeoutSec = [double]$Ctx.Limits.renderTimeoutSec } -Outputs (@($Wav) + $Also)
     $why = Get-HarnessHostFailure $Run
-    if (-not $why) { $why = Get-HarnessRenderGap $Wav $Also }
+    if (-not $why) { $why = Get-HarnessRenderGap $Wav $Also $Frames }
     [pscustomobject]@{ Run = $Run; Why = $why }
 }
 
@@ -512,34 +530,62 @@ function Test-HarnessReopenFacts([Parameter(Mandatory)][hashtable]$Facts, [int]$
 
 # -------- kinds --------
 
-# The name of a dry reference render (pure); it starts with '_' (see Get-HarnessRunFiles).
-function Get-HarnessReferenceName([string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true) {
+# The name of a dry reference render (pure); it starts with '_' (see Get-HarnessRunFiles). A reference with a tail
+# is another render than one without: its name ends in -tail<frames>.
+function Get-HarnessReferenceName([string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true, [long]$TailFrames = 0) {
     $key = "_dry-$($LayoutId.TrimStart('@'))-$Sr-$Block-$Mode-$Channels" + ($AnticipativeFx ? '' : '-noaf') + ($RunFxWhenStopped ? '' : '-norfs')
     if ($Stems.Count) { $key += '-stems-' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Stems -join "`n"))).Substring(0, 8).ToLowerInvariant() }
+    if ($TailFrames -gt 0) { $key += "-tail$TailFrames" }
     $key
 }
 
-# The dry reference: the layout without any FX. Stems: tracks rendered as stems as well. Cached per round.
-function Get-HarnessReference($Ctx, [string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true) {
-    $key = Get-HarnessReferenceName $LayoutId $Sr $Block $Mode $Channels $Stems $AnticipativeFx $RunFxWhenStopped
+# The dry reference: the layout without any FX. Stems: tracks rendered as stems as well. TailFrames: the tail of the
+# render it is compared with. Cached per round.
+function Get-HarnessReference($Ctx, [string]$LayoutId, [int]$Sr, [int]$Block, [string]$Mode, [int]$Channels, [string[]]$Stems = @(), [bool]$AnticipativeFx = $true, [bool]$RunFxWhenStopped = $true, [long]$TailFrames = 0) {
+    $key = Get-HarnessReferenceName $LayoutId $Sr $Block $Mode $Channels $Stems $AnticipativeFx $RunFxWhenStopped $TailFrames
     if (-not $Ctx.Refs.ContainsKey($key)) {
-        $r = New-HarnessRun -Ctx $Ctx -Name $key -Layout (Get-HarnessLayout $Ctx $LayoutId) -Sr $Sr -Block $Block -Mode $Mode -Channels $Channels -Stems $Stems -AnticipativeFx $AnticipativeFx -RunFxWhenStopped $RunFxWhenStopped -NoFx
-        $res = Invoke-HarnessRender $Ctx $r.Project $r.Wav 'reference' -Also @($r.Stems.get_Values())
+        $r = New-HarnessRun -Ctx $Ctx -Name $key -Layout (Get-HarnessLayout $Ctx $LayoutId) -Sr $Sr -Block $Block -Mode $Mode -Channels $Channels -Stems $Stems -AnticipativeFx $AnticipativeFx -RunFxWhenStopped $RunFxWhenStopped -NoFx -TailFrames $TailFrames
+        $res = Invoke-HarnessRender $Ctx $r.Project $r.Wav 'reference' -Also @($r.Stems.get_Values()) -Frames $r.Frames
         $Ctx.Refs[$key] = [pscustomobject]@{ Wav = $r.Wav; Stems = $r.Stems; Why = $res.Why }
     }
     $Ctx.Refs[$key]
 }
 
 # One render file against its criteria (the scenario's own or a stem's): with a reference compared with it, without
-# one judged on its own.
+# one judged on its own. Only the exact word "report" as maxDiffDb means a residual measured and never judged; any
+# other text is bound as a number, and one that is no number throws (no evidence: INCOMPLETE).
 function Invoke-HarnessCompare($Ctx, $s, [string]$Reference, [string]$Test) {
     $levels = @{ RmsDb = $s.rmsDb; EnergyRatioDb = $s.energyRatioDb }
     if (-not $Reference) { return Test-HarnessWavFile -Path $Test -PeakMaxDb $s.peakMaxDb -NotSilent:([bool]$s.notSilent) @levels }
-    Compare-HarnessWavFiles -A $Reference -B $Test -MaxDiffDb $s.maxDiffDb -Lag ([int]$s.lag) -LagSearch ([int]$Ctx.Limits.lagSearch) -PeakMaxDb $s.peakMaxDb `
+    $residualOnly = Test-HarnessResidualReported $s
+    Compare-HarnessWavFiles -A $Reference -B $Test -MaxDiffDb ($residualOnly ? $null : $s.maxDiffDb) -ReportResidual:$residualOnly -Lag ([int]$s.lag) -LagSearch ([int]$Ctx.Limits.lagSearch) -PeakMaxDb $s.peakMaxDb `
         -NotSilent:([bool]$s.notSilent) -HeadSeconds ([double]$Ctx.Limits.headSeconds) -RmsChangeDb $s.rmsChangeDb @levels
 }
 
 function Get-HarnessOutcomeStatus([string[]]$StatusList) { foreach ($x in 'FAIL', 'INCOMPLETE') { if ($x -cin $StatusList) { return $x } }; 'PASS' }
+
+# Pure function: the residuals of a render that reports one (its own or a stem's), the row's and the manifest's
+# comparison: against (dry, repeat or variant), master (the Residual of the master's comparison, $null when it returned
+# early) and stems, one entry per stem compared with the reference: its track, then its Residual (none when that
+# comparison returned early). StemList: { Track; Compare; Result } per stem.
+function New-HarnessComparisonFacts([string]$Against, $MasterResult, [object[]]$StemList = @()) {
+    $residualOf = { param($x) ($x -and $x.PSObject.Properties['Residual']) ? $x.Residual : $null }
+    $list = [Collections.Generic.List[object]]::new()
+    foreach ($st in $StemList) {
+        if ($st.Compare -cne 'reference') { continue }
+        $entry = [ordered]@{ track = $st.Track }
+        $got = & $residualOf $st.Result
+        if ($got) { foreach ($k in $got.get_Keys()) { $entry[$k] = $got[$k] } }
+        $list.Add($entry)
+    }
+    [ordered]@{ against = $Against; master = (& $residualOf $MasterResult); stems = $list.ToArray() }
+}
+
+# One fact of an outcome (comparison, tail, report), $null when it has none.
+function Get-HarnessOutcomeFact($Done, [string]$Name) {
+    $p = $Done.PSObject.Properties['Facts']
+    ($p -and $p.Value -is [Collections.IDictionary] -and $p.Value.Contains($Name)) ? $p.Value[$Name] : $null
+}
 
 # A render whose plugin reports are judged: the driver's render step instead of -renderproject, because the readings
 # need a moment before and after the render in one process (Report.psm1, lua/driver.lua). What was asked of the host is
@@ -552,7 +598,7 @@ function Invoke-HarnessReportRender($Ctx, $s, $r, $Layout) {
         -Copies (Get-HarnessReportCopies $plan 2) -Outputs (@($r.Wav) + $stemWavs) -TimeoutSec ([double]$Ctx.Limits.renderTimeoutSec + [double]$Ctx.Limits.luaTimeoutSec + 60)
     $taken = Read-HarnessReportReadings -Facts $lua.Result -Plan $plan -Count 2 -ProcessId $lua.Run.Pid
     $why = $lua.Why
-    if (-not $why) { $why = Get-HarnessRenderGap $r.Wav $stemWavs }
+    if (-not $why) { $why = Get-HarnessRenderGap $r.Wav $stemWavs $r.Frames }
     if ($why) { return [pscustomobject]@{ Why = $why; Outcome = $null; Facts = $null } }
     $rep = Test-HarnessReportCriteria -Criteria $s.report -Start $taken[0] -End $taken[1]
     $bad = [Collections.Generic.List[string]]::new()
@@ -576,39 +622,50 @@ function Invoke-HarnessRenderScenario($Ctx, $s) {
     $Layout = Get-HarnessScenarioLayout $Ctx.Config $s
     $Stems = @($s.stems)
     $refStems = @($Stems | Where-Object { $_.Compare -eq 'reference' } | ForEach-Object { $_.Track })
+    # Every render of the scenario, its references too, gets the same tail
+    $tail = $s.PSObject.Properties['tailFrames'] ? [long]$s.tailFrames : [long]0
     $c = $s.compare
     $ref = $null
     switch ($c.Kind) {
         'dry' {
-            $ref = Get-HarnessReference $Ctx $s.layout ([int]$s.sr) ([int]$s.block) $s.mode $ch -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs
+            $ref = Get-HarnessReference $Ctx $s.layout ([int]$s.sr) ([int]$s.block) $s.mode $ch -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs -TailFrames $tail
             if ($ref.Why) { return New-HarnessOutcome INCOMPLETE "the dry reference render failed: $($ref.Why)" }
         }
         'repeat' {
-            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-first" -Layout $Layout -Sr $s.sr -Block $s.block -Mode $s.mode -Channels $ch -Bypass $s.bypass -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform
-            $res0 = Invoke-HarnessRender $Ctx $ref.Project $ref.Wav -Also @($ref.Stems.get_Values())
+            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-first" -Layout $Layout -Sr $s.sr -Block $s.block -Mode $s.mode -Channels $ch -Bypass $s.bypass -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform -TailFrames $tail
+            $res0 = Invoke-HarnessRender $Ctx $ref.Project $ref.Wav -Also @($ref.Stems.get_Values()) -Frames $ref.Frames
             if ($res0.Why) { return New-HarnessOutcome INCOMPLETE "the first render failed: $($res0.Why)" }
         }
         'variant' {
             $vLayout = ($c.PSObject.Properties['SameLayout'] -and $c.SameLayout) ? $Layout : (Get-HarnessLayout $Ctx $c.Layout)
-            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-variant" -Layout $vLayout -Sr $s.sr -Block $c.Block -Mode $c.Mode -Channels $ch -Bypass $c.Bypass -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform
-            $res0 = Invoke-HarnessRender $Ctx $ref.Project $ref.Wav -Also @($ref.Stems.get_Values())
+            $ref = New-HarnessRun -Ctx $Ctx -Name "$($s.id)-variant" -Layout $vLayout -Sr $s.sr -Block $c.Block -Mode $c.Mode -Channels $ch -Bypass $c.Bypass -Stems $refStems -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform -TailFrames $tail
+            $res0 = Invoke-HarnessRender $Ctx $ref.Project $ref.Wav -Also @($ref.Stems.get_Values()) -Frames $ref.Frames
             if ($res0.Why) { return New-HarnessOutcome INCOMPLETE "the variant render failed: $($res0.Why)" }
         }
     }
     $r = New-HarnessRun -Ctx $Ctx -Name $s.id -Layout $Layout -Sr $s.sr -Block $s.block -Mode $s.mode -Channels $ch -Bypass $s.bypass -VolumeScale $vol -OffsetSamples $offset `
-        -Stems @($Stems | ForEach-Object { $_.Track }) -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform
+        -Stems @($Stems | ForEach-Object { $_.Track }) -AnticipativeFx $af -RunFxWhenStopped $rfs -InformOfflineState $inform -TailFrames $tail
     $judged = [bool]$s.report.get_Count()
-    $res = $judged ? (Invoke-HarnessReportRender $Ctx $s $r $Layout) : (Invoke-HarnessRender $Ctx $r.Project $r.Wav -Also @($r.Stems.get_Values()))
+    $res = $judged ? (Invoke-HarnessReportRender $Ctx $s $r $Layout) : (Invoke-HarnessRender $Ctx $r.Project $r.Wav -Also @($r.Stems.get_Values()) -Frames $r.Frames)
     if ($res.Why) { return New-HarnessOutcome INCOMPLETE $res.Why }
     $master = Invoke-HarnessCompare $Ctx $s ($ref ? $ref.Wav : '') $r.Wav
-    if (-not $Stems.Count -and -not $judged) { return $master }
-    # The master line first (negative cases match its start), then one part per stem, then what the plugins reported
-    $outcomes = @($master) + @(foreach ($st in $Stems) {
-            $o = Invoke-HarnessCompare $Ctx $st.Criteria (($st.Compare -eq 'reference') ? $ref.Stems[$st.Track] : '') $r.Stems[$st.Track]
-            [pscustomobject]@{ Status = $o.Status; Detail = "stem $($st.Track): $($o.Detail)" }
+    $stemRuns = @(foreach ($st in $Stems) {
+            [pscustomobject]@{ Track = $st.Track; Compare = $st.Compare; Result = (Invoke-HarnessCompare $Ctx $st.Criteria (($st.Compare -eq 'reference') ? $ref.Stems[$st.Track] : '') $r.Stems[$st.Track]) }
         })
+    # What the row carries besides its line: what the plugins reported, the residuals when one is reported (a judged
+    # render keeps the row of before), the tail and how far it decayed (recorded, never judged)
+    $rowFacts = [ordered]@{}
+    if ($judged) { $rowFacts.report = $res.Facts }
+    if ($ref -and (Test-HarnessScenarioReports $s)) { $rowFacts.comparison = New-HarnessComparisonFacts $c.Kind $master $stemRuns }
+    if ($tail -gt 0) {
+        $rowFacts.tail = [ordered]@{ seconds = [double]$s.tailSeconds; frames = $tail; renderFrames = $r.Frames; endPeakDb = (Get-HarnessEndPeakDb $r.Wav)
+            stems = @(foreach ($st in $Stems) { [ordered]@{ track = $st.Track; endPeakDb = (Get-HarnessEndPeakDb $r.Stems[$st.Track]) } }) }
+    }
+    if (-not $Stems.Count -and -not $rowFacts.Count) { return $master }
+    # The master line first (negative cases match its start), then one part per stem, then what the plugins reported
+    $outcomes = @($master) + @(foreach ($sx in $stemRuns) { [pscustomobject]@{ Status = $sx.Result.Status; Detail = "stem $($sx.Track): $($sx.Result.Detail)" } })
     if ($judged) { $outcomes += $res.Outcome }
-    New-HarnessOutcome (Get-HarnessOutcomeStatus @($outcomes | ForEach-Object { $_.Status })) (@($outcomes | ForEach-Object { $_.Detail }) -join ' | ') ($judged ? [ordered]@{ report = $res.Facts } : $null)
+    New-HarnessOutcome (Get-HarnessOutcomeStatus @($outcomes | ForEach-Object { $_.Status })) (@($outcomes | ForEach-Object { $_.Detail }) -join ' | ') ($rowFacts.Count ? $rowFacts : $null)
 }
 
 function Invoke-HarnessDeviceScenario($Ctx, $s) {
@@ -836,4 +893,4 @@ function Invoke-HarnessScenario {
 Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, Hide-HarnessFacts, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
     Get-HarnessLayout, Get-HarnessScenarioLayout, Get-HarnessPdcFacts, Get-HarnessRunFiles, Get-HarnessReferenceName, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
     Get-HarnessScenarioKinds, Get-HarnessApi, Invoke-HarnessScenario, Get-HarnessSkipMarkerHit, Get-HarnessWorkrender, Test-HarnessStateProof, Invoke-HarnessCompare,
-    Test-HarnessHostReadback, Test-HarnessReopenFacts, Get-HarnessRunAllOnStop, Get-HarnessVstFullState, Get-HarnessRenderGap
+    Test-HarnessHostReadback, Test-HarnessReopenFacts, Get-HarnessRunAllOnStop, Get-HarnessVstFullState, Get-HarnessRenderGap, New-HarnessComparisonFacts, Get-HarnessOutcomeFact

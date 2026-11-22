@@ -939,6 +939,93 @@ function Get-WavCases([string]$Tmp) {
     $s1 = Join-Path $Tmp 'sig1.wav'; $s2 = Join-Path $Tmp 'sig2.wav'; $s3 = Join-Path $Tmp 'sig3.wav'
     New-HarnessSignalFile -Path $s1 -Seconds 0.2 -Seed 7; New-HarnessSignalFile -Path $s2 -Seconds 0.2 -Seed 7; New-HarnessSignalFile -Path $s3 -Seconds 0.2 -Seed 8
     & $add 'signal: the same seed gives the same file, another seed another one' $false ((Get-FileHash $s1).Hash -ceq (Get-FileHash $s2).Hash -and (Get-FileHash $s1).Hash -cne (Get-FileHash $s3).Hash)
+    # A residual that is only reported (maxDiffDb "report"): measured and written down, never judged
+    $rep = { param([hashtable]$Set, [hashtable]$Criteria = @{}) Get-HarnessCompareVerdict -Facts (New-Facts $Set) -ReportResidual @Criteria }
+    $v1 = & $rep @{}
+    & $add 'report verdict: bit-identical renders are PASS: the fixed facts, then "reported: bit-identical"' $false ($v1.Status -ceq 'PASS' -and $v1.Detail -cmatch '^identical=yes lag=0 maxdiff=-inf head=-inf frames=96000/96000 .*; reported: bit-identical$')
+    $drifted = @{ Identical = $false; MaxDiff = [Math]::Pow(2, -10); HeadDiff = [Math]::Pow(2, -10); FirstDiff = 100; MaxDiffFrame = 100; PairCount = 192000; ResidualSumSq = 1e-6; SignalSumSq = 1.0 }
+    $v2 = & $rep $drifted
+    & $add "report verdict: renders that differ are PASS; the residual, its RMS against the reference, the lags, where it is largest and where it starts are reported ($($v2.Detail))" $false (
+        $v2.Status -ceq 'PASS' -and $v2.Detail -cmatch '^identical=no lag=0 maxdiff=-60\.21 head=-60\.21 ' -and
+        $v2.Detail.EndsWith('; reported: not bit-identical, residual -60.21 dBFS (rms -60.00 dB against the reference) measured at lag 0 (expected), best lag 0, largest at 0.002083 s, first difference at frame 100'))
+    $v3 = & $rep @{ Identical = $false; BestLag = 5; MaxDiff = 0.01 }
+    $r3 = Get-HarnessResidualFacts -Facts (New-Facts @{ Identical = $false; BestLag = 5; MaxDiff = 0.01 }) -Reported
+    & $add 'report verdict: a best lag other than the expected one is reported, not judged; lag= of the line is the best lag, the lag of the residual facts the one it was measured at' $false (
+        $v3.Status -ceq 'PASS' -and $v3.Detail -cmatch '^identical=no lag=5 ' -and $v3.Detail -clike '*measured at lag 0 (expected), best lag 5*' -and $v3.Detail -cnotlike '*lag is 5*' -and $r3['lag'] -eq 0 -and $r3['bestLag'] -eq 5)
+    $v4 = & $rep @{ Identical = $false; MaxDiff = 0.01; NanB = 1; NonFiniteB = 1 }
+    & $add 'report verdict: NaN or Inf is FAIL' $true ($v4.Status -ceq 'FAIL' -and $v4.Detail -clike '*; reported: not bit-identical, *; failed: NaN or Inf samples present')
+    $v5 = & $rep @{ Identical = $false; Comparable = $false; RateB = 44100; MaxDiff = [double]::NaN; HeadDiff = [double]::NaN }
+    & $add 'report verdict: renders that cannot be compared are FAIL' $true ($v5.Status -ceq 'FAIL' -and $v5.Detail -clike '*; failed: sample rate or channel count differ, the renders cannot be compared')
+    $v6 = & $rep @{ Identical = $false; FramesB = 95999 }
+    & $add "report verdict: frame counts that differ are FAIL (one of the two renders is broken) ($($v6.Detail))" $true (
+        $v6.Status -ceq 'FAIL' -and $v6.Detail.EndsWith('; reported: not bit-identical, residual -inf dBFS measured at lag 0 (expected), best lag 0; failed: frame counts differ'))
+    $v7 = & $rep @{ FramesA = 0; FramesB = 0 }
+    & $add 'report verdict: a render without frames is INCOMPLETE first, with the text of a judged comparison' $true ($v7.Status -ceq 'INCOMPLETE' -and $v7.Detail -ceq (Get-HarnessCompareVerdict -Facts (New-Facts @{ FramesA = 0; FramesB = 0 })).Detail)
+    $v8 = & $rep @{ Identical = $false; MaxDiff = [double]::NaN; HeadDiff = [double]::NaN }
+    $v8n = & $rep @{ Identical = $false; MaxDiff = [double]::NaN; HeadDiff = [double]::NaN; NanB = 4; NonFiniteB = 4 }
+    & $add "report verdict: no residual measured (no overlapping finite samples) is INCOMPLETE; with NaN as well FAIL wins ($($v8.Detail))" $true (
+        $v8.Status -ceq 'INCOMPLETE' -and $v8.Detail.EndsWith('; reported: not bit-identical, best lag 0; incomplete: no residual was measured (no overlapping finite samples)') -and $v8n.Status -ceq 'FAIL')
+    & $add 'report verdict: a peak above peakMaxDb and a level change outside rmsChangeDb are still FAIL' $true (
+        (& $rep @{ PeakB = 1.5 } @{ PeakMaxDb = 0 }).Status -ceq 'FAIL' -and (Get-HarnessCompareVerdict -Facts $lv -ReportResidual -RmsChangeDb (& $cc 'R' -6.1 -5.9)).Detail -clike '*; reported: *; failed: rms change R 0.00 dB outside*')
+    & $add 'report verdict: to report and to judge a limit at once is a programming error: it throws' $true ($(try { $null = Get-HarnessCompareVerdict -Facts (New-Facts) -ReportResidual -MaxDiffDb -120; $false } catch { $_.Exception.Message -clike '*exclude each other*' }))
+    $rf = Get-HarnessResidualFacts -Facts (New-Facts) -Reported
+    & $add "residual facts: identical renders: maxDiff 0 and every value that cannot be given an explicit null, in the documented order ($(@($rf.get_Keys()) -join ','))" $true (
+        (@($rf.get_Keys()) -join ',') -ceq 'reported,identical,lag,bestLag,maxDiff,residualDb,residualRmsDb,maxDiffFrame,maxDiffSeconds,firstDiffFrame,frames,referenceFrames' -and
+        $rf['reported'] -eq $true -and $rf['identical'] -eq $true -and $rf['lag'] -eq 0 -and $rf['bestLag'] -eq 0 -and $rf['maxDiff'] -eq 0 -and $null -eq $rf['residualDb'] -and $null -eq $rf['residualRmsDb'] -and
+        $null -eq $rf['maxDiffFrame'] -and $null -eq $rf['maxDiffSeconds'] -and $null -eq $rf['firstDiffFrame'] -and $rf['frames'] -eq 96000 -and $rf['referenceFrames'] -eq 96000)
+    $rd = Get-HarnessResidualFacts -Facts (New-Facts $drifted)
+    & $add 'residual facts: renders that differ: the residual in dBFS and against the reference to 6 decimals, where it is largest (frame and seconds), where it starts' $false (
+        $rd['reported'] -eq $false -and $rd['maxDiff'] -eq [Math]::Pow(2, -10) -and $rd['residualDb'] -eq -60.205999 -and $rd['residualRmsDb'] -eq -60.0 -and $rd['maxDiffFrame'] -eq 100 -and
+        $rd['maxDiffSeconds'] -eq 0.002083 -and $rd['firstDiffFrame'] -eq 100)
+    $rn = Get-HarnessResidualFacts -Facts (New-Facts @{ Identical = $false; MaxDiff = [double]::NaN })
+    $rc = Get-HarnessResidualFacts -Facts (New-Facts @{ Identical = $false; Comparable = $false; RateB = 44100; MaxDiff = [double]::NaN })
+    $nanFree = @(@($rf, $rd, $rn, $rc) | Where-Object { (ConvertTo-HarnessJsonText -Value $_) -clike '*NaN*' }).Count -eq 0
+    & $add 'residual facts: nothing measured gives maxDiff null, renders that cannot be compared bestLag null; their JSON has null, never "NaN"' $true (
+        $rn.Contains('maxDiff') -and $null -eq $rn['maxDiff'] -and $null -eq $rn['residualDb'] -and $rc.Contains('bestLag') -and $null -eq $rc['bestLag'] -and $null -eq $rc['maxDiff'] -and $nanFree -and
+        (ConvertTo-HarnessJsonText -Value $rn) -clike '*"maxDiff":null*' -and (ConvertTo-HarnessJsonText -Value $rc) -clike '*"bestLag":null*')
+    # The C# comparer on samples in memory: the first and the largest difference are frames of the reference
+    $mem = { param([double[]]$SampleList) $w = [HarnessWavData]::new(); $w.Rate = 48000; $w.Channels = 1; $w.Frames = $SampleList.Length; $w.Format = 'float32'; $w.Samples = $SampleList; $w }
+    $va = [double[]](1..20 | ForEach-Object { $_ / 32.0 })
+    $vb = [double[]]$va.Clone(); $vb[7] += 0.5
+    $vl = [double[]]::new(20); [Array]::Copy($va, 0, $vl, 1, 19); $vl[8] += 0.5
+    $f0 = [HarnessWav]::Compare((& $mem $va), (& $mem $vb), 0, 2, 0)
+    $f1 = [HarnessWav]::Compare((& $mem $va), (& $mem $vl), 1, 2, 0)
+    $fi = [HarnessWav]::Compare((& $mem $va), (& $mem $va), 0, 2, 0)
+    $sumSq = 0.0; foreach ($x in $va) { $sumSq += $x * $x }
+    & $add "comparer: the first and the largest difference are frames of the reference at the expected lag, over the finite pairs; identical renders have none ($($f0.FirstDiff), $($f1.FirstDiff), $($fi.FirstDiff))" $true (
+        $f0.FirstDiff -eq 7 -and $f0.MaxDiffFrame -eq 7 -and $f0.PairCount -eq 20 -and $f0.ResidualSumSq -eq 0.25 -and $f0.SignalSumSq -eq $sumSq -and
+        $f1.FirstDiff -eq 7 -and $f1.MaxDiffFrame -eq 7 -and $f1.PairCount -eq 19 -and $f1.ResidualSumSq -eq 0.25 -and
+        $fi.FirstDiff -eq -1 -and $fi.MaxDiffFrame -eq -1 -and $fi.ResidualSumSq -eq 0 -and $fi.PairCount -eq 20)
+    # The level at the end of a render: only the last frames are read
+    $endSamples = [double[]]::new(9600); $endSamples[10] = 0.75; $endSamples[9000] = -0.25; $endSamples[9599] = 0.125
+    $endFile = & $file 'end-peak.wav' $endSamples 'float32' 48000 1
+    $quietEnd = [double[]]::new(9600); $quietEnd[10] = 0.5
+    & $add 'end level: the peak of the last 100 ms in dBFS, 6 decimals; the whole file when it is shorter; null when that end is silent or the file cannot be read' $true (
+        (Get-HarnessEndPeakDb $endFile) -eq [Math]::Round(20 * [Math]::Log10(0.25), 6) -and (Get-HarnessEndPeakDb $endFile 1) -eq [Math]::Round(20 * [Math]::Log10(0.75), 6) -and
+        $null -eq (Get-HarnessEndPeakDb (& $file 'quiet-end.wav' $quietEnd 'float32' 48000 1)) -and $null -eq (Get-HarnessEndPeakDb (Join-Path $Tmp 'none.wav')) -and $null -eq (Get-HarnessEndPeakDb $badWav))
+    # The residual a comparison returns, and the comparison facts of a row built from it
+    $missingB = Compare-HarnessWavFiles -A $a -B (Join-Path $Tmp 'none.wav') -ReportResidual
+    $onItsOwn = Test-HarnessWavFile -Path $a
+    $judgedSame = & $cmp $same
+    $earlyFacts = New-HarnessComparisonFacts 'repeat' $missingB @()
+    & $add 'comparison: a file that is missing gives Residual null and the comparison facts master null; a render judged on its own has Residual null; a judged comparison has its residual, not reported' $true (
+        $missingB.Status -ceq 'INCOMPLETE' -and $missingB.PSObject.Properties['Residual'] -and $null -eq $missingB.Residual -and $earlyFacts.Contains('master') -and $null -eq $earlyFacts['master'] -and
+        @($earlyFacts['stems']).Count -eq 0 -and $onItsOwn.PSObject.Properties['Residual'] -and $null -eq $onItsOwn.Residual -and $judgedSame.Residual['reported'] -eq $false -and $judgedSame.Residual['identical'] -eq $true)
+    $stemList = @([pscustomobject]@{ Track = 'A'; Compare = 'none'; Result = $onItsOwn }, [pscustomobject]@{ Track = 'B'; Compare = 'reference'; Result = $judgedSame }, [pscustomobject]@{ Track = 'C'; Compare = 'reference'; Result = $missingB })
+    $withStems = New-HarnessComparisonFacts 'dry' $judgedSame $stemList
+    & $add 'comparison: only stems compared with the reference are listed, each with its track first; a stem whose comparison returned early has its track only' $true (
+        $withStems['against'] -ceq 'dry' -and $withStems['master']['identical'] -eq $true -and (@($withStems['stems'] | ForEach-Object { $_['track'] }) -join ',') -ceq 'B,C' -and
+        (@(@($withStems['stems'][0].get_Keys())[0..1]) -join ',') -ceq 'track,reported' -and @($withStems['stems'][1].get_Keys()).Count -eq 1)
+    # Only the exact word: criteria built by hand (an extension's Judge) are not validated
+    $wordCtx = [pscustomobject]@{ Limits = [pscustomobject]@{ lagSearch = 64; headSeconds = 2 } }
+    $later = & $file 'later.wav' $shift
+    $judgeWord = {
+        param($MaxDiffWord)
+        $wordCriteria = [pscustomobject]@{ maxDiffDb = $MaxDiffWord; lag = 0; peakMaxDb = $null; notSilent = $false; rmsDb = $null; energyRatioDb = $null; rmsChangeDb = $null }
+        try { (Invoke-HarnessCompare $wordCtx $wordCriteria $a $later).Status } catch { 'INCOMPLETE' } # a scenario that throws is INCOMPLETE
+    }
+    $words = @(@('report', 'Report', 'reported', '12') | ForEach-Object { & $judgeWord $_ })
+    & $add "comparison: only the exact word report means a residual that is only reported: Report, reported and 12 on renders a sample apart are never PASS ($($words -join ', '))" $true (($words -join ',') -ceq 'PASS,INCOMPLETE,INCOMPLETE,FAIL')
     $cases
 }
 
@@ -1163,6 +1250,26 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'an expectPdc word other than report'; E = { param($c) $c['plugins']['delay']['expectPdc'] = 'reported' }; M = 'plugins.delay.expectPdc' }
         @{ L = 'a learn batch size of 0'; E = { param($c) $c['limits']['learnBatchSize'] = 0 }; M = 'learnBatchSize: must be between 1 and 256' }
         @{ L = 'a learn batch size of 257'; E = { param($c) $c['limits']['learnBatchSize'] = 257 }; M = 'learnBatchSize: must be between 1 and 256' }
+        @{ L = 'a maxDiffDb word other than report (Report: the word is case sensitive)'; E = { param($c) (& $scenario $c 'chain-repeat')['maxDiffDb'] = 'Report' }; M = 'maxDiffDb: must be one of report' }
+        @{ L = 'a maxDiffDb word other than report (reported)'; E = { param($c) (& $scenario $c 'chain-repeat')['maxDiffDb'] = 'reported' }; M = 'maxDiffDb: must be one of report' }
+        @{ L = 'a maxDiffDb of true'; E = { param($c) (& $scenario $c 'chain-repeat')['maxDiffDb'] = $true }; M = 'maxDiffDb: must be a number -400..24, or "report"' }
+        @{ L = 'a maxDiffDb of 25'; E = { param($c) (& $scenario $c 'chain-repeat')['maxDiffDb'] = 25 }; M = 'maxDiffDb: must be at least -400 and at most 24' }
+        @{ L = 'a reported residual without a reference'; E = { param($c) (& $scenario $c 'routing-alone')['maxDiffDb'] = 'report' }; M = 'maxDiffDb needs a reference, but this render is compared with none' }
+        @{ L = 'a reported residual on a stem judged on its own'; E = { param($c) (& $scenario $c 'routing')['stems'] = @([ordered]@{ track = 'Keys'; compare = 'none'; maxDiffDb = 'report' }) }; M = 'stems[0]: maxDiffDb needs a reference' }
+        @{ L = 'a tail of -1 s'; E = { param($c) (& $scenario $c 'chain-repeat')['tailSeconds'] = -1 }; M = 'tailSeconds: must be at least 0 and at most 60' }
+        @{ L = 'a tail of 60.5 s'; E = { param($c) (& $scenario $c 'chain-repeat')['tailSeconds'] = 60.5 }; M = 'tailSeconds: must be at least 0 and at most 60' }
+        @{ L = 'a tail given as a string'; E = { param($c) (& $scenario $c 'chain-repeat')['tailSeconds'] = '1' }; M = 'tailSeconds: must be a number' }
+        @{ L = 'a tail shorter than one frame'; E = { param($c) (& $scenario $c 'chain-repeat')['tailSeconds'] = 0.00001 }; M = 'tailSeconds: 1E-05 s is less than one frame at 48000 Hz' }
+        @{ L = 'a tail on a savereopen scenario (only renders have one)'; E = { param($c) (& $scenario $c 'bus-reopen')['tailSeconds'] = 1 }; M = "unknown key 'tailSeconds'" }
+        @{ L = 'a tail on a device scenario'; E = { param($c) (& $scenario $c 'bus-device')['tailSeconds'] = 1 }; M = "unknown key 'tailSeconds'" }
+        @{ L = 'a tail on a transport scenario'; E = { param($c) (& $scenario $c 'monitor-states')['tailSeconds'] = 1 }; M = "unknown key 'tailSeconds'" }
+        @{ L = 'a tail on a layout without a source track (no layout may lack one)'; E = { param($c) $c['layouts']['chain']['tracks'][0]['source'] = $false; (& $scenario $c 'chain-repeat')['tailSeconds'] = 0.5 }; M = 'layouts.chain: no track has source: true' }
+        @{ L = 'keepFirst without keep'; E = { param($c) $s = & $scenario $c 'chain-repeat'; $s['maxDiffDb'] = 'report'; $s['keepFirst'] = $true }; M = 'keepFirst: needs keep true, compare "repeat" and maxDiffDb "report"' }
+        @{ L = 'keepFirst on a render compared with dry'; E = { param($c) $s = & $scenario $c 'bus'; $s['maxDiffDb'] = 'report'; $s['keep'] = $true; $s['keepFirst'] = $true }; M = 'keepFirst: needs keep true, compare "repeat"' }
+        @{ L = 'keepFirst on a repeat that judges its residual'; E = { param($c) $s = & $scenario $c 'chain-repeat'; $s['keep'] = $true; $s['keepFirst'] = $false }; M = 'keepFirst: needs keep true' }
+        @{ L = 'keepFirst that is not a boolean'; E = { param($c) (& $scenario $c 'chain-repeat')['keepFirst'] = 'yes' }; M = 'keepFirst: must be true or false' }
+        @{ L = 'keepFirst in a negative case'; E = { param($c) $c['negative'][0]['keepFirst'] = $true }; M = "unknown key 'keepFirst'" }
+        @{ L = 'keepFirst on a device scenario'; E = { param($c) (& $scenario $c 'bus-device')['keepFirst'] = $true }; M = "unknown key 'keepFirst'" }
     )
     foreach ($mu in $mutations) {
         $found = & $problems $mu.E
@@ -1261,6 +1368,36 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     & $add "schema: Test-Json accepts variants, expectPdc `"report`" and learnBatchSize, like the validator ($(@($variantConf.Problems) -join ' | '))" $false (
         @($variantConf.Problems).Count -eq 0 -and $variantConf.Config.Limits.learnBatchSize -eq 8 -and @($variantConf.Config.Scenarios | Where-Object { $_.baseId -ceq 'chain-repeat' }).Count -eq 3 -and (& $agree (ConvertTo-HarnessJsonText -Value $withVariants) $true))
     & $add 'configuration: learnBatchSize is 32 unless given' $false ($conf.Limits.learnBatchSize -eq 32)
+    # maxDiffDb "report", a tail, keepFirst: accepted where they belong, normalised per leg of a matrix
+    $withReport = ConvertFrom-HarnessJson $text
+    $rs = & $scenario $withReport 'chain-repeat'; $rs['maxDiffDb'] = 'report'; $rs['keep'] = $true; $rs['keepFirst'] = $true; $rs['tailSeconds'] = 0.5
+    $rr = & $scenario $withReport 'routing'; $rr['maxDiffDb'] = 'report'; $rr['stems'][1]['maxDiffDb'] = -90
+    (& $scenario $withReport 'chain')['tailSeconds'] = 0.5
+    $withReport['negative'][0]['tailSeconds'] = 0.1; $withReport['negative'][0]['maxDiffDb'] = 'report'
+    $reportConf = Test-HarnessConfigData -Raw $withReport -Kinds $extensions.Kinds
+    $scOf = { param([string]$ScId) @($reportConf.Config ? @($reportConf.Config.Scenarios | Where-Object { $_.id -ceq $ScId }) : @())[0] }
+    $repeatSc = & $scOf 'chain-repeat'
+    $routingSc = & $scOf 'routing'
+    & $add "configuration: maxDiffDb `"report`" is kept as the word; a stem without its own takes it, a stem with its own number keeps that ($(@($reportConf.Problems) -join ' | '))" $false (
+        @($reportConf.Problems).Count -eq 0 -and $repeatSc.maxDiffDb -is [string] -and $repeatSc.maxDiffDb -ceq 'report' -and $routingSc.stems[0].Criteria.maxDiffDb -ceq 'report' -and
+        $routingSc.stems[1].Criteria.maxDiffDb -eq -90 -and $routingSc.stems[1].Criteria.maxDiffDb -isnot [string] -and $repeatSc.keepFirst -eq $true -and (Test-HarnessScenarioReports $routingSc) -and
+        -not (Test-HarnessScenarioReports (& $scOf 'bus')))
+    & $add 'configuration: the frames of a tail are counted at the rate of each leg of a matrix (0.5 s: 22050 at 44100 Hz, 24000 at 48000 Hz)' $true (
+        (& $scOf 'chain-offline-44100').tailFrames -eq 22050 -and (& $scOf 'chain-offline-48000').tailFrames -eq 24000 -and (& $scOf 'chain-1x-44100').tailSeconds -eq 0.5 -and $repeatSc.tailFrames -eq 24000)
+    $negTail = @($reportConf.Config ? @($reportConf.Config.Negative) : @())[0]
+    $builtinRenders = @(Get-HarnessBuiltinNegatives | Where-Object { $_.kind -ceq 'render' })
+    & $add 'configuration: a negative render case may report its residual and have a tail; the built-in negatives have no tail and keep nothing first' $true (
+        $negTail.maxDiffDb -ceq 'report' -and $negTail.tailFrames -eq 4800 -and $builtinRenders.Count -ge 2 -and
+        @($builtinRenders | Where-Object { -not $_.PSObject.Properties['tailSeconds'] -or -not $_.PSObject.Properties['tailFrames'] -or -not $_.PSObject.Properties['keepFirst'] -or
+                $_.tailSeconds -ne 0 -or $_.tailFrames -ne 0 -or $_.keepFirst -ne $false }).Count -eq 0)
+    & $add 'configuration: a render without a tail has tailSeconds 0 and tailFrames 0, without keepFirst false' $false ((& $scOf 'bus').tailSeconds -eq 0 -and (& $scOf 'bus').tailFrames -eq 0 -and (& $scOf 'bus').keepFirst -eq $false)
+    $withReportVariants = ConvertFrom-HarnessJson (ConvertTo-HarnessJsonText -Value $withReport)
+    & $vary $withReportVariants @([ordered]@{ id = 'dry'; bypass = $true }, [ordered]@{ id = 'as-is' })
+    $reportVariants = Test-HarnessConfigData -Raw $withReportVariants -Kinds $extensions.Kinds
+    $rv = @($reportVariants.Config ? @($reportVariants.Config.Scenarios | Where-Object { $_.baseId -ceq 'chain-repeat' }) : @())
+    & $add "configuration: each variant takes the tail and the reported residual of its scenario ($(@($reportVariants.Problems) -join ' | '))" $false (
+        $rv.Count -eq 2 -and @($rv | Where-Object { $_.tailFrames -ne 24000 -or $_.tailSeconds -ne 0.5 -or $_.maxDiffDb -cne 'report' -or $_.keepFirst -ne $true }).Count -eq 0)
+    & $add 'schema: Test-Json accepts maxDiffDb "report", a tail and keepFirst where the validator does' $false (& $agree (ConvertTo-HarnessJsonText -Value $withReport) $true)
     $structural = @($mutations | Where-Object { $_.L -in 'an unknown key at the top', 'an unknown key in a scenario', 'schema 2', 'a string where a number belongs', 'a sample rate out of range', 'a scenario id that breaks the pattern', 'an unknown expected outcome', 'a negative case without expectDetail',
             'a state with both a template and a state file', 'a template state without the FX number', 'an unknown JSFX', 'an unknown send mode', 'a pan out of range', 'a range of one number', 'a range of three numbers', 'savereopen with 0 cycles', 'an unknown host setting', 'a render mode axis in the matrix of a device scenario (the device step renders nothing)',
             'a transport state with an unknown transport (recording is no state the harness can be asked for)', 'a transport state with an unknown monitoring mode', 'a transport state without arm', 'a transport state whose arm is not a boolean',
@@ -1268,13 +1405,15 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
             'a transport scenario without states', 'a transport scenario of 65 states', 'a render mode axis in the matrix of a transport scenario (nothing is rendered)', 'Run FX when stopped that is not a boolean', 'a state name that breaks the pattern',
             'a tool JSFX of the transport kind configured as a plugin', 'a file that is not a string', 'keep on a device scenario (only renders are kept)', 'keep in a negative case', 'keep that is not a boolean',
             'variants on a device scenario (only renders have variants)', 'variants in a negative case', 'a variant without an id', 'a variant id that breaks the pattern', 'an empty list of variants', 'more than 1000 variants',
-            'an unknown key in a variant', 'an unknown key in the FX of a variant', 'the FX of a variant with nothing in it', 'a variant with an empty fx', 'an expectPdc word other than report', 'a learn batch size of 0', 'a learn batch size of 257' })
+            'an unknown key in a variant', 'an unknown key in the FX of a variant', 'the FX of a variant with nothing in it', 'a variant with an empty fx', 'an expectPdc word other than report', 'a learn batch size of 0', 'a learn batch size of 257',
+            'a maxDiffDb word other than report (Report: the word is case sensitive)', 'a maxDiffDb word other than report (reported)', 'a maxDiffDb of true', 'a maxDiffDb of 25', 'a tail of -1 s', 'a tail of 60.5 s', 'a tail given as a string',
+            'a tail on a savereopen scenario (only renders have one)', 'a tail on a device scenario', 'a tail on a transport scenario', 'keepFirst that is not a boolean', 'keepFirst in a negative case', 'keepFirst on a device scenario' })
     $disagree = @(foreach ($mu in $structural) {
             $raw = ConvertFrom-HarnessJson $text
             & $mu.E $raw
             if (-not (& $agree (ConvertTo-HarnessJsonText -Value $raw) $false)) { $mu.L }
         })
-    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 51 -and $disagree.Count -eq 0)
+    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 64 -and $disagree.Count -eq 0)
     $cases
 }
 
@@ -1321,6 +1460,18 @@ function Get-ProjectCases([string]$Tmp, [string]$RepoRoot) {
       LENGTH 0\.29478458049886624
 ' -and (& $lpart 'Keys') -match '(?m)^      LENGTH 0\.5
 ' -and [regex]::Matches($lt, 'LENGTH ').Count -eq 2)
+    $ltHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.UTF8Encoding]::new($false).GetBytes($lt))).ToLowerInvariant()
+    $looped = New-HarnessProjectText -Layout $rl -Blocks $rb -SourceWav 'S.wav' -Sources @{ Drums = 'F.wav' } -Lengths @{ Drums = 0.29478458049886624 } -RenderDir 'D' -RenderName 'N' -Seconds 0.5 -NoLoop
+    & $add "project: without -NoLoop the text is the one of before, byte for byte; with it every item plays its source once (LOOP 0 right after its LENGTH), nothing else changes ($ltHash)" $true (
+        $ltHash -ceq 'ab00bbf3588784f5a57a1846324f66ec7832554f95b50d7606330509127c769b' -and $lt -cnotmatch 'LOOP' -and [regex]::Matches($looped, '(?m)^      LOOP 0$').Count -eq 2 -and
+        $looped -ceq ($lt -replace '(?m)^(      LENGTH [^\n]*\n)', "`${1}      LOOP 0`n"))
+    # The stand-in plays an item longer than its file as REAPER does with "loop source" on, unless the item has LOOP 0
+    $loopSrc = Join-Path $Tmp 'loop-src.wav'
+    [HarnessWav]::Write($loopSrc, 48000, 1, 'float32', $false, [double[]](0.5, 0.25, 0.125, 0.0625))
+    $loopLayout = [pscustomobject]@{ Tracks = @([pscustomobject]@{ Name = 'A'; Source = $true; Folder = $false; Depth = 0; Volume = 1.0; Pan = 0.0; Mute = $false; MasterSend = $true; Sends = @(); Fx = @() }) }
+    $fakeOf = { param([switch]$NoLoop) @((Get-FakeMix (New-HarnessProjectText -Layout $loopLayout -SourceWav $loopSrc -Lengths @{ A = (Get-HarnessItemLength 10 48000) } -RenderDir 'D' -RenderName 'N' -Channels 1 -NoLoop:$NoLoop)).Master) -join ',' }
+    & $add "stand-in: an item longer than its file plays the file again, unless it has LOOP 0: then the rest is silent ($(& $fakeOf) / $(& $fakeOf -NoLoop))" $true (
+        (& $fakeOf) -ceq '0.5,0.25,0.125,0.0625,0.5,0.25,0.125,0.0625,0.5,0.25' -and (& $fakeOf -NoLoop) -ceq '0.5,0.25,0.125,0.0625,0,0,0,0,0,0')
     & $add 'project: with stems each file is named <name>-stem-<track>, REAPER renders master and stems, only the stem tracks are selected' $false (
         $rt -match 'RENDER_PATTERN "N-stem-\$track"' -and $rt -match 'RENDER_STEMS 1' -and (@([regex]::Matches($rt, 'SEL (\d)') | ForEach-Object { $_.Groups[1].Value }) -join '') -ceq '1001')
     # The files a render expects are the ones its render pattern makes REAPER write ($track is Master for the master)
@@ -1347,6 +1498,9 @@ function Get-ProjectCases([string]$Tmp, [string]$RepoRoot) {
         $dryName -ceq '_dry-l-48000-512-offline-2' -and (Get-HarnessReferenceName 'l' 48000 512 'offline' 2 @('A') $false) -clike '_dry-l-48000-512-offline-2-noaf-stems-*' -and
         (Split-Path -Leaf $sig) -ceq '_signal-48000-2-0.wav' -and (Test-Path -LiteralPath $sig) -and
         (Get-HarnessRunFiles $Tmp 'dry-l-48000-512-offline-2').Wav -notin @((Get-HarnessRunFiles $Tmp $dryName).Wav, $sig) -and (Get-HarnessRunFiles $Tmp 'signal-48000-2-0').Wav -notin @($sig))
+    & $add 'work files: a dry reference with a tail is another render, its name ends in -tail<frames>; without a tail the name is as before' $true (
+        (Get-HarnessReferenceName 'l' 48000 512 'offline' 2 @() $true $true 480) -ceq '_dry-l-48000-512-offline-2-tail480' -and (Get-HarnessReferenceName 'l' 48000 512 'offline' 2 @() $true $true 0) -ceq $dryName -and
+        (Get-HarnessReferenceName 'l' 48000 512 'offline' 2 @('A') $false $true 480) -clike '_dry-l-48000-512-offline-2-noaf-stems-*-tail480')
     & $add 'project: without stems one file named as asked, no stem render, no track selected' $false ($text -match 'RENDER_PATTERN "N"' -and $text -notmatch 'RENDER_STEMS' -and $text -notmatch 'SEL 1')
     $lp = New-HarnessLearnProjectText -Variants @([pscustomobject]@{ Key = 'gain|'; State = '' }, [pscustomobject]@{ Key = 'gain@quiet|'; State = 'quiet' }) -States @{ 'gain@quiet|' = @('<VST "q"', 'Q', '>') }
     & $add 'learn project: an empty track per variant, the state block already on the track of a named state' $false ($lp -match '(?s)NAME "learn-1"\n    NCHAN 2\n  >\n  <TRACK\n    NAME "learn-2"\n    NCHAN 2\n    <FXCHAIN\n      BYPASS 0 0 0\n      <VST "q"\n      Q\n      >\n    >')
@@ -2753,6 +2907,18 @@ function Get-ExampleCases([string]$RepoRoot) {
     & $add 'example: the five states come out of routing-template.rpp, each block the plugin it is configured for, from its track' $false (($stateKeys -join ',') -ceq (@($wantStates.get_Keys()) -join ',') -and $wrongStates.Count -eq 0)
     $routingNames = @($exampleConf.Layouts['routing'].Tracks | ForEach-Object { $_.Name })
     & $add 'example: the routing layout names its tracks as the template does' $false (($routingNames -join ',') -ceq 'Bus,Vox 1,Vox 2,Vox 3')
+    $fsvFile = Join-Path $RepoRoot 'examples/file-source-variants/reaper-harness.json'
+    $fsvText = [IO.File]::ReadAllText($fsvFile)
+    $fsvConf = Read-HarnessConfig -Path $fsvFile # a problem is a usage error, which fails the group
+    $fsvRows = @($fsvConf.Scenarios)
+    $fsvVariants = @($fsvRows | Where-Object { $_.baseId -ceq 'verb' })
+    & $add "example: the file-source configuration validates: one plugin on a track that plays a file, five variants compared with dry and their residual reported, a reported repeat, a render with a tail ($(@($fsvRows | ForEach-Object { $_.id }) -join ', '))" $false (
+        @($fsvConf.Plugins.get_Keys()).Count -eq 1 -and $fsvConf.Layouts['voice'].Tracks[0].File -ceq 'sources/voice.wav' -and $fsvVariants.Count -eq 5 -and
+        @($fsvVariants | Where-Object { $_.compare.Kind -cne 'dry' -or $_.maxDiffDb -cne 'report' }).Count -eq 0 -and
+        @($fsvRows | Where-Object { $_.compare.Kind -ceq 'repeat' -and $_.maxDiffDb -ceq 'report' }).Count -eq 1 -and @($fsvRows | Where-Object { $_.tailFrames -eq 144000 }).Count -eq 1)
+    $fsvSchemaOk = try { Test-Json -Json $fsvText -Schema ([IO.File]::ReadAllText((Join-Path $RepoRoot 'schema/config.schema.json'))) -ErrorAction Stop } catch { $false }
+    & $add 'example: the file-source configuration names a placeholder plugin and no local path, and the schema accepts it' $false (
+        $fsvText -cmatch '"bundle": "My Reverb\.vst3"' -and $fsvText -cnotmatch '[A-Za-z]:[\\/]' -and $fsvSchemaOk)
     $cases
 }
 
@@ -3200,6 +3366,14 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'render files: a stem that is not there is a gap, and it is named' $true ((Get-HarnessRenderGap $wavFile @($stemFile)) -ceq 'the render produced no stem file gap-stem.wav')
     [IO.File]::WriteAllText($stemFile, 'x')
     & $add 'render files: all of them there is no gap' $false ($null -eq (Get-HarnessRenderGap $wavFile @($stemFile)))
+    # With a tail every file must have exactly the frames asked for
+    $gapWav = { param([string]$GapLeaf, [int]$GapFrames) $p = Join-Path $Tmp $GapLeaf; [HarnessWav]::Write($p, 48000, 2, 'float32', $false, [double[]]::new(2 * $GapFrames)); $p }
+    $gapMaster = & $gapWav 'gap-m.wav' 10; $gapStem = & $gapWav 'gap-s.wav' 10; $gapShort = & $gapWav 'gap-short.wav' 9
+    & $add 'render files: with a tail, files of exactly the frames asked for are no gap' $false ($null -eq (Get-HarnessRenderGap $gapMaster @($gapStem) 10))
+    & $add 'render files: with a tail, a master one frame short is a gap, named with its frames' $true ((Get-HarnessRenderGap $gapShort @($gapStem) 10) -ceq 'the render gap-short.wav has 9 frames, not 10: the tail was not rendered as asked')
+    & $add 'render files: with a tail, a stem one frame short is a gap, and it is named' $true ((Get-HarnessRenderGap $gapMaster @($gapStem, $gapShort) 10) -ceq 'the render gap-short.wav has 9 frames, not 10: the tail was not rendered as asked')
+    & $add 'render files: with a tail, a file whose header cannot be read is a gap; without one no header is read' $true (
+        (Get-HarnessRenderGap $wavFile @() 10) -clike 'the render gap.wav cannot be read: WAV: *' -and $null -eq (Get-HarnessRenderGap $wavFile @($stemFile) 0))
     # The time the step gets, and what the driver is told
     $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $win }, [pscustomobject]@{ Samples = 9600; Windows = $null }) }
     & $add 'transport timeout: 20 s more for every window opened and closed, 60 s a state with reports' $false (
@@ -3245,12 +3419,18 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a judged plugin twice in the layout'; F = '{ "plugin": "rec" } ]'; T = '{ "plugin": "rec" }, { "plugin": "rec" } ]'; W = "*.expect.report.rec: the layout uses 'rec' 2 times; a judged report needs exactly one instance"; N = 3 }
         @{ L = 'a judged render with Run FX when stopped on'; F = '"runFxWhenStopped": false, '; T = ''; W = 'config.scenarios[[]1[]].report: judging a render by a report needs host.runFxWhenStopped false: *' }
         @{ L = 'a window of a plugin that is not on the tested track'; F = '"plugin": "mon", "count": 3'; T = '"plugin": "ghost", "count": 3'; W = "*.windows.plugin: 'ghost' is on the tested track 0 times; its window needs exactly one" }
+        @{ L = 'a repeat that reports its residual and judges plugin reports'; F = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }'; T = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }, "compare": "repeat", "maxDiffDb": "report"'; W = 'config.scenarios[[]1[]].report: a repeat that reports its residual cannot judge plugin reports as well*' }
+        @{ L = 'a repeat with a stem that reports its residual and plugin reports judged'; F = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }'; T = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }, "compare": "repeat", "stems": [ { "track": "Voice", "maxDiffDb": "report" } ]'; W = 'config.scenarios[[]1[]].report: a repeat that reports its residual cannot judge plugin reports as well*' }
         @{ L = 'a window of a plugin twice on the tested track'; F = '{ "plugin": "mon" },'; T = '{ "plugin": "mon" }, { "plugin": "mon" },'; W = "*.windows.plugin: 'mon' is on the tested track 2 times; its window needs exactly one" }
     )
     foreach ($c in $cfgBad) {
         if (-not $cfgText.Contains($c.F)) { & $add "configuration: $($c.L) (the sample to change is gone)" $true $false; continue }
         $res = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson ($cfgText.Replace($c.F, $c.T)))
         & $add "configuration: $($c.L) is refused ($(@($res.Problems) -join ' | '))" $true (@($res.Problems).Count -eq ($c['N'] ?? 1) -and @($res.Problems | Where-Object { $_ -clike $c.W }).Count -eq 1)
+    }
+    foreach ($fine in '"compare": "repeat"', '"maxDiffDb": "report"') {
+        $res = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson ($cfgText.Replace('"report": { "rec": { "blocksRealtime": { "value": 0 } } }', '"report": { "rec": { "blocksRealtime": { "value": 0 } } }, ' + $fine)))
+        & $add "configuration: plugin reports go with a repeat that judges its residual, and with a residual reported against dry ($fine$(@($res.Problems | ForEach-Object { ": $_" }) -join ''))" $false (@($res.Problems).Count -eq 0)
     }
     # The schema refuses the empty objects the validator refuses, so that an editor does not pass what a run will not
     $schemaText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'schema/config.schema.json'))
@@ -3344,19 +3524,28 @@ function Get-WiringCases([string]$RepoRoot) {
         @(& $at $learnCalls 'Get-HarnessLearnTrackNames').Count -eq 1 -and (& $at $learnCalls 'Get-HarnessLearnTrackNames')[0] -lt (& $at $learnCalls 'New-HarnessLearnProjectText')[0] -and
         ((& $namesArg 'New-HarnessLearnProjectText') -join ',') -ceq '$learnNames' -and ((& $namesArg 'Test-HarnessLearnReport') -join ',') -ceq '$learnNames')
     # expectPdc is an integer or the word "report", and its type says which: an equality with the word would only hold
-    # because PowerShell takes a word that does not convert to an integer as unequal, so no source compares with it
+    # because PowerShell takes a word that does not convert to an integer as unequal, so no source compares with it.
+    # The one exception is maxDiffDb: criteria built by hand (an extension's Judge) are not validated, so only the exact
+    # word may mean a reported residual, and Test-HarnessResidualReported compares it, after testing its type
+    $wordHelper = 'Test-HarnessResidualReported'
     $reportWord = @(foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1')) {
             $fileAst = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
             $fileAst.FindAll({
                     param($node)
                     $node -is [System.Management.Automation.Language.BinaryExpressionAst] -and [string]$node.Operator -cin 'Ieq', 'Ceq', 'Ine', 'Cne' -and
                     @(@($node.Left, $node.Right) | Where-Object { $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $_.Value -ceq 'report' }).Count -gt 0
-                }, $true) | ForEach-Object { "$($f.Name): $($_.Extent.Text)" }
+                }, $true) | Where-Object {
+                    $up = $_.Parent
+                    while ($up -and $up -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $up = $up.Parent }
+                    -not ($f.Name -ceq 'Config.psm1' -and $up -and $up.Name -ceq $wordHelper)
+                } | ForEach-Object { "$($f.Name): $($_.Extent.Text)" }
         })
     $fxReportAst = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Scenarios.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-HarnessFxReport' }, $true)
     $typeTests = @($fxReportAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.BinaryExpressionAst] -and [string]$node.Operator -cin 'Is', 'IsNot' -and $node.Right.Extent.Text -ceq '[string]' }, $true))
-    & $add "wiring: whether a latency is only reported is told by the type of expectPdc (Test-HarnessFxReport tests it); no source compares with the word 'report' ($($reportWord -join ' | '))" $false (
-        $reportWord.Count -eq 0 -and $typeTests.Count -eq 1)
+    $wordAst = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Config.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $wordHelper }, $true)
+    $wordBody = $wordAst ? $wordAst.Body.Extent.Text : ''
+    & $add "wiring: whether a latency is only reported is told by the type of expectPdc (Test-HarnessFxReport tests it); no source compares with the word 'report' but $wordHelper, which tests the type first and then the exact word ($($reportWord -join ' | '))" $false (
+        $reportWord.Count -eq 0 -and $typeTests.Count -eq 1 -and $wordBody -cmatch "^\{ \`$\w+\.maxDiffDb -is \[string\] -and \`$\w+\.maxDiffDb -ceq 'report' \}`$")
     $hostCalls = & $callsIn (Join-Path $RepoRoot 'src/Host.psm1') 'Invoke-HarnessHost'
     & $add 'wiring: Invoke-HarnessHost builds the command line from Get-HarnessCfgArgument (which checks the directory again)' $false ('Get-HarnessCfgArgument' -in $hostCalls.Name)
     # REAPER cannot run here, so only the text of the driver can be looked at: the sampler waits for this mark, and with

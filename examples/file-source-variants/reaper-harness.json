@@ -1,0 +1,24 @@
+{
+  "$schema": "../../schema/config.schema.json",
+  "schema": 1,
+  "name": "file-source-variants",
+  "notes": "Example: one plugin (a placeholder, My Reverb.vst3) on a track that plays a recording of your own, sources/voice.wav next to this file (not shipped). verb: five settings of the plugin, each rendered and compared with the dry render; the residual is measured and written down, not judged, and every render is kept for listening. verb-repeat: the same project rendered twice; whether the plugin is deterministic is reported, and both renders are kept when they differ. verb-tail: three seconds rendered past the end of the recording, so the reverb tail is in the file; judged on its own (not silent). The parameter names Size and Tone are placeholders: run.ps1 -List lists the real ones. See docs/CONFIG.md.",
+  "plugins": {
+    "verb": { "bundle": "My Reverb.vst3" }
+  },
+  "layouts": {
+    "voice": { "tracks": [ { "name": "Voice", "source": true, "file": "sources/voice.wav", "fx": [ { "plugin": "verb" } ] } ] }
+  },
+  "scenarios": [
+    { "id": "verb", "kind": "render", "layout": "voice", "compare": "dry", "maxDiffDb": "report", "keep": true,
+      "variants": [
+        { "id": "bypassed", "bypass": true },
+        { "id": "default" },
+        { "id": "small", "fx": { "verb": { "params": { "Size": 0.25 } } } },
+        { "id": "large", "fx": { "verb": { "params": { "Size": 0.9 } } } },
+        { "id": "dark", "fx": { "verb": { "params": { "Size": 0.5, "Tone": 0.2 } } } }
+      ] },
+    { "id": "verb-repeat", "kind": "render", "layout": "voice", "compare": "repeat", "maxDiffDb": "report", "keep": true },
+    { "id": "verb-tail", "kind": "render", "layout": "voice", "compare": "none", "tailSeconds": 3, "notSilent": true, "keep": true }
+  ]
+}

@@ -490,7 +490,7 @@ function Invoke-HarnessSuite {
                     $shown = $o
                     if ($s.kind -ceq 'render' -and $s.keep) {
                         # Whatever the verdict: its render and stems move out of the work directory, a line goes into the manifest
-                        $kept = Save-HarnessKeptRender -Keep $keeper -Ctx $ctx -Scenario $s -Round $k -Status $o.Status -Detail $o.Detail
+                        $kept = Save-HarnessKeptRender -Keep $keeper -Ctx $ctx -Scenario $s -Round $k -Status $o.Status -Detail $o.Detail -Comparison (Get-HarnessOutcomeFact $o 'comparison') -Tail (Get-HarnessOutcomeFact $o 'tail')
                         $shown = $kept
                         $row.status = $kept.Status; $row.detail = Hide-HarnessPaths $kept.Detail
                         if ($kept.Record) {

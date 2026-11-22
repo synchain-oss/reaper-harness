@@ -5,9 +5,12 @@
 #                             file throws an error whose message starts with "WAV:" (never a crash)
 #   Read-HarnessWavHeader     the same checks, the format facts only (no samples are read)
 #   Get-HarnessWavScan        format facts, peak, NaN and Inf counts, reading the samples block by block
-#   Compare-HarnessWavFiles   reads two files and compares them; returns facts (Get-HarnessCompareFacts) and the
-#                             verdict (Get-HarnessCompareVerdict)
-#   Get-HarnessCompareVerdict pure function: facts + criteria -> PASS / FAIL / INCOMPLETE and one stable English line
+#   Compare-HarnessWavFiles   reads two files and compares them; returns the verdict (Get-HarnessCompareVerdict) and
+#                             the residual (Get-HarnessResidualFacts)
+#   Get-HarnessCompareVerdict pure function: facts + criteria -> PASS / FAIL / INCOMPLETE and one stable English line;
+#                             with -ReportResidual the residual is written down, never judged
+#   Get-HarnessResidualFacts  pure function: the residual of one comparison as data (rows and manifest lines)
+#   Get-HarnessEndPeakDb      the peak of the last 100 ms of a file (how far a render tail has decayed)
 #   New-HarnessSignalFile     deterministic test signal: one impulse + seeded noise (+ optional sine), float32
 #   Write-HarnessWav          writes samples in any supported format (signals, and the self-test's hand-made files)
 # Samples are decoded to double, which is lossless for every supported format, so "identical" can be decided on
@@ -38,6 +41,10 @@ public sealed class HarnessCompareFacts {
     public int ExpectLag;        // the lag the residual figures below are measured at
     public double MaxDiff;       // largest |A[n] - B[n + ExpectLag]| over the overlap, finite pairs only
     public double HeadDiff;      // the same within the first HeadSeconds of A
+    public long FirstDiff = -1;     // first frame n of A where a finite pair at ExpectLag differs; -1 when none does
+    public long MaxDiffFrame = -1;  // frame n of A of the largest |A[n] - B[n + ExpectLag]|; -1 when none differs
+    public double ResidualSumSq, SignalSumSq; // sum of (A - B)^2 and of A^2 over the finite pairs at ExpectLag
+    public long PairCount;          // the finite pairs at ExpectLag
     public long NonFiniteA, NonFiniteB;
     public long NanA, NanB, InfA, InfB; // the non-finite samples, NaN and infinite counted apart
     public double PeakA, PeakB;  // largest |x| over finite samples
@@ -125,11 +132,11 @@ public static class HarnessWav {
         }
     }
 
-    // Every sample of the data in file order, read block by block
-    static void Each(Stream st, HarnessWavData w, Action<long, double> each) {
+    // Every sample of the data from sample index first on, in file order, read block by block
+    static void Each(Stream st, HarnessWavData w, Action<long, double> each, long first = 0) {
         int bytes = w.Format == "pcm16" ? 2 : w.Format == "pcm24" ? 3 : w.Format == "float64" ? 8 : 4;
         long total = w.Frames * w.Channels;
-        for (long i = 0; i < total; ) {
+        for (long i = first; i < total; ) {
             int n = (int)Math.Min(65536, total - i);
             byte[] b = Take(st, w.DataAt + i * bytes, n * bytes);
             for (int k = 0; k < n; k++) each(i + k, Decode(b, k * bytes, w.Format));
@@ -157,6 +164,18 @@ public static class HarnessWav {
             var r = new HarnessWavScan { Info = w };
             Each(st, w, (i, v) => { if (double.IsNaN(v)) r.Nan++; else if (double.IsInfinity(v)) r.Inf++; else if (Math.Abs(v) > r.Peak) r.Peak = Math.Abs(v); });
             return r;
+        }
+    }
+
+    // Peak over the finite samples of the last round(seconds x rate) frames (the whole file when shorter); only those
+    // frames are read
+    public static double EndPeak(string path, double seconds) {
+        using (var st = Open(path)) {
+            var w = Parse(st);
+            long n = Math.Min(w.Frames, (long)Math.Round(seconds * w.Rate, MidpointRounding.AwayFromZero));
+            double peak = 0;
+            Each(st, w, (i, v) => { if (Finite(v) && Math.Abs(v) > peak) peak = Math.Abs(v); }, (w.Frames - n) * w.Channels);
+            return peak;
         }
     }
 
@@ -278,7 +297,9 @@ public static class HarnessWav {
                 double x = a.Samples[n * ch + c], y = b.Samples[(n + expectLag) * ch + c];
                 if (!Finite(x) || !Finite(y)) continue;
                 double d = Math.Abs(x - y); any = true;
-                if (d > mx) mx = d;
+                f.PairCount++; f.ResidualSumSq += d * d; f.SignalSumSq += x * x;
+                if (d > 0 && f.FirstDiff < 0) f.FirstDiff = n;
+                if (d > mx) { mx = d; f.MaxDiffFrame = n; }
                 if (n < head && d > hx) hx = d;
             }
         if (any) { f.MaxDiff = mx; f.HeadDiff = hx; }
@@ -307,6 +328,57 @@ function Read-HarnessWavHeader([Parameter(Mandatory)][string]$Path) {
 
 function Get-HarnessWavScan([Parameter(Mandatory)][string]$Path) {
     try { [HarnessWav]::Scan($Path) } catch { throw ($_.Exception.InnerException ?? $_.Exception).Message }
+}
+
+# The peak in dBFS over the last Seconds of a file, rounded to 6 decimals like the kept-file facts: how far a tail
+# has decayed. Only recorded, never judged; $null when that peak is 0 or the file cannot be read.
+function Get-HarnessEndPeakDb([Parameter(Mandatory)][string]$Path, [double]$Seconds = 0.1) {
+    try { $p = [HarnessWav]::EndPeak($Path, $Seconds) } catch { return $null }
+    ($p -gt 0) ? [Math]::Round(20 * [Math]::Log10($p), 6) : $null
+}
+
+# Pure function: the residual of one comparison (A the reference, B the render) as data, the one builder of the
+# residual a row and a manifest line carry. Every value that cannot be given is $null, never NaN (which JSON would
+# write as a string):
+#   reported        true when B was compared in report mode, false when it was judged
+#   identical       same format, rate, channels, frames and every sample bit for bit
+#   lag             the lag the residual is measured at (the expected lag)
+#   bestLag         the least-squares best lag within the search window, a diagnostic; null when not comparable
+#   maxDiff         the largest |A - B| at lag over the finite pairs; null when nothing was measured
+#   residualDb      maxDiff in dBFS, rounded to 6 decimals; null when maxDiff is 0 or null
+#   residualRmsDb   RMS of A - B against the RMS of A over the same pairs, in dB, 6 decimals; null when either is 0
+#   maxDiffFrame    the frame of A of the largest difference; maxDiffSeconds the same in seconds at A's rate (6 decimals)
+#   firstDiffFrame  the first frame of A where a sample differs
+#   frames          frames of B; referenceFrames those of A
+function Get-HarnessResidualFacts([Parameter(Mandatory)]$Facts, [switch]$Reported) {
+    $f = $Facts
+    $measured = $f.Comparable -and -not [double]::IsNaN($f.MaxDiff)
+    $hasRms = $measured -and $f.PairCount -gt 0 -and $f.ResidualSumSq -gt 0 -and $f.SignalSumSq -gt 0
+    $at = $f.MaxDiffFrame -ge 0
+    [ordered]@{
+        reported = [bool]$Reported; identical = [bool]$f.Identical; lag = $f.ExpectLag; bestLag = ($f.Comparable ? $f.BestLag : $null)
+        maxDiff = ($measured ? $f.MaxDiff : $null); residualDb = (($measured -and $f.MaxDiff -gt 0) ? [Math]::Round(20 * [Math]::Log10($f.MaxDiff), 6) : $null)
+        residualRmsDb = ($hasRms ? [Math]::Round(10 * [Math]::Log10($f.ResidualSumSq / $f.SignalSumSq), 6) : $null)
+        maxDiffFrame = ($at ? $f.MaxDiffFrame : $null); maxDiffSeconds = (($at -and $f.RateA -gt 0) ? [Math]::Round($f.MaxDiffFrame / $f.RateA, 6) : $null)
+        firstDiffFrame = (($f.FirstDiff -ge 0) ? $f.FirstDiff : $null); frames = $f.FramesB; referenceFrames = $f.FramesA
+    }
+}
+
+# The reported part of a verdict line, from Get-HarnessResidualFacts: "bit-identical", or "not bit-identical" and the
+# parts that could be measured.
+function Format-HarnessResidual($Residual) {
+    $r = $Residual
+    if ($r.identical) { return 'bit-identical' }
+    $parts = [Collections.Generic.List[string]]::new()
+    $parts.Add('not bit-identical')
+    if ($null -ne $r.maxDiff) {
+        $rmsPart = ($null -ne $r.residualRmsDb) ? " (rms $(([double]$r.residualRmsDb).ToString('0.00', $script:Inv)) dB against the reference)" : ''
+        $parts.Add("residual $(Format-HarnessDb $r.maxDiff) dBFS$rmsPart measured at lag $($r.lag) (expected)")
+    }
+    if ($null -ne $r.bestLag) { $parts.Add("best lag $($r.bestLag)") }
+    if ($null -ne $r.maxDiffSeconds) { $parts.Add("largest at $(([double]$r.maxDiffSeconds).ToString('0.######', $script:Inv)) s") }
+    if ($null -ne $r.firstDiffFrame) { $parts.Add("first difference at frame $($r.firstDiffFrame)") }
+    $parts -join ', '
 }
 
 function Write-HarnessWav {
@@ -392,9 +464,13 @@ function Get-HarnessExtraFacts($Facts, [bool]$Channels, [switch]$Single) {
 # any) follow; a failure appends "; failed: <reasons>".
 # A render with no frames comes first and is INCOMPLETE ("; incomplete: <reason>"): no sample was compared, and two
 # empty files would otherwise count as bit-identical.
+# ReportResidual (never with MaxDiffDb): the residual is measured and written down ("; reported: ..." after the
+# fixed facts), never judged: no lag check, no "not bit-identical", no limit. Still judged: everything else, and frame
+# counts that differ (two renders of one project); a residual that could not be measured is INCOMPLETE.
 function Get-HarnessCompareVerdict {
     param([Parameter(Mandatory)]$Facts, [Nullable[double]]$MaxDiffDb = $null, [int]$Lag = 0, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent,
-          $RmsDb = $null, $EnergyRatioDb = $null, $RmsChangeDb = $null)
+          $RmsDb = $null, $EnergyRatioDb = $null, $RmsChangeDb = $null, [switch]$ReportResidual)
+    if ($ReportResidual -and $null -ne $MaxDiffDb) { throw 'Get-HarnessCompareVerdict: -ReportResidual and -MaxDiffDb exclude each other' }
     $f = $Facts
     $line = 'identical={0} lag={1} maxdiff={2} head={3} frames={4}/{5} channels={6}/{7} rate={8}/{9} format={10}/{11} nonfinite={12}/{13} peak={14}/{15}' -f `
         ($f.Identical ? 'yes' : 'no'), ($f.Comparable ? [string]$f.BestLag : '?'), (Format-HarnessDb $f.MaxDiff), (Format-HarnessDb $f.HeadDiff), $f.FramesA, $f.FramesB,
@@ -404,7 +480,9 @@ function Get-HarnessCompareVerdict {
     $why = [Collections.Generic.List[string]]::new()
     if (-not $f.Comparable) { $why.Add('sample rate or channel count differ, the renders cannot be compared') }
     if ($f.NonFiniteA -gt 0 -or $f.NonFiniteB -gt 0) { $why.Add('NaN or Inf samples present') }
-    if ($f.Comparable) {
+    if ($f.Comparable -and $ReportResidual) {
+        if ($f.FramesA -ne $f.FramesB) { $why.Add('frame counts differ') }
+    } elseif ($f.Comparable) {
         if ($f.BestLag -ne $Lag) { $why.Add("lag is $($f.BestLag), expected $Lag") }
         if ($null -eq $MaxDiffDb) {
             if (-not $f.Identical) { $why.Add('not bit-identical') }
@@ -417,7 +495,9 @@ function Get-HarnessCompareVerdict {
     if ($null -ne $PeakMaxDb -and $f.PeakB -gt 0 -and 20 * [Math]::Log10($f.PeakB) -gt [double]$PeakMaxDb) { $why.Add("peak $(Format-HarnessDb $f.PeakB) dBFS above $(([double]$PeakMaxDb).ToString('0.00', $script:Inv))") }
     if ($NotSilent -and ($f.PeakB -le 0 -or 20 * [Math]::Log10($f.PeakB) -le -120)) { $why.Add('silent (peak not above -120 dBFS)') }
     foreach ($p in (Get-HarnessChannelProblems -Facts $f -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb -RmsChangeDb $RmsChangeDb)) { $why.Add($p) }
+    if ($ReportResidual) { $line += "; reported: $(Format-HarnessResidual (Get-HarnessResidualFacts -Facts $f -Reported))" }
     if ($why.Count) { return [pscustomobject]@{ Status = 'FAIL'; Detail = "$line; failed: $($why -join ', ')" } }
+    if ($ReportResidual -and $f.Comparable -and [double]::IsNaN($f.MaxDiff)) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "$line; incomplete: no residual was measured (no overlapping finite samples)" } }
     [pscustomobject]@{ Status = 'PASS'; Detail = $line }
 }
 
@@ -441,27 +521,32 @@ function Get-HarnessRenderVerdict {
 }
 
 # Reads both files and compares them. A file that cannot be read gives INCOMPLETE (nothing was compared), never PASS.
+# Returns @{ Status; Detail; Residual }: Residual is Get-HarnessResidualFacts of the comparison, reported or judged;
+# $null when a file is missing or cannot be read.
 function Compare-HarnessWavFiles {
     param([Parameter(Mandatory)][string]$A, [Parameter(Mandatory)][string]$B, [Nullable[double]]$MaxDiffDb = $null, [int]$Lag = 0, [int]$LagSearch = 64,
-          [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent, [double]$HeadSeconds = 2, $RmsDb = $null, $EnergyRatioDb = $null, $RmsChangeDb = $null)
+          [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent, [double]$HeadSeconds = 2, $RmsDb = $null, $EnergyRatioDb = $null, $RmsChangeDb = $null, [switch]$ReportResidual)
     foreach ($pair in @(@('A', $A), @('B', $B))) {
-        if (-not (Test-Path -LiteralPath $pair[1] -PathType Leaf)) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "render $($pair[0]) does not exist" } }
+        if (-not (Test-Path -LiteralPath $pair[1] -PathType Leaf)) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "render $($pair[0]) does not exist"; Residual = $null } }
     }
-    try { $wa = [HarnessWav]::Read($A) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read render A: $(($_.Exception.InnerException ?? $_.Exception).Message)" } }
-    try { $wb = [HarnessWav]::Read($B) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read render B: $(($_.Exception.InnerException ?? $_.Exception).Message)" } }
+    try { $wa = [HarnessWav]::Read($A) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read render A: $(($_.Exception.InnerException ?? $_.Exception).Message)"; Residual = $null } }
+    try { $wb = [HarnessWav]::Read($B) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read render B: $(($_.Exception.InnerException ?? $_.Exception).Message)"; Residual = $null } }
     $Facts = [HarnessWav]::Compare($wa, $wb, $Lag, [Math]::Max([Math]::Abs($Lag), $LagSearch), $HeadSeconds)
-    Get-HarnessCompareVerdict -Facts $Facts -MaxDiffDb $MaxDiffDb -Lag $Lag -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb -RmsChangeDb $RmsChangeDb
+    $v = Get-HarnessCompareVerdict -Facts $Facts -MaxDiffDb $MaxDiffDb -Lag $Lag -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb -RmsChangeDb $RmsChangeDb -ReportResidual:$ReportResidual
+    [pscustomobject]@{ Status = $v.Status; Detail = $v.Detail; Residual = (Get-HarnessResidualFacts -Facts $Facts -Reported:$ReportResidual) }
 }
 
 # Checks one render on its own (compare "none", and kinds that have nothing to compare against): readable, all
-# finite, optional peak, silence and channel criteria (Get-HarnessRenderVerdict). Returns @{ Status; Detail }.
+# finite, optional peak, silence and channel criteria (Get-HarnessRenderVerdict). Returns @{ Status; Detail; Residual }
+# like Compare-HarnessWavFiles, Residual always $null (nothing was compared with it).
 function Test-HarnessWavFile {
     param([Parameter(Mandatory)][string]$Path, [Nullable[double]]$PeakMaxDb = $null, [switch]$NotSilent, $RmsDb = $null, $EnergyRatioDb = $null)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = 'the render does not exist' } }
-    try { $w = [HarnessWav]::Read($Path) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read the render: $(($_.Exception.InnerException ?? $_.Exception).Message)" } }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = 'the render does not exist'; Residual = $null } }
+    try { $w = [HarnessWav]::Read($Path) } catch { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "cannot read the render: $(($_.Exception.InnerException ?? $_.Exception).Message)"; Residual = $null } }
     $Facts = [HarnessWav]::Compare($w, $w, 0, 0, 0)
-    Get-HarnessRenderVerdict -Facts $Facts -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb
+    $v = Get-HarnessRenderVerdict -Facts $Facts -PeakMaxDb $PeakMaxDb -NotSilent:$NotSilent -RmsDb $RmsDb -EnergyRatioDb $EnergyRatioDb
+    [pscustomobject]@{ Status = $v.Status; Detail = $v.Detail; Residual = $null }
 }
 
 Export-ModuleMember -Function Format-HarnessDb, Read-HarnessWav, Read-HarnessWavHeader, Get-HarnessWavScan, Write-HarnessWav, New-HarnessSignalFile, Get-HarnessCompareVerdict, Get-HarnessRenderVerdict, Get-HarnessChannelProblems,
-    ConvertTo-HarnessLevelDb, Compare-HarnessWavFiles, Test-HarnessWavFile
+    ConvertTo-HarnessLevelDb, Compare-HarnessWavFiles, Test-HarnessWavFile, Get-HarnessEndPeakDb, Get-HarnessResidualFacts
