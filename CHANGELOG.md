@@ -6,6 +6,20 @@ stays backward compatible or raises that number, and the entry of that version s
 
 ## Unreleased
 
+- `maxDiffDb: "report"` on a `render` scenario or on a stem measures the residual against the reference (dry, repeat
+  or a compare variant) and writes it down instead of judging it: the line ends `; reported: ...`, the row has
+  `facts.comparison` (whether the two are identical, the lag it was measured at and the best lag, the residual peak in
+  dBFS, its RMS against the reference, where it is largest and where it starts) and a kept render's manifest line has
+  `comparison`. Everything else is still judged, the two renders must have the same length, and a residual that could
+  not be measured is INCOMPLETE. A kept repeat that reports keeps its first render too when the two differ
+  (`keepFirst` keeps it always). A repeat that reports cannot judge plugin reports as well (a usage error). A number,
+  or no `maxDiffDb`, means what it did, and judged rows are as before. Each FX of a manifest line names the `version`
+  of its plugin, and a line has `comparison` (null unless reported). Configuration and result file stay `schema: 1`.
+- `tailSeconds` (0 to 60) on a `render` scenario renders past the end of the longest source: every item is longer by
+  the tail and plays its source once, the references get the same tail, and the master and every stem must have
+  exactly the frames asked for, or the row is INCOMPLETE. The row's `facts.tail` and the manifest's `render` give the
+  tail and the peak of its last 100 ms. Without `tailSeconds` projects, renders and rows are as before; a manifest
+  line's `render` has `tailSeconds` 0 and `tailFrames` 0.
 - `run.ps1 -List params` lists the parameters of the plugins of a configuration instead of testing: one launch of
   REAPER under every guard of a run, in which learning reads, after the save, each parameter's index, name, normalized
   value, display text and REAPER's identifier, and tells which can go into `params` (`settable`: not a name used

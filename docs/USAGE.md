@@ -138,6 +138,31 @@ While a run is going on, do not use REAPER on the same machine: the run refuses 
 `reaper.exe`, but cannot stop you from starting one in the middle. Create one of your skip markers first if you
 need to.
 
+The work directory of a round holds every render of the round until the round ends: about the scenarios x their
+renders (two for a `repeat` or a compare variant, one for `dry` and `none`, plus one dry reference per layout and
+setting) x the size of one render. A [tail](CONFIG.md#tails) of 60 s adds about 23 MB to each render of stereo float32
+at 48 kHz.
+
+### Is the plugin deterministic?
+
+A small scenario of its own renders the same project twice and says whether the two renders are bit-identical,
+without failing when they are not:
+
+```json
+{ "id": "verb-repeat", "kind": "render", "layout": "voice", "compare": "repeat", "maxDiffDb": "report", "keep": true }
+```
+
+The row passes either way. Its line ends `; reported: bit-identical`, or `; reported: not bit-identical, residual ...`
+with the residual peak, its RMS against the reference, where it is largest and where the first difference is;
+`facts.comparison` of the row has the numbers ([RESULTS.md](RESULTS.md#a-row-scenarios)), and with `keep` the
+manifest line has them too, with both renders when they differ ([CONFIG.md](CONFIG.md#keep)). Keep it out of a
+scenario with many [variants](CONFIG.md#variants): each variant renders twice. The comparer looks for the best lag by
+going over the two files 2 x `limits.lagSearch` + 1 times (129 times at the default 64), which takes time on long
+files; the residual itself is measured at the expected lag, so `limits.lagSearch` 0 gives the same residual sooner,
+its best lag then reading 0. The example
+[file-source-variants](../examples/file-source-variants/reaper-harness.json) has such a scenario, next to five
+variants of a plugin compared with dry and a render with a tail.
+
 ## Exit codes
 
 | code | |

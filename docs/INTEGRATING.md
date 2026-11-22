@@ -182,8 +182,9 @@ bit-identical; that is right only for a plugin documented to pass audio through 
 - The example's default-state layouts are judged bit-identical to dry: with no input assigned to a channel, these
   plugins leave the audio as it is. A green result there shows passthrough, nothing more. It says nothing about the
   routing the plugins do once they are set up, so do not report it as "routing tested".
-- For a layout whose plugins change the audio on purpose, measure first: run it once with wide limits (`maxDiffDb`
-  24, `rmsChangeDb` `[-400, 24]`), look at the numbers and at the renders (`-KeepWork` keeps them), then write the
+- For a layout whose plugins change the audio on purpose, measure first: run it once with `maxDiffDb: "report"` (the
+  residual is measured and written down, never judged: [CONFIG.md](CONFIG.md#reported-residuals)) and wide level
+  limits (`rmsChangeDb` `[-400, 24]`), look at the numbers and at the renders (`-KeepWork` keeps them), then write the
   limits down together with where they came from. The example's routing layout came out like this:
 
 ```json
