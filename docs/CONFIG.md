@@ -351,7 +351,7 @@ Renders the layout and compares the render with a reference.
 | `rmsChangeDb` | channel → `[min, max]`: RMS of the test render minus RMS of the reference, per channel, in dB |
 | `stems` | tracks rendered as files of their own, see [stems](#stems) |
 | `keep` | `true`: keep the render and its stems under `renders/` of the result directory, see [keep](#keep) |
-| `keepFirst` | `true`: with `keep`, also keep the first render of a repeat whose residual is reported when the two are bit-identical, see [keep](#keep) |
+| `keepFirst` | `true`: with `keep`, also keep the first render of a repeat whose residual is reported when the two are bit-identical; only allowed there, see [keep](#keep) |
 | `tailSeconds` | render this many seconds past the end of the longest source, 0 … 60 (default 0), see [tails](#tails) |
 | `variants` | the scenario once per variant, each with some plugins set otherwise, see [variants](#variants) |
 
@@ -535,13 +535,13 @@ and every FX with what REAPER read back. A render that failed (no file) still ge
 A repeat whose residual is [reported](#reported-residuals) (`compare: "repeat"`, `maxDiffDb: "report"` on the scenario
 or on a stem compared with the reference) keeps its first render too when the master or a stem compared with the
 reference is not bit-identical: `<id>-first.wav`, and `<id>-first-stem-<track>.wav` for those stems, next to the
-second. `keepFirst: true` keeps it also when the two are identical; it needs `keep`, `compare: "repeat"` and a
-reported residual (a usage error otherwise). Otherwise the first render is a work file like the other references. The
-line describes it in `comparison.first` (null when it was not kept). The whole-file hashes of two renders differ even
-when their audio is identical, because REAPER writes the time of the render into the file;
-`comparison.master.identical` says whether the samples are. A record of whether a plugin is deterministic needs `keep`
-to be in the manifest; without it the row's `facts.comparison` has the same numbers. A repeat whose two renders differ
-keeps two files.
+second. `keepFirst: true` keeps it also when the two are identical. The key itself, `false` too, needs `keep`,
+`compare: "repeat"` and a reported residual: anywhere else it is a usage error, as `lag` is without a reference.
+Otherwise the first render is a work file like the other references. The line describes it in `comparison.first`
+(null when it was not kept). The whole-file hashes of two renders differ even when their audio is identical, because
+REAPER writes the time of the render into the file; `comparison.master.identical` says whether the samples are. A
+record of whether a plugin is deterministic needs `keep` to be in the manifest; without it the row's
+`facts.comparison` has the same numbers. A repeat whose two renders differ keeps two files.
 
 A kept file is never overwritten: when its place is taken (by another scenario whose id and stem name give the same
 file name, or by a run started in the same second, which finds the manifest there and keeps nothing), the file stays

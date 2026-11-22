@@ -193,11 +193,13 @@ REAPER resource directory looks at the scratch profile, not at the real one, so 
 - Keeping a render never improves its outcome: a file that could not be kept or read makes the row INCOMPLETE, a FAIL
   stays FAIL, and a render with NaN or Inf is a FAIL that is kept all the same
   ([below](#source-files-and-kept-renders)).
-- `maxDiffDb: "report"` is the only way a difference between two renders stays PASS. It is written in the
-  configuration, which takes only that exact word (any other text is a usage error; in criteria an extension builds by
-  hand, any other text is bound as a number, and one that is no number makes the scenario INCOMPLETE), and the line and
-  the row say `reported`. Everything else is judged as before: readable, comparable, finite, the same frame count,
-  peak, silence and levels. A residual that could not be measured is INCOMPLETE.
+- `maxDiffDb: "report"` is the only way a difference between two renders is never judged: every other difference
+  that stays PASS is one the configuration allows in numbers (`maxDiffDb`, `lag`, the level criteria). The word is
+  written in the configuration, which takes only that exact word (any other text is a usage error; in
+  criteria an extension builds by hand, any other text is bound as a number, and one that is no number makes the
+  scenario INCOMPLETE), and the line and the row say `reported`. Everything else is judged as before: readable,
+  comparable, finite, the same frame count, peak, silence and levels. A residual that could not be measured is
+  INCOMPLETE.
 
 ## Source files and kept renders
 

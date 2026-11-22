@@ -149,11 +149,13 @@ A small scenario of its own renders the same project twice and says whether the 
 without failing when they are not:
 
 ```json
-{ "id": "verb-repeat", "kind": "render", "layout": "voice", "compare": "repeat", "maxDiffDb": "report", "keep": true }
+{ "id": "verb-repeat", "kind": "render", "layout": "voice", "compare": "repeat", "maxDiffDb": "report", "notSilent": true, "keep": true }
 ```
 
-The row passes either way. Its line ends `; reported: bit-identical`, or `; reported: not bit-identical, residual ...`
-with the residual peak, its RMS against the reference, where it is largest and where the first difference is;
+`notSilent` matters here: two silent renders (a source that did not play, a plugin that muted, an FX that did not load)
+are bit-identical too and would read as a deterministic plugin; with it they FAIL. Otherwise the row passes either
+way. Its line ends `; reported: bit-identical`, or `; reported: not bit-identical, residual ...` with the residual
+peak, its RMS against the reference, where it is largest and where the first difference is;
 `facts.comparison` of the row has the numbers ([RESULTS.md](RESULTS.md#a-row-scenarios)), and with `keep` the
 manifest line has them too, with both renders when they differ ([CONFIG.md](CONFIG.md#keep)). Keep it out of a
 scenario with many [variants](CONFIG.md#variants): each variant renders twice. The comparer looks for the best lag by
