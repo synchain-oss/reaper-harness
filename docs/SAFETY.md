@@ -119,10 +119,13 @@ only those, are classified:
 A stuck dialog ends the launch and the scenario is INCOMPLETE. The evaluation reminder shows up on some launches
 only (about one in six in our runs). A launch it ended (by its process ID, as always) is done once more, after
 deleting the files that launch was to write, so that nothing the first attempt left counts for the second: through
-every guard again (the skip marker, the locks, the configuration directory), only once, never after a process that
-could not be ended, and not at all when one of those files cannot be deleted. Each retry is listed under the round's
-`retries` ([RESULTS.md](RESULTS.md)). A second reminder ends the launch like any stuck dialog; buy a licence or run
-again.
+every guard again (the skip marker, the locks, the configuration directory), only once, and never after a process
+that could not be ended. A [probe directory](#probe-variables-and-collected-files) is not deleted: it stays, the
+plugin is told its path again, and it must still be empty. The probe input copy is reused as it is and hashed again
+after the launch. There is no retry when one of those files cannot be deleted or the first launch wrote into its
+probe directory, and the reason of the row says so (`; not retried: the first launch wrote into <id>.out`). Each
+retry is listed under the round's `retries` ([RESULTS.md](RESULTS.md)). A second reminder ends the launch like any
+stuck dialog; buy a licence or run again.
 
 REAPER also looks for a new version about once a day and shows `REAPER New Version Notification` when there is one,
 which would end that launch the same way. So every launch first writes `verchk=0` under `[REAPER]` in the private
@@ -162,8 +165,8 @@ editor. What keeps that contained:
   `USERPROFILE`, `HOME`, `TEMP`, `TMPDIR`, `PATH`, anything starting `REAPER_`, `WEBVIEW2_`, `DOTNET_`, `COR_`, `VST3_`,
   `PYTHON`, `LUA_`, `QT_` and the like) are refused before REAPER starts, like the two-character names and lower case.
   So are the families that make a runtime or a library load a file or take options: anything starting `SSL_`,
-  `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`, `PERL`, `RUBY`, `GIT_`, `CHROME`, `MSEDGE`, `REQUESTS_`, `HTTP`,
-  `HTTPS_`, `NO_PROXY` or `ALL_PROXY`, the name `SSLKEYLOGFILE`, and any name ending in `_PROXY`;
+  `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`, `PERL`, `RUBY`, `GIT_`, `CHROME`, `MSEDGE`, `REQUESTS_`, `HTTP`
+  (`HTTPS_` too), `NO_PROXY` or `ALL_PROXY`, the name `SSLKEYLOGFILE`, and any name ending in `_PROXY`;
 - the path is a new file in the work directory for every step, deleted before the start;
 - the file is what a plugin wrote, so it is read as untrusted: at most 64 KiB, strict JSON, only the declared numeric
   fields. Nothing else in it reaches a result or a log. The driver's copies of it are deleted before the step starts,
@@ -208,12 +211,18 @@ keeps that contained:
   full path strictly inside the work directory, under a name that passes the deny list (the job variable aside).
   Otherwise REAPER is not started and the row is INCOMPLETE. The self-test checks which launch gets the variables,
   that inherited ones are taken out, and the runtime check.
+- **The licence reminder.** A launch it ended is started once more only when its probe directory is still empty
+  ([above](#dialogs)): the files of the first attempt never mix with the second's. The input copy is not made again;
+  it is hashed after the launch like any copy.
 - **Collection.**
   - It runs after the scenario's launches have ended, and never while a process of the round may still run.
   - It looks at the top level only, never recurses and never follows a link or junction, the directory itself
     included: only an ancestor of the work directory may be one.
   - A name is used anywhere only after it passes the name check.
   - At most 32 files, 16 MiB in all and 4 MiB each; nothing beyond is moved.
+  - A file another process holds (a sharing violation) is tried again at most three times, 200 ms apart; any other
+    error is not tried again. A file that could not be moved stays in the work directory, and one that could not be
+    read back after the move has no hash; either makes the row INCOMPLETE.
   - The files go under the rules of kept renders ([below](#source-files-and-kept-renders)): under the result
     directory, links resolved, never overwritten, the run directory claimed once.
 - **The files** are the plugin's and untrusted: what is in them is read only to hash it and is never printed; the

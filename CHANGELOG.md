@@ -23,10 +23,14 @@ stays backward compatible or raises that number, and the entry of that version s
   before.
 - The deny list of report and probe names takes in the families that make a runtime or a library load a file or take
   options: names starting `SSL_`, `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`, `PERL`, `RUBY`, `GIT_`, `CHROME`,
-  `MSEDGE`, `REQUESTS_`, `HTTP`, `HTTPS_`, `NO_PROXY` or `ALL_PROXY`, `SSLKEYLOGFILE`, and any name ending in `_PROXY`.
+  `MSEDGE`, `REQUESTS_`, `HTTP` (`HTTPS_` too), `NO_PROXY` or `ALL_PROXY`, `SSLKEYLOGFILE`, and any name ending in
+  `_PROXY`.
   A `report.env` in one of them, accepted before, is now a usage error: rename it.
+- A launch the evaluation licence reminder ended and that is not started again says why in the reason of its row:
+  `; not retried: <file> of the first launch could not be deleted`, or `; not retried: the first launch wrote into
+  <id>.out` (a probe directory, which a retry keeps and which must still be empty).
 - Configurations and rows without `probe` are as before, except that no launch inherits the declared report and probe
-  names; a manifest line has `probe: null`. Configuration, result file and manifest stay `schema: 1`.
+  names and a launch that is not retried says why; a manifest line has `probe: null`. Configuration, result file and manifest stay `schema: 1`.
 - `maxDiffDb: "report"` on a `render` scenario or on a stem measures the residual against the reference (dry, repeat
   or a compare variant) and writes it down instead of judging it: the line ends `; reported: ...`, the row has
   `facts.comparison` (whether the two are identical, the lag it was measured at and the best lag, the residual peak in

@@ -836,7 +836,8 @@ It never reads those files.
   configuration. VST3 plugins only: a JSFX reads no environment.
 - What the plugin sees: a full path, without quotes, that can hold any character the result directory does (spaces,
   non-ASCII), so read the variable as Unicode (`_wgetenv`, `GetEnvironmentVariableW`). The copy is not read-only, but a
-  copy that changed during the launch makes the row INCOMPLETE (`the probe input <NAME> changed during the launch`).
+  copy that changed during the launch makes the row INCOMPLETE (`the probe input <NAME> changed during the launch`), and
+  so does one that cannot be read back afterwards (`the probe input <NAME> could not be read back: ...`).
   The directory exists, is empty, and only this launch was told its path. Its path is at most 140 characters, so that
   a name of 100 still fits in 240; with a result directory deeper than that, the scenario is INCOMPLETE before REAPER
   starts (`the probe directory path is too long for a plugin to write into it`).
@@ -853,6 +854,10 @@ It never reads those files.
   or a scenario of the same plugin without `probe`, even when they are set in your shell. Every launch takes the
   declared report and probe names out of the environment it inherits, unless it sets them itself. A variable the
   configuration does not declare is inherited as before.
+- When REAPER's evaluation licence reminder ends that launch ([SAFETY.md](SAFETY.md#dialogs)), it is started once more
+  only if the directory is still empty, with the same copy, which is hashed again afterwards. If the plugin had written
+  into the directory, there is no retry: the row is INCOMPLETE with `stuck on dialog license-nag (...), ended; not
+  retried: the first launch wrote into <id>.out`, and what it wrote is collected.
 - Collection runs after the scenario's launches have ended, whatever the verdict (a render that produced no file
   included). It looks at the top level of the directory only. A file whose name is letters, digits, `.`, `_` and `-`
   (at most 100, starting with a letter or digit, not ending with `.`, not a device name such as `CON`) and
