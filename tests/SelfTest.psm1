@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:Src = Join-Path $PSScriptRoot '../src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Report', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Report', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Probe', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $PSScriptRoot 'TempDir.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'FakeReaper.psm1') -ErrorAction Stop
 
@@ -1137,6 +1137,12 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     $scenario = { param($raw, $id) @($raw['scenarios'] | Where-Object { $_['id'] -eq $id })[0] }
     $vary = { param($raw, [object[]]$VariantList) (& $scenario $raw 'chain-repeat')['variants'] = $VariantList }
     $gainVariant = { param([string]$VariantId, $GainFx) [ordered]@{ id = $VariantId; fx = [ordered]@{ gain = $GainFx } } }
+    # Probe variables on the VST3 plugin bus (used once in the layouts chain and bus); Value replaces one of them
+    $probeOn = { param($c) $c['plugins']['bus']['probe'] = [ordered]@{ EXAMPLE_PROBE_SCRIPT = [ordered]@{ file = 'probe/take1.json' }; EXAMPLE_PROBE_OUT = [ordered]@{ dir = $true } } }
+    $probeVar = { param($c, [string]$VarName, $Value) & $probeOn $c; $c['plugins']['bus']['probe'][$VarName] = $Value }
+    $probeFile = [ordered]@{ file = 'probe/take1.json' }
+    $deniedProbe = { param([string]$VarName, [string]$Reason) "config.plugins.bus.probe.${VarName}: '$VarName' $Reason; a probe variable may not set it" }
+    $byPrefix = 'which REAPER, what it loads, WebView2, a runtime or the harness reads'
     $mutations = @(
         @{ L = 'an unknown key at the top'; E = { param($c) $c['surprise'] = 1 }; M = "unknown key 'surprise'" }
         @{ L = 'an unknown key in a scenario'; E = { param($c) (& $scenario $c 'bus')['speed'] = 2 }; M = "unknown key 'speed'" }
@@ -1271,11 +1277,63 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'keepFirst that is not a boolean'; E = { param($c) (& $scenario $c 'chain-repeat')['keepFirst'] = 'yes' }; M = 'keepFirst: must be true or false' }
         @{ L = 'keepFirst in a negative case'; E = { param($c) $c['negative'][0]['keepFirst'] = $true }; M = "unknown key 'keepFirst'" }
         @{ L = 'keepFirst on a device scenario'; E = { param($c) (& $scenario $c 'bus-device')['keepFirst'] = $true }; M = "unknown key 'keepFirst'" }
+        @{ L = 'a probe variable named APPDATA'; E = { param($c) & $probeVar $c 'APPDATA' $probeFile }; M = (& $deniedProbe 'APPDATA' 'is a variable Windows or a runtime reads') }
+        @{ L = 'a probe variable named PATH'; E = { param($c) & $probeVar $c 'PATH' $probeFile }; M = (& $deniedProbe 'PATH' 'is a variable Windows or a runtime reads') }
+        @{ L = 'a probe variable named REAPER_X'; E = { param($c) & $probeVar $c 'REAPER_X' $probeFile }; M = (& $deniedProbe 'REAPER_X' "starts with REAPER_, $byPrefix") }
+        @{ L = 'a probe variable named PYTHONPATH'; E = { param($c) & $probeVar $c 'PYTHONPATH' $probeFile }; M = (& $deniedProbe 'PYTHONPATH' "starts with PYTHON, $byPrefix") }
+        @{ L = 'a probe variable named WEBVIEW2_X'; E = { param($c) & $probeVar $c 'WEBVIEW2_X' $probeFile }; M = (& $deniedProbe 'WEBVIEW2_X' "starts with WEBVIEW2_, $byPrefix") }
+        @{ L = 'a probe variable named NODE_OPTIONS (the runtime families)'; E = { param($c) & $probeVar $c 'NODE_OPTIONS' $probeFile }; M = (& $deniedProbe 'NODE_OPTIONS' "starts with NODE_, $byPrefix") }
+        @{ L = 'a probe variable named SSLKEYLOGFILE'; E = { param($c) & $probeVar $c 'SSLKEYLOGFILE' $probeFile }; M = (& $deniedProbe 'SSLKEYLOGFILE' 'is a variable Windows or a runtime reads') }
+        @{ L = 'a probe variable whose name ends in _PROXY'; E = { param($c) & $probeVar $c 'MY_PROXY' $probeFile }; M = (& $deniedProbe 'MY_PROXY' 'ends with _PROXY, which network libraries read') }
+        @{ L = 'a probe variable named NODE_REPORT (a name a report variable may have)'; E = { param($c) & $probeVar $c 'NODE_REPORT' $probeFile }; M = (& $deniedProbe 'NODE_REPORT' "starts with NODE_, $byPrefix") }
+        @{ L = 'a probe variable named HTTP_REPORT_PATH (a name a report variable may have)'; E = { param($c) & $probeVar $c 'HTTP_REPORT_PATH' $probeFile }; M = (& $deniedProbe 'HTTP_REPORT_PATH' "starts with HTTP, $byPrefix") }
+        @{ L = 'a probe variable name in lower case'; E = { param($c) & $probeVar $c 'probe_x' $probeFile }; M = "probe: key 'probe_x' does not match" }
+        @{ L = 'a probe variable name of two characters'; E = { param($c) & $probeVar $c 'AB' $probeFile }; M = "probe: key 'AB' does not match" }
+        @{ L = 'a probe variable named as the report variable of its own plugin'; E = { param($c) & $probeOn $c; $c['plugins']['bus']['report'] = [ordered]@{ env = 'EXAMPLE_PROBE_OUT'; fields = @('x') } }; M = "config.plugins.bus.probe.EXAMPLE_PROBE_OUT: 'EXAMPLE_PROBE_OUT' is the report variable of bus too" }
+        @{ L = 'a probe variable named as a probe variable of another plugin'; E = { param($c) & $probeOn $c; $c['plugins']['gain']['probe'] = [ordered]@{ EXAMPLE_PROBE_SCRIPT = $probeFile } }; M = "config.plugins.bus.probe.EXAMPLE_PROBE_SCRIPT: 'EXAMPLE_PROBE_SCRIPT' is a probe variable of gain too" }
+        @{ L = 'a report variable named as a probe variable of another plugin'; E = { param($c) $c['plugins']['gain']['probe'] = [ordered]@{ EXAMPLE_PROBE_JSON = $probeFile }; $c['plugins']['bus']['report'] = [ordered]@{ env = 'EXAMPLE_PROBE_JSON'; fields = @('x') } }; M = "config.plugins.bus.report.env: 'EXAMPLE_PROBE_JSON' is a probe variable of gain too" }
+        @{ L = 'a probe value that is a path (a string)'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_OUT' 'C:\x' }; M = 'probe.EXAMPLE_PROBE_OUT: must be { file } or { dir, min }' }
+        @{ L = 'an empty probe value'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_OUT' ([ordered]@{}) }; M = 'probe.EXAMPLE_PROBE_OUT: must be { file } or { dir, min }' }
+        @{ L = 'a probe value with both file and dir'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_OUT' ([ordered]@{ file = 'a.json'; dir = $true }) }; M = 'probe.EXAMPLE_PROBE_OUT: must be { file } or { dir, min }' }
+        @{ L = 'a probe dir that is not a boolean'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_OUT' ([ordered]@{ dir = 'yes' }) }; M = 'probe.EXAMPLE_PROBE_OUT.dir: must be true or false' }
+        @{ L = 'a probe min without dir'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_OUT' ([ordered]@{ min = 1 }) }; M = "probe.EXAMPLE_PROBE_OUT: missing 'dir'" }
+        @{ L = 'a probe dir of false (a rule of the validator, not of the schema)'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_OUT' ([ordered]@{ dir = $false }) }; M = 'config.plugins.bus.probe.EXAMPLE_PROBE_OUT.dir: only true (a new empty directory for each render)' }
+        @{ L = 'a probe min of 33'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_OUT' ([ordered]@{ dir = $true; min = 33 }) }; M = 'probe.EXAMPLE_PROBE_OUT.min: must be between 0 and 32' }
+        @{ L = 'a probe file with a min'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_SCRIPT' ([ordered]@{ file = 'a.json'; min = 1 }) }; M = 'probe.EXAMPLE_PROBE_SCRIPT: must be { file } or { dir, min }' }
+        @{ L = 'two probe dir variables on one plugin'; E = { param($c) & $probeVar $c 'EXAMPLE_PROBE_TWO' ([ordered]@{ dir = $true }) }; M = 'config.plugins.bus.probe: at most one dir variable' }
+        @{ L = 'probe variables on a JSFX'; E = { param($c) $c['plugins']['delay']['probe'] = [ordered]@{ EXAMPLE_PROBE_OUT = [ordered]@{ dir = $true } } }; M = 'config.plugins.delay.probe: probe variables are for VST3 plugins (a JSFX reads no environment)' }
+        @{ L = 'probe on a render whose layout has no plugin with probe variables'; E = { param($c) & $probeOn $c; (& $scenario $c 'states')['probe'] = $true }; M = "probe: layout 'states' uses no plugin that declares probe variables" }
+        @{ L = 'probe on a render whose layout uses the probe plugin twice'; E = { param($c) $c['plugins']['gain']['probe'] = [ordered]@{ EXAMPLE_PROBE_OUT = [ordered]@{ dir = $true } }; (& $scenario $c 'states')['probe'] = $true }; M = "probe: the layout uses 'gain' 2 times; a plugin told its paths needs exactly one instance" }
+        @{ L = 'probe on a render whose layout has two plugins with a dir variable each'; E = { param($c) & $probeOn $c; $c['plugins']['gain']['probe'] = [ordered]@{ EXAMPLE_GAIN_OUT = [ordered]@{ dir = $true } }; (& $scenario $c 'chain')['probe'] = $true }; M = 'probe: the plugins of the layout declare 2 dir variables; a render collects one directory' }
+        @{ L = 'probe on a render compared with a repeat'; E = { param($c) & $probeOn $c; (& $scenario $c 'chain-repeat')['probe'] = $true }; M = 'probe: a render that sets probe variables compares with "dry" or "none": a repeat or a compare variant would load the plugin again without them' }
+        @{ L = 'probe on a render compared with a variant'; E = { param($c) & $probeOn $c; (& $scenario $c 'chain-block')['probe'] = $true }; M = 'probe: a render that sets probe variables compares with "dry" or "none"' }
+        @{ L = 'probe on a device scenario'; E = { param($c) & $probeOn $c; (& $scenario $c 'bus-device')['probe'] = $true }; M = "unknown key 'probe'" }
+        @{ L = 'probe on a savereopen scenario'; E = { param($c) & $probeOn $c; (& $scenario $c 'bus-reopen')['probe'] = $true }; M = "unknown key 'probe'" }
+        @{ L = 'probe on a transport scenario'; E = { param($c) & $probeOn $c; (& $scenario $c 'monitor-states')['probe'] = $true }; M = "unknown key 'probe'" }
+        @{ L = 'probe in a negative render case'; E = { param($c) & $probeOn $c; $c['negative'][0]['probe'] = $true }; M = "unknown key 'probe'" }
+        @{ L = 'a probe override naming no probe variable of the layout'; E = { param($c) & $probeOn $c; (& $scenario $c 'bus')['probe'] = [ordered]@{ EXAMPLE_NOPE = $probeFile } }; M = "probe.EXAMPLE_NOPE: not a probe variable of a plugin in layout 'bus'" }
+        @{ L = 'a probe override giving a file for a dir variable'; E = { param($c) & $probeOn $c; (& $scenario $c 'bus')['probe'] = [ordered]@{ EXAMPLE_PROBE_OUT = $probeFile } }; M = 'probe.EXAMPLE_PROBE_OUT: EXAMPLE_PROBE_OUT is a dir variable' }
+        @{ L = 'a probe override giving a dir for a file variable'; E = { param($c) & $probeOn $c; (& $scenario $c 'bus')['probe'] = [ordered]@{ EXAMPLE_PROBE_SCRIPT = [ordered]@{ dir = $true } } }; M = 'probe.EXAMPLE_PROBE_SCRIPT: EXAMPLE_PROBE_SCRIPT is a file variable' }
+        @{ L = 'a probe override with dir false'; E = { param($c) & $probeOn $c; (& $scenario $c 'bus')['probe'] = [ordered]@{ EXAMPLE_PROBE_OUT = [ordered]@{ dir = $false } } }; M = 'probe.EXAMPLE_PROBE_OUT.dir: only true (a new empty directory for each render)' }
+        @{ L = 'a variant probe on a scenario without probe'; E = { param($c) & $probeOn $c; & $vary $c @([ordered]@{ id = 'a'; probe = [ordered]@{ EXAMPLE_PROBE_SCRIPT = $probeFile } }) }; M = 'variants[0].probe: needs probe on the scenario' }
+        @{ L = 'a variant probe on a scenario with probe false'; E = { param($c) & $probeOn $c; $s = & $scenario $c 'bus'; $s['probe'] = $false; $s['variants'] = @([ordered]@{ id = 'a'; probe = [ordered]@{ EXAMPLE_PROBE_SCRIPT = $probeFile } }) }; M = 'variants[0].probe: needs probe on the scenario' }
+        @{ L = 'a variant probe override naming no probe variable'; E = { param($c) & $probeOn $c; $s = & $scenario $c 'bus'; $s['probe'] = $true; $s['variants'] = @([ordered]@{ id = 'a'; probe = [ordered]@{ EXAMPLE_NOPE = $probeFile } }) }; M = "variants[0].probe.EXAMPLE_NOPE: not a probe variable of a plugin in layout 'bus'" }
     )
     foreach ($mu in $mutations) {
         $found = & $problems $mu.E
         & $add "configuration: $($mu.L) is a problem ($($found -join ' | '))" $true (@($found | Where-Object { $_ -match [regex]::Escape($mu.M) }).Count -gt 0)
     }
+    # A report variable keeps the deny list of the released version: a name of the families a probe variable may not use
+    # is accepted there, so a configuration valid before stays valid; -OnlyReports lists the report name alone
+    $familyOk = @(foreach ($familyEnv in 'NODE_REPORT', 'HTTP_REPORT_PATH', 'MY_PROXY', 'SSLKEYLOGFILE') {
+            $familyRaw = ConvertFrom-HarnessJson $text
+            & $probeOn $familyRaw
+            $familyRaw['plugins']['bus']['report'] = [ordered]@{ env = $familyEnv; fields = @('x') }
+            $familyConf = Test-HarnessConfigData -Raw $familyRaw -Kinds $extensions.Kinds
+            if (@($familyConf.Problems).Count -or -not $familyConf.Config -or (@(Get-HarnessPluginEnvNames $familyConf.Config -OnlyReports) -join ',') -cne $familyEnv -or
+                @(Get-HarnessPluginEnvNames $familyConf.Config).Count -ne 3) { "${familyEnv}: $(@($familyConf.Problems) -join ' | ')" }
+        })
+    & $add "configuration: a report variable named NODE_REPORT, HTTP_REPORT_PATH, MY_PROXY or SSLKEYLOGFILE (families a probe variable may not use) is accepted, as before, next to probe variables; -OnlyReports lists it alone ($($familyOk -join '; '))" $false ($familyOk.Count -eq 0)
     & $add 'configuration: a device scenario still takes a matrix of rates and block sizes' $false (@(& $problems { param($c) $d = & $scenario $c 'bus-device'; $d.Remove('block'); $d['matrix'] = [ordered]@{ sr = @(44100, 48000); block = @(64, 1024) } }).Count -eq 0)
     & $add 'configuration: every problem is listed at once, not just the first' $true (@(& $problems { param($c) $c['surprise'] = 1; $c['signal']['seconds'] = 'long' }).Count -ge 2)
     $badFile = Join-Path $Tmp 'config-bad.json'
@@ -1399,6 +1457,39 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
     & $add "configuration: each variant takes the tail and the reported residual of its scenario ($(@($reportVariants.Problems) -join ' | '))" $false (
         $rv.Count -eq 2 -and @($rv | Where-Object { $_.tailFrames -ne 24000 -or $_.tailSeconds -ne 0.5 -or $_.maxDiffDb -cne 'report' -or $_.keepFirst -ne $true }).Count -eq 0)
     & $add 'schema: Test-Json accepts maxDiffDb "report", a tail and keepFirst where the validator does' $false (& $agree (ConvertTo-HarnessJsonText -Value $withReport) $true)
+    # Probe variables: the plugin's, a scenario's overrides, a variant's on top of those (a new map: the other variant and
+    # every leg of the matrix keep the scenario's)
+    $withProbe = ConvertFrom-HarnessJson $text
+    & $probeOn $withProbe
+    $withProbe['plugins']['bus']['probe']['EXAMPLE_PROBE_OUT']['min'] = 0
+    $pChain = & $scenario $withProbe 'chain'
+    $pChain['compare'] = 'none'; $pChain['probe'] = $true
+    $pChain['variants'] = @([ordered]@{ id = 'shifted'; probe = [ordered]@{ EXAMPLE_PROBE_SCRIPT = [ordered]@{ file = 'probe/take1-shifted.json' }; EXAMPLE_PROBE_OUT = [ordered]@{ dir = $true; min = 2 } } }, [ordered]@{ id = 'plain' })
+    (& $scenario $withProbe 'bus')['probe'] = [ordered]@{ EXAMPLE_PROBE_SCRIPT = [ordered]@{ file = 'probe/bus.json' }; EXAMPLE_PROBE_OUT = [ordered]@{ dir = $true } }
+    (& $scenario $withProbe 'routing-alone')['probe'] = $false
+    $probeConf = Test-HarnessConfigData -Raw $withProbe -Kinds $extensions.Kinds
+    $pScOf = { param([string]$ScId) @($probeConf.Config ? @($probeConf.Config.Scenarios | Where-Object { $_.id -ceq $ScId }) : @())[0] }
+    $probeText = { param($sc) ($sc -and $sc.probe) ? (@($sc.probe.get_Values() | ForEach-Object { '{0}={1}:{2}:{3}' -f $_.Name, $_.Kind, $_.File, $_.Min }) -join ',') : '' }
+    $pb = $probeConf.Config ? $probeConf.Config.Plugins['bus'].Probe : $null
+    & $add "configuration: a plugin declares a file and a dir probe variable; the dir's min is 1 unless given ($(@($probeConf.Problems) -join ' | '))" $false (
+        @($probeConf.Problems).Count -eq 0 -and $pb.get_Count() -eq 2 -and $pb['EXAMPLE_PROBE_SCRIPT'].Kind -ceq 'file' -and $pb['EXAMPLE_PROBE_SCRIPT'].File -ceq 'probe/take1.json' -and
+        $pb['EXAMPLE_PROBE_OUT'].Kind -ceq 'dir' -and $pb['EXAMPLE_PROBE_OUT'].Min -eq 0 -and @(Get-HarnessPluginEnvNames $probeConf.Config) -join ',' -ceq 'EXAMPLE_PROBE_OUT,EXAMPLE_PROBE_SCRIPT' -and
+        (@($conf.Plugins['bus'].Probe.get_Keys()).Count -eq 0) -and @(Get-HarnessPluginEnvNames $conf).Count -eq 0 -and @(Get-HarnessPluginEnvNames ([pscustomobject]@{ Name = 'hand' })).Count -eq 0)
+    $minOne = ConvertFrom-HarnessJson $text
+    & $probeOn $minOne
+    $minOneConf = Test-HarnessConfigData -Raw $minOne -Kinds $extensions.Kinds
+    & $add 'configuration: a dir probe variable without min has min 1' $false ($minOneConf.Config -and $minOneConf.Config.Plugins['bus'].Probe['EXAMPLE_PROBE_OUT'].Min -eq 1)
+    $legs = @('chain-offline-44100', 'chain-offline-48000', 'chain-1x-44100', 'chain-1x-48000')
+    & $add 'configuration: a variant''s probe override applies to that variant only, the other variant and every leg of the matrix keep the scenario''s (the shared map is not changed)' $false (
+        @($legs | Where-Object { (& $probeText (& $pScOf "$_-shifted")) -cne 'EXAMPLE_PROBE_SCRIPT=file:probe/take1-shifted.json:0,EXAMPLE_PROBE_OUT=dir::2' }).Count -eq 0 -and
+        @($legs | Where-Object { (& $probeText (& $pScOf "$_-plain")) -cne 'EXAMPLE_PROBE_SCRIPT=file:probe/take1.json:0,EXAMPLE_PROBE_OUT=dir::0' }).Count -eq 0)
+    & $add 'configuration: a scenario''s probe overrides replace the file and keep the plugin''s min when they give none (plugin min 0, { "dir": true }: 0)' $false (
+        (& $probeText (& $pScOf 'bus')) -ceq 'EXAMPLE_PROBE_SCRIPT=file:probe/bus.json:0,EXAMPLE_PROBE_OUT=dir::0' -and $pb['EXAMPLE_PROBE_SCRIPT'].File -ceq 'probe/take1.json')
+    & $add 'configuration: probe false is no probe; renders without probe of a layout with the probe plugin are accepted with every compare (dry, repeat, a variant); built-in negatives have probe null' $false (
+        $null -eq (& $pScOf 'routing-alone').probe -and $null -eq (& $pScOf 'chain-repeat').probe -and $null -eq (& $pScOf 'chain-block').probe -and $null -eq (& $pScOf 'chain-bypass').probe -and
+        $null -ne (& $pScOf 'bus').probe -and @(Get-HarnessBuiltinNegatives | Where-Object { $_.kind -ceq 'render' -and (-not $_.PSObject.Properties['probe'] -or $null -ne $_.probe) }).Count -eq 0 -and
+        @($probeConf.Config.Negative | Where-Object { $_.kind -ceq 'render' -and $null -ne $_.probe }).Count -eq 0)
+    & $add 'schema: Test-Json accepts probe on a plugin, probe true and an object on a render, and probe on a variant, like the validator' $false (& $agree (ConvertTo-HarnessJsonText -Value $withProbe) $true)
     $structural = @($mutations | Where-Object { $_.L -in 'an unknown key at the top', 'an unknown key in a scenario', 'schema 2', 'a string where a number belongs', 'a sample rate out of range', 'a scenario id that breaks the pattern', 'an unknown expected outcome', 'a negative case without expectDetail',
             'a state with both a template and a state file', 'a template state without the FX number', 'an unknown JSFX', 'an unknown send mode', 'a pan out of range', 'a range of one number', 'a range of three numbers', 'savereopen with 0 cycles', 'an unknown host setting', 'a render mode axis in the matrix of a device scenario (the device step renders nothing)',
             'a transport state with an unknown transport (recording is no state the harness can be asked for)', 'a transport state with an unknown monitoring mode', 'a transport state without arm', 'a transport state whose arm is not a boolean',
@@ -1408,13 +1499,15 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
             'variants on a device scenario (only renders have variants)', 'variants in a negative case', 'a variant without an id', 'a variant id that breaks the pattern', 'an empty list of variants', 'more than 1000 variants',
             'an unknown key in a variant', 'an unknown key in the FX of a variant', 'the FX of a variant with nothing in it', 'a variant with an empty fx', 'an expectPdc word other than report', 'a learn batch size of 0', 'a learn batch size of 257',
             'a maxDiffDb word other than report (Report: the word is case sensitive)', 'a maxDiffDb word other than report (reported)', 'a maxDiffDb of true', 'a maxDiffDb of 25', 'a tail of -1 s', 'a tail of 60.5 s', 'a tail given as a string',
-            'a tail on a savereopen scenario (only renders have one)', 'a tail on a device scenario', 'a tail on a transport scenario', 'keepFirst that is not a boolean', 'keepFirst in a negative case', 'keepFirst on a device scenario' })
+            'a tail on a savereopen scenario (only renders have one)', 'a tail on a device scenario', 'a tail on a transport scenario', 'keepFirst that is not a boolean', 'keepFirst in a negative case', 'keepFirst on a device scenario',
+            'a probe variable name in lower case', 'a probe variable name of two characters', 'a probe value that is a path (a string)', 'an empty probe value', 'a probe value with both file and dir', 'a probe dir that is not a boolean',
+            'a probe min without dir', 'a probe min of 33', 'a probe file with a min', 'probe on a device scenario', 'probe on a savereopen scenario', 'probe on a transport scenario', 'probe in a negative render case' })
     $disagree = @(foreach ($mu in $structural) {
             $raw = ConvertFrom-HarnessJson $text
             & $mu.E $raw
             if (-not (& $agree (ConvertTo-HarnessJsonText -Value $raw) $false)) { $mu.L }
         })
-    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 64 -and $disagree.Count -eq 0)
+    & $add "schema: Test-Json rejects the structural mutations the validator rejects ($($disagree -join ', '))" $true ($structural.Count -eq 77 -and $disagree.Count -eq 0)
     $cases
 }
 
@@ -2921,6 +3014,24 @@ function Get-ExampleCases([string]$RepoRoot) {
     $fsvSchemaOk = try { Test-Json -Json $fsvText -Schema ([IO.File]::ReadAllText((Join-Path $RepoRoot 'schema/config.schema.json'))) -ErrorAction Stop } catch { $false }
     & $add 'example: the file-source configuration names a placeholder plugin and no local path, and the schema accepts it' $false (
         $fsvText -cmatch '"bundle": "My Reverb\.vst3"' -and $fsvText -cnotmatch '[A-Za-z]:[\\/]' -and $fsvSchemaOk)
+    # A test build with probe variables: two recordings, each a layout with its own scenario and script, a shifted script as a variant
+    $probeFile = Join-Path $RepoRoot 'examples/plugin-probe/reaper-harness.json'
+    $probeText = [IO.File]::ReadAllText($probeFile)
+    $probeConf = Read-HarnessConfig -Path $probeFile # a problem is a usage error, which fails the group
+    $probeRows = @($probeConf.Scenarios)
+    $scriptOf = { param([string]$RowId) $row = @($probeRows | Where-Object { $_.id -ceq $RowId })[0]; ($row -and $row.probe) ? $row.probe['EXAMPLE_PROBE_SCRIPT'].File : '' }
+    $tb = $probeConf.Plugins['tb']
+    $probeIds = 'take1-1x-as-written,take1-1x-shifted,take1-online-as-written,take1-online-shifted,take2-1x-as-written,take2-1x-shifted,take2-online-as-written,take2-online-shifted,counts'
+    & $add "example: the probe configuration validates: one plugin with two probe variables and a report variable, two recordings with their scenarios, variants and legs ($(@($probeRows | ForEach-Object { $_.id }) -join ','))" $false (
+        @($probeConf.Plugins.get_Keys()).Count -eq 1 -and (@($tb.Probe.get_Keys()) -join ',') -ceq 'EXAMPLE_PROBE_SCRIPT,EXAMPLE_PROBE_OUT' -and $tb.Report.Env -ceq 'EXAMPLE_PROBE_JSON' -and
+        (@($probeRows | ForEach-Object { $_.id }) -join ',') -ceq $probeIds -and $probeConf.Limits.renderTimeoutSec -eq 600)
+    & $add 'example: each recording and variant has its own script; every probe scenario compares with none and asks for at least one file; counts has no probe' $false (
+        (& $scriptOf 'take1-1x-shifted') -ceq 'probe/take1-shifted.json' -and (& $scriptOf 'take1-online-as-written') -ceq 'probe/take1.json' -and (& $scriptOf 'take2-1x-as-written') -ceq 'probe/take2.json' -and
+        (& $scriptOf 'take2-online-shifted') -ceq 'probe/take2-shifted.json' -and @($probeRows | Where-Object { $_.probe -and ($_.compare.Kind -cne 'none' -or $_.probe['EXAMPLE_PROBE_OUT'].Min -ne 1 -or $_.host.InformOfflineState) }).Count -eq 0 -and
+        @($probeRows | Where-Object { $_.probe }).Count -eq 8 -and $null -eq @($probeRows | Where-Object { $_.id -ceq 'counts' })[0].probe)
+    $probeSchemaOk = try { Test-Json -Json $probeText -Schema ([IO.File]::ReadAllText((Join-Path $RepoRoot 'schema/config.schema.json'))) -ErrorAction Stop } catch { $false }
+    & $add 'example: the probe configuration names placeholders only and no local path, and the schema accepts it' $false (
+        $probeText -cmatch '"bundle": "My Probe Test Build\.vst3"' -and $probeText -cnotmatch '[A-Za-z]:[\\/]' -and $probeSchemaOk)
     $cases
 }
 
@@ -3204,8 +3315,438 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
         $locked = Join-Path $Tmp 'retry-locked.wav'; Set-Content -LiteralPath $locked -Value 'x'
         $hold = [IO.File]::Open($locked, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
         try { $e = & $retry @((& $res Modal license-nag), (& $res Exited)) @($locked) } finally { $hold.Dispose() }
-        & $add 'retry: an output of the first launch that cannot be deleted means no retry (it would be read as the second one''s)' $true ($e.Calls -eq 1 -and $e.Retries.Count -eq 0 -and $e.Run.Status -ceq 'Modal')
+        $notRetriedOf = { param($Launched) $Launched.PSObject.Properties['NotRetried'] ? [string]$Launched.NotRetried : '' }
+        $eWhy = & $notRetriedOf $e.Run
+        & $add "retry: an output of the first launch that cannot be deleted means no retry (it would be read as the second one's), and the run says why ($eWhy)" $true (
+            $e.Calls -eq 1 -and $e.Retries.Count -eq 0 -and $e.Run.Status -ceq 'Modal' -and $eWhy -ceq 'retry-locked.wav of the first launch could not be deleted')
+        # A probe directory among the outputs: it stays (the plugin is told its path again), and it must be empty
+        $emptyOut = Join-Path $Tmp 'retry-empty.out'; $null = New-Item -ItemType Directory -Path $emptyOut
+        $f = & $retry @((& $res Modal license-nag), (& $res Exited)) @($emptyOut)
+        & $add 'retry: an output that is an empty directory is kept, and the launch is started once more' $false ($f.Calls -eq 2 -and $f.Retries.Count -eq 1 -and (Test-Path -LiteralPath $emptyOut -PathType Container))
+        $fullOut = Join-Path $Tmp 'retry-full.out'; $null = New-Item -ItemType Directory -Path $fullOut; [IO.File]::WriteAllText((Join-Path $fullOut 'step-001.json'), '{}')
+        $g = & $retry @((& $res Modal license-nag), (& $res Exited)) @($fullOut)
+        $gWhy = & $notRetriedOf $g.Run
+        & $add "retry: an output directory the first launch wrote into means no retry, what it wrote stays, and the run says why ($gWhy)" $true (
+            $g.Calls -eq 1 -and $g.Retries.Count -eq 0 -and $g.Run.Status -ceq 'Modal' -and (Test-Path -LiteralPath (Join-Path $fullOut 'step-001.json')) -and
+            $gWhy -ceq 'the first launch wrote into retry-full.out' -and (& $notRetriedOf $f.Run) -ceq '')
+        $nagOf = { param([string[]]$Because) $o = [pscustomobject]@{ Status = 'Modal'; Modal = 'license-nag'; Windows = @('license-nag'); StillRunning = $false; Seconds = 1; ExitCode = $null }
+            if ($Because) { $o | Add-Member -NotePropertyName NotRetried -NotePropertyValue $Because[0] }; $o }
+        $nagText = @((Get-HarnessHostFailure (& $nagOf 'the first launch wrote into t1.out')), (Get-HarnessHostFailure (& $nagOf)))
+        & $add "retry: the reason of a launch that was not started again says why ($($nagText -join ' | '))" $true (
+            $nagText[0] -ceq 'stuck on dialog license-nag (seen: license-nag), ended; not retried: the first launch wrote into t1.out' -and $nagText[1] -ceq 'stuck on dialog license-nag (seen: license-nag), ended')
+        # A probe variable under the name of the job or of a report variable is refused before anything is written or started
+        $takenNames = foreach ($pair in @(@{ R = @{ EXAMPLE_PROBE_JSON = 'a' }; P = @{ EXAMPLE_PROBE_JSON = 'b' } }, @{ R = @{}; P = @{ REAPER_HARNESS_JOB = 'c' } })) {
+            $queue.Clear(); $queue.Enqueue((& $res Exited)); $calls.N = 0
+            try { $null = Invoke-HarnessLuaStep -Ctx ([pscustomobject]@{ Work = $Tmp }) -Name 'taken' -Step 'render' -ReportEnv $pair.R -ProbeEnv $pair.P; 'not refused' } catch { "$($_.Exception.Message) ($($calls.N) launches)" }
+        }
+        & $add "lua step: a probe variable named like the job or a report variable is refused before anything starts ($($takenNames -join ' | '))" $true (
+            ($takenNames -join '|') -ceq 'the variable EXAMPLE_PROBE_JSON is taken (0 launches)|the variable REAPER_HARNESS_JOB is taken (0 launches)' -and -not (Test-Path -LiteralPath (Join-Path $Tmp 'taken.job.lua')))
     } finally { $null = & $swap $was }
+    $cases
+}
+
+# ---------------------------------------------------------------- probe variables and collected files
+function Get-ProbeCases([string]$Tmp, [string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $holds = { param([scriptblock]$Condition) try { [bool](& $Condition) } catch { $false } }
+    $root = Join-Path $Tmp 'probe'
+    $null = New-Item -ItemType Directory -Force -Path $root
+    # The names collection may use
+    $long = 'a' * 100
+    $good = @('final.json', 'step-gain-001-pid4242.json', 'a', 'final.json.4242.tmp', $long, 'A_b-9.x')
+    $badNames = @(('a' * 101), '.hidden', '-x', 'x.', 'a b.json', "$([char]0xE9).json", 'CON', 'nul.json', 'COM1.txt', 'lpt9', 'a\b', 'a/b', 'a:b', '"a"', "a`nb", '', "final.json`n")
+    $wrong = @($good | Where-Object { -not (Test-HarnessProbeFileName $_) }) + @($badNames | Where-Object { Test-HarnessProbeFileName $_ })
+    & $add "probe names: letters, digits, '.', '_' and '-', 1 to 100, starting with a letter or digit, not ending in '.', no device name ($($wrong.Count) wrong)" $true ($wrong.Count -eq 0)
+
+    # What to move out of the directory (pure)
+    $file = { param([string]$EntryName, [long]$Size = 1) @{ Name = $EntryName; Kind = 'file'; Bytes = $Size } }
+    $movedNames = { param($sel) @($sel.Move | ForEach-Object { $_.Name }) -join ',' }
+    $many = @(1..33 | ForEach-Object { & $file ('m-{0:d2}' -f $_) }) + @(& $file 'M-10')
+    $many = @($many | Where-Object { $_.Name -cne 'm-33' })
+    $s1 = Get-HarnessProbeSelection -Entries $many -Min 1
+    & $add "probe selection: at most 32 files, in ordinal order (M-10 before m-01); the rest stays and is counted ($($s1.Problems -join ' | '))" $true (
+        $s1.Move.Count -eq 32 -and $s1.Move[0].Name -ceq 'M-10' -and $s1.Move[31].Name -ceq 'm-31' -and $s1.Left -eq 1 -and ($s1.Problems -join '|') -ceq 'more than 32 files: 1 file left in the work directory')
+    $s2 = Get-HarnessProbeSelection -Entries @(1..5 | ForEach-Object { & $file "t$_.bin" 4194304 }) -Min 1
+    & $add "probe selection: 16 MiB in all exactly is allowed, one byte more is not ($($s2.Problems -join ' | '))" $true (
+        (& $movedNames $s2) -ceq 't1.bin,t2.bin,t3.bin,t4.bin' -and $s2.Left -eq 1 -and ($s2.Problems -join '|') -ceq 'more than 16777216 bytes in all: 1 file left in the work directory')
+    $s3 = Get-HarnessProbeSelection -Entries @((& $file 'a.json'), (& $file 'big.bin' 4194305), (& $file 'c.json'), (& $file 'edge.bin' 4194304)) -Min 1
+    & $add "probe selection: a file over 4 MiB is passed over and the walk goes on after it ($($s3.Problems -join ' | '))" $true (
+        (& $movedNames $s3) -ceq 'a.json,c.json,edge.bin' -and $s3.Left -eq 1 -and ($s3.Problems -join '|') -ceq 'big.bin is larger than 4194304 bytes')
+    $s4 = Get-HarnessProbeSelection -Entries @((& $file 'ok.json'), @{ Name = 'sub'; Kind = 'dir'; Bytes = 0 }, @{ Name = 'lnk'; Kind = 'link'; Bytes = 0 }, (& $file 'bad name!.json'), @{ Name = '.hidden'; Kind = 'dir'; Bytes = 0 }) -Min 1
+    $s4Text = $s4.Problems -join ' | '
+    & $add "probe selection: a subdirectory, a link and entries with a name that is not allowed stay and are counted; a bad name is never named ($s4Text)" $true (
+        (& $movedNames $s4) -ceq 'ok.json' -and $s4.Left -eq 4 -and $s4.Problems -ccontains 'a subdirectory sub' -and $s4.Problems -ccontains 'a link or junction lnk (not followed)' -and
+        $s4.Problems -ccontains "2 entries whose name is not allowed (letters, digits, '.', '_' and '-', at most 100)" -and $s4Text -cnotlike '*bad name*' -and $s4Text -cnotlike '*.hidden*')
+    $s5 = Get-HarnessProbeSelection -Entries @(& $file 'x.json.1.TMP') -Min 1
+    $s6 = Get-HarnessProbeSelection -Entries @((& $file 'x.json.1.tmp'), (& $file 'x.json')) -Min 1
+    & $add "probe selection: a .tmp file (any case) is moved, marked temporary and not counted for min ($($s5.Problems -join ' | '))" $true (
+        $s5.Move.Count -eq 1 -and $s5.Move[0].Temporary -and ($s5.Problems -join '|') -ceq '0 files to collect, fewer than the 1 asked for (min)' -and $s6.Problems.Count -eq 0 -and $s6.Move.Count -eq 2 -and -not $s6.Move[0].Temporary)
+    & $add 'probe selection: min 0 and an empty directory is no problem; min 2 and one file is' $true (
+        (Get-HarnessProbeSelection -Entries @() -Min 0).Problems.Count -eq 0 -and ((Get-HarnessProbeSelection -Entries @(& $file 'a.json') -Min 2).Problems -join '|') -ceq '1 file to collect, fewer than the 2 asked for (min)')
+
+    # The plan (pure): the places in the work directory
+    $cfgDir = Join-Path $root 'config'
+    $work = Join-Path $root 'work'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $cfgDir 'probe'), $work
+    $entry = { param([string]$VarName, [string]$EntryKind, [string]$FileRel = '', $Least = 1) [pscustomobject]@{ Name = $VarName; Plugin = 'tb'; Kind = $EntryKind; File = $FileRel; Min = (($EntryKind -ceq 'dir') ? $Least : 0) } }
+    $probeOf = { param([string]$FileRel, $Least = 1) $m = [ordered]@{}; $m['EXAMPLE_PROBE_SCRIPT'] = & $entry 'EXAMPLE_PROBE_SCRIPT' 'file' $FileRel; $m['EXAMPLE_PROBE_OUT'] = & $entry 'EXAMPLE_PROBE_OUT' 'dir' '' $Least; $m }
+    $probeScen = { param([string]$ScId, [string]$FileRel = 'probe/take1.json', $Least = 1) [pscustomobject]@{ id = $ScId; kind = 'render'; probe = (& $probeOf $FileRel $Least) } }
+    $plan = Get-HarnessProbePlan -ConfigDir $cfgDir -Scenario (& $probeScen 'take1') -Work $work
+    & $add 'probe plan: a file variable is the copy <id>.probe-<NAME><ext>, the dir variable <id>.out, full paths in the work directory' $false (
+        $plan.Vars.Count -eq 2 -and $plan.Vars[0].Path -ceq [IO.Path]::GetFullPath((Join-Path $work 'take1.probe-EXAMPLE_PROBE_SCRIPT.json')) -and $plan.Vars[0].Key -ceq 'probe/take1.json' -and
+        $plan.Dir.Path -ceq [IO.Path]::GetFullPath((Join-Path $work 'take1.out')) -and $plan.Dir.Min -eq 1 -and $plan.Env.Count -eq 2 -and $plan.Env['EXAMPLE_PROBE_OUT'] -ceq $plan.Dir.Path -and $null -eq $plan.Vars[0].Checked)
+    $odd = Get-HarnessProbePlan -ConfigDir $cfgDir -Scenario (& $probeScen 'take1' 'probe/x.JSON5x!') -Work $work
+    $shifted = Get-HarnessProbePlan -ConfigDir $cfgDir -Scenario (& $probeScen 'take1-shifted' 'probe/take1-shifted.json') -Work $work
+    & $add 'probe plan: an extension that is not plain letters and digits is dropped; a variant has its own places and its own source key' $false (
+        $odd.Vars[0].Path -ceq [IO.Path]::GetFullPath((Join-Path $work 'take1.probe-EXAMPLE_PROBE_SCRIPT')) -and $shifted.Vars[0].Key -ceq 'probe/take1-shifted.json' -and
+        $shifted.Vars[0].Path -ceq [IO.Path]::GetFullPath((Join-Path $work 'take1-shifted.probe-EXAMPLE_PROBE_SCRIPT.json')) -and $shifted.Dir.Path -ceq [IO.Path]::GetFullPath((Join-Path $work 'take1-shifted.out')))
+    & $add 'probe plan: none for a render without probe (no field, or null)' $true (
+        $null -eq (Get-HarnessProbePlan -ConfigDir $cfgDir -Scenario ([pscustomobject]@{ id = 'x'; kind = 'render' }) -Work $work) -and
+        $null -eq (Get-HarnessProbePlan -ConfigDir $cfgDir -Scenario ([pscustomobject]@{ id = 'x'; kind = 'render'; probe = $null }) -Work $work))
+
+    # The check of every launch's environment (pure)
+    $inWork = Join-Path $work 'take1.out'
+    $envWhy = { param($EnvValues) Test-HarnessLaunchEnvironment $EnvValues $work }
+    & $add 'launch environment: nothing, the job file and probe paths in the work directory pass' $false (
+        $null -eq (& $envWhy @{}) -and $null -eq (Test-HarnessLaunchEnvironment $null $work) -and $null -eq (& $envWhy @{ REAPER_HARNESS_JOB = (Join-Path $work 'x.job.lua') }) -and
+        $null -eq (& $envWhy @{ EXAMPLE_PROBE_OUT = $inWork; EXAMPLE_PROBE_SCRIPT = (Join-Path $work 'take1.probe-EXAMPLE_PROBE_SCRIPT.json') }))
+    $refusedEnv = @(
+        @{ L = 'a value outside the work directory'; V = @{ X_ONE = (Join-Path $root 'elsewhere') } }
+        @{ L = 'the work directory itself'; V = @{ X_ONE = $work } }
+        @{ L = 'the work directory with a trailing separator'; V = @{ X_ONE = "$work\" } }
+        @{ L = 'a relative path'; V = @{ X_ONE = 'take1.out' } }
+        @{ L = 'a path that leads out with ..'; V = @{ X_ONE = (Join-Path $work '..\x') } }
+        @{ L = 'a drive-relative path'; V = @{ X_ONE = 'C:x' } }
+        @{ L = 'the name PATH with a value in work'; V = @{ PATH = $inWork } }
+        @{ L = 'the name REAPER_X'; V = @{ REAPER_X = $inWork } }
+        @{ L = 'the job name in lower case'; V = @{ reaper_harness_job = $inWork } }
+        @{ L = 'a name that only starts with the job name'; V = @{ REAPER_HARNESS_JOB2 = $inWork } }
+        @{ L = 'the job name with a line break after it'; V = @{ "REAPER_HARNESS_JOB`n" = $inWork } }
+    )
+    $letThrough = @($refusedEnv | Where-Object { $null -eq (& $envWhy $_.V) } | ForEach-Object { $_.L })
+    & $add "launch environment: refused: $(@($refusedEnv | ForEach-Object { $_.L }) -join ', ') (let through: $($letThrough -join ', '))" $true ($letThrough.Count -eq 0)
+    & $add 'launch environment: a denied name says the harness may not set it' $true ((& $envWhy @{ PATH = $inWork }) -clike "*; the harness may not set it")
+    # Wherever the harness runs: REAPER starts in the work directory, so a relative value would mean something else there
+    $notFull = @(& $envWhy @{ X_ONE = 'take1.out' }; & $envWhy @{ X_ONE = 'C:x' })
+    & $add "launch environment: a relative and a drive-relative value are refused as not a full path ($($notFull -join ' | '))" $true (
+        ($notFull -join '|') -ceq 'the value of X_ONE is not a full path|the value of X_ONE is not a full path')
+    # A declared report name (exact) is held to the list of a report, the released one; every other name, a probe
+    # variable or whatever an extension asks for, to the strict one
+    $declaredWhy = { param($EnvValues, [string[]]$Declared) Test-HarnessLaunchEnvironment $EnvValues $work $Declared }
+    & $add 'launch environment: names of the added families pass when they are declared report names (HTTP_REPORT_PATH, NODE_REPORT, MY_PROXY, SSLKEYLOGFILE)' $false (
+        $null -eq (& $declaredWhy @{ HTTP_REPORT_PATH = $inWork; NODE_REPORT = $inWork; MY_PROXY = $inWork; SSLKEYLOGFILE = $inWork } @('HTTP_REPORT_PATH', 'NODE_REPORT', 'MY_PROXY', 'SSLKEYLOGFILE')))
+    $undeclared = @(
+        @{ L = 'HTTP_REPORT_PATH without report names'; V = @{ HTTP_REPORT_PATH = $inWork }; D = @(); W = "'HTTP_REPORT_PATH' starts with HTTP, *; the harness may not set it" }
+        @{ L = 'HTTP_REPORT_PATH when the report name is HTTP_REPORT'; V = @{ HTTP_REPORT_PATH = $inWork }; D = @('HTTP_REPORT'); W = "'HTTP_REPORT_PATH' starts with HTTP, *; the harness may not set it" }
+        @{ L = 'HTTP_REPORT_PATH when the report name differs in case'; V = @{ HTTP_REPORT_PATH = $inWork }; D = @('Http_Report_Path'); W = "'HTTP_REPORT_PATH' starts with HTTP, *; the harness may not set it" }
+        @{ L = 'the probe variable NODE_PROBE next to the report name NODE_REPORT'; V = @{ NODE_REPORT = $inWork; NODE_PROBE = $inWork }; D = @('NODE_REPORT'); W = "'NODE_PROBE' starts with NODE_, *; the harness may not set it" }
+        @{ L = 'MY_PROXY, not declared'; V = @{ MY_PROXY = $inWork }; D = @('MY_REPORT'); W = "'MY_PROXY' ends with _PROXY, which network libraries read; the harness may not set it" }
+        @{ L = 'SSLKEYLOGFILE, not declared'; V = @{ SSLKEYLOGFILE = $inWork }; D = @(); W = "'SSLKEYLOGFILE' is a variable Windows or a runtime reads; the harness may not set it" }
+        @{ L = 'PATH, declared as a report name all the same'; V = @{ PATH = $inWork }; D = @('PATH'); W = "'PATH' is a variable Windows or a runtime reads; the harness may not set it" }
+    )
+    $undeclaredGot = @($undeclared | ForEach-Object { [string](& $declaredWhy $_.V $_.D) })
+    $undeclaredLet = @(for ($i = 0; $i -lt $undeclared.Count; $i++) { if ($undeclaredGot[$i] -cnotlike $undeclared[$i].W) { "$($undeclared[$i].L): $($undeclaredGot[$i])" } })
+    & $add "launch environment: a name of the added families that is not a declared report name is refused, and a declared one still meets the list of a report: $(@($undeclared | ForEach-Object { $_.L }) -join ', ') (wrong: $($undeclaredLet -join ' | '))" $true ($undeclaredLet.Count -eq 0)
+    # The wiring: the context takes the configuration's report names, and each launch hands them to that check. The
+    # configuration is built by hand, so its probe name NODE_PROBE (validation refuses it) shows that the check holds a
+    # probe name to the strict list too; a REAPER of the round that could not be ended stops each launch right after it
+    $wiredConf = [pscustomobject]@{ Limits = [pscustomobject]@{ lockWaitSec = 1 }; Signal = $null; Plugins = [ordered]@{
+            rec = [pscustomobject]@{ Report = [pscustomobject]@{ Env = 'HTTP_REPORT_PATH' }; Probe = [ordered]@{} }
+            tb = [pscustomobject]@{ Report = $null; Probe = [ordered]@{ NODE_PROBE = $null } } } }
+    $wiredCtx = New-HarnessContext -ReaperExe 'stand-in' -WorkDir $work -Driver 'x' -Config $wiredConf -Locks @('Local\x')
+    $wiredCtx.StillRunning = [pscustomobject]@{ Pid = 0; Label = 'self-test'; Lock = $null }
+    $onceWhy = { param($EnvValues) try { $once = & @(Get-Module Scenarios)[0] { param($c, $h) Invoke-HarnessLaunchOnce -Ctx $c -HostArgs $h } $wiredCtx @{ Environment = $EnvValues }; "not refused: $($once.Status)" } catch { $_.Exception.Message } }
+    $asReport = & $onceWhy @{ HTTP_REPORT_PATH = $inWork }
+    $asProbe = & $onceWhy @{ NODE_PROBE = $inWork }
+    $asOther = & $onceWhy @{ NODE_X = $inWork }
+    & $add "launch wiring: the context holds the configuration's report names only, and a launch that sets the report name HTTP_REPORT_PATH passes the check ($(@($wiredCtx.ReportEnvNames) -join ','); $asReport)" $false (
+        (@($wiredCtx.ReportEnvNames) -join ',') -ceq 'HTTP_REPORT_PATH' -and $asReport -ceq 'not refused: Blocked' -and $wiredCtx.Launches -eq 0)
+    & $add "launch wiring: a launch that sets the probe name NODE_PROBE or the undeclared NODE_X is refused before anything is taken ($asProbe | $asOther)" $true (
+        $asProbe -clike "REAPER was not started: 'NODE_PROBE' starts with NODE_, *; the harness may not set it" -and
+        $asOther -clike "REAPER was not started: 'NODE_X' starts with NODE_, *; the harness may not set it" -and $wiredCtx.Launches -eq 0)
+
+    # The input files, before REAPER (one usage error for every problem; files of scenarios not picked are not read)
+    [IO.File]::WriteAllText((Join-Path $cfgDir 'probe/take1.json'), '{"gain":-6}')
+    $fs = [IO.File]::Create((Join-Path $cfgDir 'probe/big.json')); try { $fs.SetLength(1048577) } finally { $fs.Dispose() }
+    $fs = [IO.File]::Create((Join-Path $cfgDir 'probe/edge.json')); try { $fs.SetLength(1048576) } finally { $fs.Dispose() }
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $cfgDir 'probe/adir')
+    [IO.File]::WriteAllText((Join-Path $root 'out.json'), '{}')
+    $cfgObj = [pscustomobject]@{ ConfigDir = $cfgDir }
+    $readFiles = Read-HarnessProbeFiles -Config $cfgObj -Scenarios @((& $probeScen 'take1'), (& $probeScen 'take2'), (& $probeScen 'edge' 'probe/edge.json'))
+    $wantSha = (Get-FileHash -LiteralPath (Join-Path $cfgDir 'probe/take1.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    & $add 'probe files: a file is read once, by its key: sha256 and bytes; 1 MiB exactly is allowed' $false (
+        $readFiles.Count -eq 2 -and $readFiles['probe/take1.json'].Sha256 -ceq $wantSha -and $readFiles['probe/take1.json'].Bytes -eq 11 -and $readFiles['PROBE/TAKE1.JSON'].Rel -ceq 'probe/take1.json' -and $readFiles['probe/edge.json'].Bytes -eq 1048576)
+    $absolute = Join-Path $cfgDir 'probe/take1.json'
+    $badScenarios = @((& $probeScen 'a' 'probe/big.json'), (& $probeScen 'b' '../out.json'), (& $probeScen 'c' $absolute), (& $probeScen 'd' 'probe/missing.json'), (& $probeScen 'e' 'probe/adir'), (& $probeScen 'f'))
+    $usage = try { $null = Read-HarnessProbeFiles -Config $cfgObj -Scenarios $badScenarios; '' } catch { $_.Exception.Message }
+    & $add "probe files: over 1 MiB, outside the directory, absolute, missing and a directory are one usage error naming all five ($usage)" $true (
+        $usage -clike 'USAGE: probe files: 5 problem(s): *' -and $usage -clike '*probe probe/big.json is larger than 1048576 bytes*' -and $usage -clike '*probe ../out.json cannot be used*' -and
+        $usage -clike '*must be relative*' -and $usage -clike '*probe probe/missing.json cannot be used*' -and $usage -clike '*probe probe/adir cannot be used*')
+    & $add 'probe files: a file only a scenario that is not picked names is not read' $true ($null -ne (Read-HarnessProbeFiles -Config $cfgObj -Scenarios @(& $probeScen 'take1')) -and -not (Test-Path -LiteralPath (Join-Path $cfgDir 'probe/unpicked.json')))
+
+    # Making the run: the copy of this launch and a new empty directory
+    $newCtx = { param([string]$WorkDir, $Known)
+        $null = New-Item -ItemType Directory -Force -Path $WorkDir
+        @{ Config = $cfgObj; Work = $WorkDir; Files = [Collections.Generic.List[string]]::new(); Dirs = [Collections.Generic.List[string]]::new(); ProbeFiles = $Known; ProbeRuns = @{}
+            Started = [Collections.Generic.List[object]]::new(); StillRunning = $null } }
+    $checked = Read-HarnessProbeFiles -Config $cfgObj -Scenarios @(& $probeScen 'take1')
+    $w6 = Join-Path $root 'w6'
+    $ctx6 = & $newCtx $w6 $checked
+    $ctx6.Started.Add([pscustomobject]@{ Pid = 111; StartUtc = $null })
+    $run6 = New-HarnessProbeRun -Ctx $ctx6 -Scenario (& $probeScen 'take1')
+    $copy6 = Join-Path $w6 'take1.probe-EXAMPLE_PROBE_SCRIPT.json'
+    $dir6 = Join-Path $w6 'take1.out'
+    & $add "probe run: the copy has the checked bytes and is a work file; the directory is new, empty and registered; the run is recorded ($($run6.Why))" $false (
+        $null -eq $run6.Why -and (Get-FileHash -LiteralPath $copy6 -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $wantSha -and $ctx6.Files -ccontains $copy6 -and
+        (Test-Path -LiteralPath $dir6 -PathType Container) -and @(Get-ChildItem -LiteralPath $dir6 -Force).Count -eq 0 -and $ctx6.Dirs -ccontains $dir6 -and
+        $run6.Env['EXAMPLE_PROBE_OUT'] -ceq $dir6 -and $run6.Env['EXAMPLE_PROBE_SCRIPT'] -ceq $copy6 -and $ctx6.ProbeRuns['take1'].From -eq 1)
+    $again = New-HarnessProbeRun -Ctx (& $newCtx $w6 $checked) -Scenario (& $probeScen 'take1')
+    & $add "probe run: a directory that is there already is not reused ($($again.Why))" $true ($again.Why -ceq 'the probe directory take1.out is there already' -and $again.Env.Count -eq 0)
+    $w6b = Join-Path $root 'w6b'
+    $ctx6b = & $newCtx $w6b $checked
+    [IO.File]::WriteAllText((Join-Path $cfgDir 'probe/take1.json'), '{"gain":-7}')
+    $changedRun = New-HarnessProbeRun -Ctx $ctx6b -Scenario (& $probeScen 'take1')
+    [IO.File]::WriteAllText((Join-Path $cfgDir 'probe/take1.json'), '{"gain":-6}')
+    & $add "probe run: an input changed since it was checked is not given to the plugin, and no copy is left ($($changedRun.Why))" $true (
+        $changedRun.Why -ceq 'probe file probe/take1.json changed since it was checked' -and -not (Test-Path -LiteralPath (Join-Path $w6b 'take1.probe-EXAMPLE_PROBE_SCRIPT.json')) -and -not $ctx6b.ProbeRuns.Contains('take1'))
+    $unchecked = New-HarnessProbeRun -Ctx (& $newCtx (Join-Path $root 'w6c') @{}) -Scenario (& $probeScen 'take1')
+    & $add "probe run: a file that was not checked before the start is never copied ($($unchecked.Why))" $true ($unchecked.Why -ceq 'probe file probe/take1.json was not checked before the start')
+    # The limit itself: <work>\take1.out of 140 characters is allowed (a name of 100 then fits in a path of 241), one of
+    # 141 is not
+    $workOf = { param([int]$DirLength) Join-Path $root ('d' * ($DirLength - $root.Length - 11)) }
+    $at140 = New-HarnessProbeRun -Ctx (& $newCtx (& $workOf 140) $checked) -Scenario (& $probeScen 'take1')
+    $dir140 = Join-Path (& $workOf 140) 'take1.out'
+    & $add "probe run: a directory path of 140 characters is allowed ($($dir140.Length) characters; $($at140.Why))" $false ($null -eq $at140.Why -and $dir140.Length -eq 140 -and (Test-Path -LiteralPath $dir140 -PathType Container))
+    $deep = & $workOf 141
+    $tooLong = New-HarnessProbeRun -Ctx (& $newCtx $deep $checked) -Scenario (& $probeScen 'take1')
+    & $add "probe run: a directory path of 141 characters, one over the limit, is refused before the render starts ($($tooLong.Why))" $true (
+        $tooLong.Why -ceq 'the probe directory path is too long for a plugin to write into it' -and (Join-Path $deep 'take1.out').Length -eq 141 -and -not (Test-Path -LiteralPath (Join-Path $deep 'take1.out')))
+    # A read-only file of the configuration gives a copy that is not read-only; a copy an earlier launch left is replaced
+    $roSource = Join-Path $cfgDir 'probe/take1.json'
+    [IO.File]::SetAttributes($roSource, [IO.FileAttributes]::ReadOnly)
+    try { $roRun = New-HarnessProbeRun -Ctx (& $newCtx (Join-Path $root 'w6e') $checked) -Scenario (& $probeScen 'take1') }
+    finally { [IO.File]::SetAttributes($roSource, [IO.FileAttributes]::Normal) }
+    $roCopy = Join-Path $root 'w6e/take1.probe-EXAMPLE_PROBE_SCRIPT.json'
+    & $add "probe run: the copy of a read-only file of the configuration is not read-only ($($roRun.Why))" $false (
+        $null -eq $roRun.Why -and [int]([IO.File]::GetAttributes($roCopy) -band [IO.FileAttributes]::ReadOnly) -eq 0)
+    $w6f = Join-Path $root 'w6f'
+    $null = New-Item -ItemType Directory -Force -Path $w6f
+    [IO.File]::WriteAllText((Join-Path $w6f 'take1.probe-EXAMPLE_PROBE_SCRIPT.json'), 'left by an earlier launch')
+    $overRun = New-HarnessProbeRun -Ctx (& $newCtx $w6f $checked) -Scenario (& $probeScen 'take1')
+    & $add "probe run: a copy an earlier launch left is replaced by one with the checked bytes ($($overRun.Why))" $false (
+        $null -eq $overRun.Why -and (Get-FileHash -LiteralPath (Join-Path $w6f 'take1.probe-EXAMPLE_PROBE_SCRIPT.json') -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $wantSha)
+    $plain = New-HarnessProbeRun -Ctx (& $newCtx (Join-Path $root 'w6d') $checked) -Scenario ([pscustomobject]@{ id = 'x'; kind = 'render'; probe = $null })
+    & $add 'probe run: nothing for a render without probe' $false ($null -eq $plain.Why -and $plain.Env.Count -eq 0)
+
+    # Collecting (Save-HarnessProbeFiles) with a hand-made Keep, Ctx and directory
+    $resDir = Join-Path $root 'results'
+    $null = New-Item -ItemType Directory -Force -Path $resDir
+    $outside = Join-Path $root 'outside'
+    $null = New-Item -ItemType Directory -Force -Path $outside
+    [IO.File]::WriteAllText((Join-Path $outside 'secret.json'), 'not the harness''s')
+    $made = { param([string]$WorkName, [string]$ScId = 'take1', [string]$WorkRoot = $root)
+        $c = & $newCtx (Join-Path $WorkRoot $WorkName) $checked
+        $c.Started.Add([pscustomobject]@{ Pid = 111; StartUtc = $null }) # the learn launch, before the run
+        $r = New-HarnessProbeRun -Ctx $c -Scenario (& $probeScen $ScId)
+        if ($r.Why) { throw $r.Why }
+        $c.Started.Add([pscustomobject]@{ Pid = 4242; StartUtc = $null }) # the scenario's own render
+        @{ Ctx = $c; Out = $r.Env['EXAMPLE_PROBE_OUT'] } }
+    $write = { param([string]$Into, [string[]]$Leaves) foreach ($l in $Leaves) { [IO.File]::WriteAllText((Join-Path $Into $l), "{""leaf"":""$l""}") } }
+    $collect = { param($m, [string]$KeepStamp, [string]$Status = 'PASS', [string]$ScId = 'take1') $k = New-HarnessKeep -ResultDir $resDir -Stamp $KeepStamp
+        @{ Keep = $k; Got = (Save-HarnessProbeFiles -Keep $k -Ctx $m.Ctx -Scenario (& $probeScen $ScId) -Round 1 -Status $Status -Detail 'frames=1') } }
+    $m7 = & $made 'w7'
+    & $write $m7.Out @('step-001.json', 'final.json', 'final.json.4242.tmp')
+    $r7 = & $collect $m7 'p7'
+    $dest7 = Join-Path $resDir 'renders/p7/run1/take1.out'
+    $f7 = $r7.Got.Facts
+    $hashOk = @($f7.files | Where-Object { $_.sha256 -cne (Get-HarnessSha256 (Join-Path $dest7 $_.name)) -or $_.bytes -ne ([IO.FileInfo]::new((Join-Path $dest7 $_.name))).Length }).Count -eq 0
+    & $add "probe collection: the files move to run1/<id>.out/ with their names, sizes and hashes; the detail says how many ($($r7.Got.Status): $($r7.Got.Detail))" $false (
+        $r7.Got.Status -ceq 'PASS' -and $r7.Got.Detail -ceq 'frames=1; probe: 3 files collected, 75 bytes, 1 temporary' -and $f7.dir -ceq 'run1/take1.out' -and $f7.collected -eq 3 -and $f7.left -eq 0 -and $f7.temporary -eq 1 -and
+        (@($f7.files | ForEach-Object { $_.name }) -join ',') -ceq 'final.json,final.json.4242.tmp,step-001.json' -and $hashOk -and @(Get-ChildItem -LiteralPath $m7.Out -Force).Count -eq 0 -and $f7.pid -eq 4242 -and
+        $f7.bytes -eq 75 -and (Test-Path -LiteralPath (Join-Path $resDir 'renders/p7/manifest.jsonl')))
+    & $add 'probe collection: the variables are recorded: the input''s key, sha256 and bytes; the directory''s min' $false (
+        $f7.variables.Count -eq 2 -and $f7.variables[0].name -ceq 'EXAMPLE_PROBE_SCRIPT' -and $f7.variables[0].path -ceq 'probe/take1.json' -and $f7.variables[0].sha256 -ceq $wantSha -and $f7.variables[0].bytes -eq 11 -and
+        $null -eq $f7.variables[0].min -and $f7.variables[1].kind -ceq 'dir' -and $null -eq $f7.variables[1].path -and $f7.variables[1].min -eq 1 -and $f7.variables[1].plugin -ceq 'tb')
+    # The same run directory once more (another scenario of the run): claimed once, so it is used again, not refused
+    $m7b = & $made 'w7b' 'take2'
+    & $write $m7b.Out @('final.json')
+    $again7 = Save-HarnessProbeFiles -Keep $r7.Keep -Ctx $m7b.Ctx -Scenario (& $probeScen 'take2') -Round 1 -Status 'PASS'
+    & $add "probe collection: the run directory is claimed once: the next scenario of the run (and keep) uses it again ($($again7.Detail))" $false (
+        $again7.Status -ceq 'PASS' -and (Test-Path -LiteralPath (Join-Path $resDir 'renders/p7/run1/take2.out/final.json')) -and '' -ceq (Get-HarnessKeepClaim $r7.Keep) -and $r7.Keep.Checked)
+    $m7c = & $made 'w7c'
+    & $write $m7c.Out @('final.json')
+    $other7 = & $collect $m7c 'p7'
+    & $add "probe collection: another run that started in the same second finds the run directory taken: nothing is moved ($($other7.Got.Status): $($other7.Got.Detail))" $true ($other7.Got.Status -ceq 'INCOMPLETE' -and $other7.Got.Detail -clike '*manifest.jsonl is there already*' -and (Test-Path -LiteralPath (Join-Path $m7c.Out 'final.json')))
+    $m8 = & $made 'w8'
+    & $write $m8.Out @('final.json', 'step-001.json')
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $resDir 'renders/p8/run1/take1.out')
+    [IO.File]::WriteAllText((Join-Path $resDir 'renders/p8/run1/take1.out/final.json'), 'taken')
+    $r8 = & $collect $m8 'p8'
+    & $add "probe collection: a place that is taken is never overwritten: that file stays in the work directory ($($r8.Got.Detail))" $true (
+        $r8.Got.Status -ceq 'INCOMPLETE' -and $r8.Got.Detail -clike '*; not collected: final.json is there already and is never overwritten*' -and [IO.File]::ReadAllText((Join-Path $resDir 'renders/p8/run1/take1.out/final.json')) -ceq 'taken' -and
+        (Test-Path -LiteralPath (Join-Path $m8.Out 'final.json')) -and $r8.Got.Facts.left -eq 1 -and $r8.Got.Facts.collected -eq 1)
+    $m9 = & $made 'w9'
+    & $write $m9.Out @('final.json')
+    $m9.Ctx.StillRunning = [pscustomobject]@{ Pid = 4242; Label = 'take1'; Lock = $null }
+    $r9 = & $collect $m9 'p9'
+    & $add "probe collection: nothing is looked at while a REAPER of the round may still write ($($r9.Got.Detail))" $true (
+        $r9.Got.Status -ceq 'INCOMPLETE' -and $r9.Got.Detail -clike '*; probe: nothing collected: a REAPER of this round could not be ended and may still write there' -and (Test-Path -LiteralPath (Join-Path $m9.Out 'final.json')) -and
+        $null -eq $r9.Got.Facts.left -and -not (Test-Path -LiteralPath (Join-Path $resDir 'renders/p9')))
+    $m10 = & $made 'w10'
+    Remove-Item -LiteralPath $m10.Out
+    $null = New-Item -ItemType Junction -Path $m10.Out -Target $outside
+    $r10 = & $collect $m10 'p10'
+    & $add "probe collection: a directory replaced by a junction is neither followed nor emptied ($($r10.Got.Detail))" $true (
+        $r10.Got.Status -ceq 'INCOMPLETE' -and $r10.Got.Detail -clike '*nothing collected: the directory was replaced by a link or junction' -and (Test-Path -LiteralPath (Join-Path $outside 'secret.json')) -and
+        -not (Test-Path -LiteralPath (Join-Path $resDir 'renders/p10')))
+    Remove-Item -LiteralPath $m10.Out # the junction only
+    # The work directory reached through a junction above it (a result directory may be): collected all the same
+    $realAbove = Join-Path $root 'real-above'
+    $null = New-Item -ItemType Directory -Force -Path $realAbove
+    $viaLink = Join-Path $root 'via-link'
+    $null = New-Item -ItemType Junction -Path $viaLink -Target $realAbove
+    $m11 = & $made 'w11' 'take1' $viaLink
+    & $write $m11.Out @('final.json')
+    $r11 = & $collect $m11 'p11'
+    & $add "probe collection: a link above the work directory is allowed; only the directory itself may not be one ($($r11.Got.Detail))" $false ($r11.Got.Status -ceq 'PASS' -and $r11.Got.Facts.collected -eq 1)
+    $m12 = & $made 'w12'
+    & $write $m12.Out @('final.json')
+    $r12 = & $collect $m12 'p12' 'FAIL'
+    & $add "probe collection: a failed render stays FAIL, its files are collected all the same ($($r12.Got.Detail))" $true ($r12.Got.Status -ceq 'FAIL' -and $r12.Got.Facts.collected -eq 1)
+    $m13 = & $made 'w13'
+    & $write $m13.Out @('final.json')
+    $k13 = New-HarnessKeep -ResultDir $resDir -Stamp 'p13'
+    $k13.Checked = $true; $k13.Refused = 'renders/p13 would not be under the result directory'
+    $r13 = Save-HarnessProbeFiles -Keep $k13 -Ctx $m13.Ctx -Scenario (& $probeScen 'take1') -Round 1 -Status 'PASS'
+    & $add "probe collection: a refused run directory moves nothing ($($r13.Detail))" $true (
+        $r13.Status -ceq 'INCOMPLETE' -and $r13.Detail -clike '*not collected: renders/p13 would not be under the result directory*' -and (Test-Path -LiteralPath (Join-Path $m13.Out 'final.json')) -and $r13.Facts.left -eq 1 -and $null -eq $r13.Facts.dir)
+    $c14 = & $newCtx (Join-Path $root 'w14') $checked
+    $r14 = Save-HarnessProbeFiles -Keep (New-HarnessKeep -ResultDir $resDir -Stamp 'p14') -Ctx $c14 -Scenario (& $probeScen 'take1') -Round 1 -Status 'PASS' -Detail 'x'
+    & $add "probe collection: a render that never made its directory is not a pass ($($r14.Detail))" $true ($r14.Status -ceq 'INCOMPLETE' -and $r14.Detail -ceq 'x; probe: the directory was not made' -and $null -eq $r14.Facts.dir -and $null -eq $r14.Facts.pid)
+    # A directory this round did not make is not looked at, even when it is there
+    $c14b = & $newCtx (Join-Path $root 'w14b') $checked
+    $null = New-Item -ItemType Directory -Path (Join-Path $root 'w14b/take1.out'); & $write (Join-Path $root 'w14b/take1.out') @('final.json')
+    $r14b = Save-HarnessProbeFiles -Keep (New-HarnessKeep -ResultDir $resDir -Stamp 'p14b') -Ctx $c14b -Scenario (& $probeScen 'take1') -Round 1 -Status 'PASS'
+    & $add 'probe collection: a directory that is there but was not made by this round is not collected from' $true ($r14b.Status -ceq 'INCOMPLETE' -and (Test-Path -LiteralPath (Join-Path $root 'w14b/take1.out/final.json')))
+    $m15 = & $made 'w15'
+    $null = 1..10001 | ForEach-Object { [IO.File]::Create((Join-Path $m15.Out "e$_.json")).Dispose() }
+    $r15 = & $collect $m15 'p15'
+    & $add "probe collection: more than 10000 entries: nothing is collected ($($r15.Got.Detail))" $true ($r15.Got.Status -ceq 'INCOMPLETE' -and $r15.Got.Detail -clike '*nothing collected: more than 10000 entries' -and -not (Test-Path -LiteralPath (Join-Path $resDir 'renders/p15')))
+    $m16 = & $made 'w16'
+    & $write $m16.Out @('final.json', 'step-001.json')
+    $held = [IO.File]::Open((Join-Path $m16.Out 'final.json'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try { $r16 = & $collect $m16 'p16' } finally { $held.Dispose() }
+    & $add "probe collection: a file held open (tried again three times) stays where it is and the row is INCOMPLETE ($($r16.Got.Detail))" $true (
+        $r16.Got.Status -ceq 'INCOMPLETE' -and $r16.Got.Detail -clike '*final.json could not be moved there*' -and (Test-Path -LiteralPath (Join-Path $m16.Out 'final.json')) -and $r16.Got.Facts.collected -eq 1 -and $r16.Got.Facts.left -eq 1)
+    # A file another program holds for a moment (a scanner): a retry moves it. The holder says when it has the file open
+    $m16b = & $made 'w16b'
+    & $write $m16b.Out @('final.json')
+    $heldMark = Join-Path $root 'w16b-held'
+    $holdPsi = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    foreach ($part in '-NoProfile', '-NonInteractive', '-Command', '$h = [IO.File]::Open($env:HOLD_FILE, ''Open'', ''Read'', ''None''); [IO.File]::WriteAllText($env:HOLD_MARK, ''x''); Start-Sleep -Milliseconds 150; $h.Dispose()') { $holdPsi.ArgumentList.Add($part) }
+    $holdPsi.UseShellExecute = $false; $holdPsi.CreateNoWindow = $true
+    $holdPsi.Environment['HOLD_FILE'] = Join-Path $m16b.Out 'final.json'; $holdPsi.Environment['HOLD_MARK'] = $heldMark
+    $holdProc = [Diagnostics.Process]::Start($holdPsi)
+    $holdUntil = [datetime]::UtcNow.AddSeconds(20)
+    while (-not (Test-Path -LiteralPath $heldMark) -and -not $holdProc.HasExited -and [datetime]::UtcNow -lt $holdUntil) { Start-Sleep -Milliseconds 10 }
+    $wasHeld = Test-Path -LiteralPath $heldMark
+    $r16b = & $collect $m16b 'p16b'
+    $null = $holdProc.WaitForExit(20000)
+    & $add "probe collection: a file another program holds for a moment is moved on a retry ($($r16b.Got.Status): $($r16b.Got.Detail))" $false (
+        $wasHeld -and $r16b.Got.Status -ceq 'PASS' -and $r16b.Got.Facts.collected -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $m16b.Out 'final.json')))
+    # Only a sharing violation is tried again (Start-Sleep counted, not slept): three times for a held file, never for one
+    # that is gone
+    $renders = (Get-Command Move-HarnessKeptFile).Module
+    $naps = [Collections.Generic.List[int]]::new()
+    & $renders { param($l) Set-Item function:script:Start-Sleep { param([int]$Milliseconds) $l.Add($Milliseconds) }.GetNewClosure() } $naps
+    try {
+        $goneWhy = Move-HarnessKeptFile -From (Join-Path $root 'no-such.json') -To (Join-Path $resDir 'renders/p16c/gone.json') -ResultDir $resDir -Retry
+        $goneNaps = $naps.Count
+        $heldFile = Join-Path $root 'held-16c.json'; [IO.File]::WriteAllText($heldFile, '{}')
+        $h16c = [IO.File]::Open($heldFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try { $heldWhy = Move-HarnessKeptFile -From $heldFile -To (Join-Path $resDir 'renders/p16c/held.json') -ResultDir $resDir -Retry } finally { $h16c.Dispose() }
+    } finally { & $renders { Remove-Item function:script:Start-Sleep } }
+    & $add "probe collection: a move is tried again only after a sharing violation: three times, 200 ms apart, for a held file; never for a file that is gone ($goneNaps, then $($naps.Count))" $true (
+        $goneWhy -clike 'gone.json could not be moved there: *' -and $goneNaps -eq 0 -and $heldWhy -clike 'held.json could not be moved there: *' -and $naps.Count -eq 3 -and
+        @($naps | Where-Object { $_ -ne 200 }).Count -eq 0 -and (Test-Path -LiteralPath $heldFile))
+    # A collected file whose hash cannot be taken: the row says which, it has no hash or size, and it stays under renders
+    $m16d = & $made 'w16d'
+    & $write $m16d.Out @('final.json', 'step-001.json')
+    $unreadableHash = { param([string]$Path) if ($Path -clike '*take1.out?final.json') { throw 'the file is in use by another process' }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $r16d = Invoke-WithModuleStub 'Save-HarnessProbeFiles' 'Get-HarnessSha256' $unreadableHash { & $collect $m16d 'p16d' }
+    $f16d = @($r16d.Got.Facts.files | Where-Object { $_.name -ceq 'final.json' })
+    & $add "probe collection: a collected file that cannot be read back: INCOMPLETE with its name, no sha256 or bytes, and it stays under renders ($($r16d.Got.Detail))" $true (
+        $r16d.Got.Status -ceq 'INCOMPLETE' -and $r16d.Got.Detail -ceq 'frames=1; probe: 2 files collected, 24 bytes; probe: collected, but final.json could not be read: the file is in use by another process' -and
+        $f16d.Count -eq 1 -and $null -eq $f16d[0].sha256 -and $null -eq $f16d[0].bytes -and (Test-Path -LiteralPath (Join-Path $resDir 'renders/p16d/run1/take1.out/final.json')))
+    # Held for a moment (two sharing violations): read on a retry
+    $m16e = & $made 'w16e'
+    & $write $m16e.Out @('final.json')
+    $busy = @{ N = 0 }
+    $briefly = { param([string]$Path)
+        if ($Path -clike '*take1.out?final.json') { $busy.N++; if ($busy.N -le 2) { throw [IO.IOException]::new('held by another process', -2147024864) } }
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }.GetNewClosure()
+    $r16e = Invoke-WithModuleStub 'Save-HarnessProbeFiles' 'Get-HarnessSha256' $briefly { & $collect $m16e 'p16e' }
+    & $add "probe collection: a collected file held for a moment is read on a retry ($($r16e.Got.Status): $($r16e.Got.Detail); $($busy.N) reads)" $false (
+        $r16e.Got.Status -ceq 'PASS' -and $busy.N -eq 3 -and $r16e.Got.Facts.files[0].sha256 -ceq (Get-HarnessSha256 (Join-Path $resDir 'renders/p16e/run1/take1.out/final.json')))
+    # An input copy that cannot be read back: noted, and the files are collected all the same
+    $m16f = & $made 'w16f'
+    & $write $m16f.Out @('final.json')
+    $inputHeld = { param([string]$Path) if ($Path -clike '*take1.probe-EXAMPLE_PROBE_SCRIPT.json') { throw 'the file is in use by another process' }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $r16f = Invoke-WithModuleStub 'Save-HarnessProbeFiles' 'Get-HarnessSha256' $inputHeld { & $collect $m16f 'p16f' }
+    & $add "probe collection: an input copy that cannot be read back is INCOMPLETE, and the files are collected all the same ($($r16f.Got.Detail))" $true (
+        $r16f.Got.Status -ceq 'INCOMPLETE' -and $r16f.Got.Detail -ceq 'frames=1; probe: the probe input EXAMPLE_PROBE_SCRIPT could not be read back: the file is in use by another process; probe: 1 file collected, 21 bytes' -and
+        $null -ne $r16f.Got.Facts -and $r16f.Got.Facts.collected -eq 1 -and (Test-Path -LiteralPath (Join-Path $resDir 'renders/p16f/run1/take1.out/final.json')))
+    # A directory swapped for a link after its attributes were read: its real path is not the work directory's leaf
+    $m16g = & $made 'w16g'
+    & $write $m16g.Out @('final.json')
+    $swapped = { param([string]$Path, [int]$Depth = 0) $real = Guard\Resolve-HarnessRealPath $Path $Depth; ($Path -clike '*\w16g\take1.out') ? "$real-elsewhere" : $real }
+    $r16g = Invoke-WithModuleStub 'Save-HarnessProbeFiles' 'Resolve-HarnessRealPath' $swapped { & $collect $m16g 'p16g' }
+    & $add "probe collection: a directory whose real path is not in the work directory (swapped after its attributes were read) is not collected from ($($r16g.Got.Detail))" $true (
+        $r16g.Got.Status -ceq 'INCOMPLETE' -and $r16g.Got.Detail -clike '*; probe: nothing collected: the directory was replaced by a link or junction' -and (Test-Path -LiteralPath (Join-Path $m16g.Out 'final.json')) -and
+        -not (Test-Path -LiteralPath (Join-Path $resDir 'renders/p16g')))
+    $m17 = & $made 'w17'
+    & $write $m17.Out @('final.json')
+    [IO.File]::WriteAllText((Join-Path $root 'w17/take1.probe-EXAMPLE_PROBE_SCRIPT.json'), '{"gain":0}')
+    $r17 = & $collect $m17 'p17'
+    & $add "probe collection: an input copy the launch changed makes the row INCOMPLETE ($($r17.Got.Detail))" $true ($r17.Got.Status -ceq 'INCOMPLETE' -and $r17.Got.Detail -clike '*; probe: the probe input EXAMPLE_PROBE_SCRIPT changed during the launch*' -and $r17.Got.Facts.collected -eq 1)
+    $m18 = & $made 'w18'
+    $r18 = & $collect $m18 'p18'
+    & $add "probe collection: an empty directory with min 1 is no evidence ($($r18.Got.Detail))" $true ($r18.Got.Status -ceq 'INCOMPLETE' -and $r18.Got.Detail -ceq 'frames=1; probe: 0 files collected, 0 bytes; not collected: 0 files to collect, fewer than the 1 asked for (min)' -and $null -eq $r18.Got.Facts.dir)
+    $noDir = [pscustomobject]@{ id = 'take1'; kind = 'render'; probe = [ordered]@{ EXAMPLE_PROBE_SCRIPT = (& $entry 'EXAMPLE_PROBE_SCRIPT' 'file' 'probe/take1.json') } }
+    $c19 = & $newCtx (Join-Path $root 'w19') $checked
+    $null = New-HarnessProbeRun -Ctx $c19 -Scenario $noDir
+    $r19 = Save-HarnessProbeFiles -Keep (New-HarnessKeep -ResultDir $resDir -Stamp 'p19') -Ctx $c19 -Scenario $noDir -Round 1 -Status 'PASS' -Detail 'x'
+    & $add 'probe collection: without a dir variable the row keeps its status and lists the variables' $false (
+        $r19.Status -ceq 'PASS' -and $r19.Detail -ceq 'x' -and $null -eq $r19.Facts.dir -and $r19.Facts.files.Count -eq 0 -and $r19.Facts.collected -eq 0 -and $r19.Facts.left -eq 0 -and $r19.Facts.variables.Count -eq 1)
+    $r20 = Save-HarnessProbeFiles -Keep (New-HarnessKeep -ResultDir $resDir -Stamp 'p20') -Ctx @{ Work = $work } -Scenario (& $probeScen 'take1') -Round 1 -Status 'FAIL' -Detail 'x'
+    & $add "probe collection: an unexpected error is INCOMPLETE (FAIL stays FAIL) with no facts, never thrown ($($r20.Detail))" $true ($r20.Status -ceq 'FAIL' -and $r20.Detail -clike 'x; probe: collection stopped on an unexpected error: *' -and $null -eq $r20.Facts)
+
+    # The facts of the row and of the manifest line: dir relative to the result directory; a null dir stays null
+    $rowFacts = ConvertTo-HarnessProbeRowFacts $f7 'renders/p7'
+    $keptFacts = ConvertTo-HarnessKeptFacts ([ordered]@{ output = [ordered]@{ path = 'run1/take1.wav' }; stems = @(); comparison = $null; probe = $f7 }) 'renders/p7'
+    $nullDir = ConvertTo-HarnessProbeRowFacts $r18.Got.Facts 'renders/p18'
+    & $add 'probe facts: the row and facts.kept name the directory from the result directory; a null dir and null facts stay null' $false (
+        $rowFacts['dir'] -ceq 'renders/p7/run1/take1.out' -and $keptFacts['probe']['dir'] -ceq 'renders/p7/run1/take1.out' -and $keptFacts['output']['path'] -ceq 'renders/p7/run1/take1.wav' -and
+        $null -eq $nullDir['dir'] -and $null -eq (ConvertTo-HarnessProbeRowFacts $null 'renders/x') -and $rowFacts['files'][0]['name'] -ceq 'final.json' -and $f7.dir -ceq 'run1/take1.out' -and
+        $null -eq (ConvertTo-HarnessKeptFacts ([ordered]@{ output = $null; stems = @(); comparison = $null; probe = $null }) 'renders/x')['probe'])
+    $leaky = [ordered]@{ variables = @([ordered]@{ name = 'EXAMPLE_PROBE_SCRIPT'; path = 'D:\Plug-ins\probe\take1.json' }); dir = 'run1/take1.out'
+        files = @([ordered]@{ name = 'final.json'; note = "Could not find a part of the path 'C:\audio work\x.json'." }) }
+    $maskedText = ConvertTo-HarnessJsonText -Value (ConvertTo-HarnessProbeRowFacts $leaky 'renders/p7')
+    & $add "probe facts: a local path anywhere in the probe facts is masked in the row ($maskedText)" $true (
+        $maskedText -cnotmatch '[A-Za-z]:[\\/]' -and $maskedText.Contains('"path":"<path>"') -and $maskedText.Contains('renders/p7/run1/take1.out'))
+
+    # The cleanup after a green round: never recursive, never through a link
+    $emptyDir = Join-Path $root 'clean-empty'; $null = New-Item -ItemType Directory -Path $emptyDir
+    $fullDir = Join-Path $root 'clean-full'; $null = New-Item -ItemType Directory -Path $fullDir; [IO.File]::WriteAllText((Join-Path $fullDir 'x.json'), '{}')
+    $linkDir = Join-Path $root 'clean-link'; $null = New-Item -ItemType Junction -Path $linkDir -Target $emptyDir
+    $linkGone = Remove-HarnessEmptyDirectory -Path $linkDir
+    $fileOnly = Join-Path $root 'clean-file.json'; [IO.File]::WriteAllText($fileOnly, '{}')
+    & $add 'probe cleanup: an empty directory is removed; one with a file in it, a junction and a file are left as they are' $true (
+        -not $linkGone -and (Test-Path -LiteralPath $linkDir) -and -not (Remove-HarnessEmptyDirectory -Path $fullDir) -and (Test-Path -LiteralPath (Join-Path $fullDir 'x.json')) -and
+        -not (Remove-HarnessEmptyDirectory -Path $fileOnly) -and (Test-Path -LiteralPath $fileOnly -PathType Leaf) -and
+        (Remove-HarnessEmptyDirectory -Path $emptyDir) -and -not (Test-Path -LiteralPath $emptyDir) -and -not (Remove-HarnessEmptyDirectory -Path (Join-Path $root 'nothing-here')))
+    Remove-Item -LiteralPath $linkDir, $viaLink # the junctions only
     $cases
 }
 
@@ -3234,6 +3775,42 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         $why = @(foreach ($n in $c.N) { [string](Test-HarnessReportEnvName $n) })
         & $add "report variable: refused, $($c.L) ($($why -join ' | '))" $true ($why.Count -eq $c.N.Count -and @($why | Where-Object { -not $_ -or ($c.W -and $_ -cnotlike "*starts with $($c.W),*") }).Count -eq 0)
     }
+    # The families that load a file or take options in whatever a plugin links (TLS, proxies, language runtimes, git,
+    # browsers): refused for a probe variable and at launch (-Strict); a report variable keeps the list of the released
+    # version, so a configuration valid before stays valid
+    $families = @(
+        @{ L = 'TLS names (a key log, a CA bundle)'; N = 'SSLKEYLOGFILE', 'SSL_CERT_FILE', 'OPENSSL_CONF', 'CURL_CA_BUNDLE', 'REQUESTS_CA_BUNDLE'; W = '' }
+        @{ L = 'runtime names (Node, Java, Perl, Ruby)'; N = 'NODE_OPTIONS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', 'PERL5LIB', 'RUBYOPT'; W = '' }
+        @{ L = 'git and browser names'; N = 'GIT_SSH_COMMAND', 'CHROME_PATH', 'MSEDGE_ARGS'; W = '' }
+        @{ L = 'proxy names (HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ALL_PROXY and any name ending in _PROXY)'; N = 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'MY_PROXY'; W = '' }
+        @{ L = 'names only the prefix HTTP, NO_PROXY or ALL_PROXY catches (not ending in _PROXY)'; N = 'HTTP_CA_FILE', 'HTTPS_CA_FILE', 'NO_PROXY_LIST', 'ALL_PROXY_X'; W = '' }
+    )
+    foreach ($c in $families) {
+        $why = @(foreach ($n in $c.N) { [string](Test-HarnessReportEnvName $n -What 'a probe variable' -Strict) })
+        & $add "probe variable: refused, $($c.L) ($($why -join ' | '))" $true ($why.Count -eq $c.N.Count -and @($why | Where-Object { -not $_ -or $_ -cnotlike '*; a probe variable may not set it' }).Count -eq 0)
+        $reportLet = @($c.N | Where-Object { $null -ne (Test-HarnessReportEnvName $_) })
+        & $add "report variable: accepted as in the released version, $($c.L) (refused: $($reportLet -join ', '))" $false ($reportLet.Count -eq 0)
+    }
+    # One name, two answers: a report may have it, a probe variable may not
+    $sameName = @(
+        @{ N = 'NODE_REPORT'; T = "'NODE_REPORT' starts with NODE_, which REAPER, what it loads, WebView2, a runtime or the harness reads; a probe variable may not set it" }
+        @{ N = 'HTTP_REPORT_PATH'; T = "'HTTP_REPORT_PATH' starts with HTTP, which REAPER, what it loads, WebView2, a runtime or the harness reads; a probe variable may not set it" }
+        @{ N = 'MY_PROXY'; T = "'MY_PROXY' ends with _PROXY, which network libraries read; a probe variable may not set it" }
+    )
+    & $add "report variable: NODE_REPORT, HTTP_REPORT_PATH and MY_PROXY are accepted for a report" $false (@($sameName | Where-Object { $null -ne (Test-HarnessReportEnvName $_.N) }).Count -eq 0)
+    foreach ($c in $sameName) {
+        $probeWhy = Test-HarnessReportEnvName $c.N -What 'a probe variable' -Strict
+        & $add "probe variable: $($c.N) is refused, with the reason ($probeWhy)" $true ($probeWhy -ceq $c.T)
+    }
+    $strictLet = @($refused | Where-Object { $null -eq (Test-HarnessReportEnvName $_ -Strict) })
+    & $add "probe variable: every name a report may not have is refused too (let through: $($strictLet -join ', '))" $true ($strictLet.Count -eq 0)
+    & $add 'report variable: names that only contain a refused word are accepted, for a probe variable too (PROXY_X, MY_HTTP, NODEX is not NODE_)' $false (@(@('PROXY_X', 'MY_HTTP', 'NODEX', 'GITX') | Where-Object { $null -ne (Test-HarnessReportEnvName $_ -Strict) }).Count -eq 0)
+    # The same list names who would set it: a report (default), a probe variable, the harness
+    & $add 'report variable: -What names who would set it; without it every text says a report' $true (
+        (Test-HarnessReportEnvName 'APPDATA' -What 'a probe variable') -ceq "'APPDATA' is a variable Windows or a runtime reads; a probe variable may not set it" -and
+        (Test-HarnessReportEnvName 'REAPER_X' -What 'the harness') -clike "*starts with REAPER_, *; the harness may not set it" -and
+        (Test-HarnessReportEnvName 'APPDATA') -ceq "'APPDATA' is a variable Windows or a runtime reads; a report may not set it")
+    & $add 'report variable: a name with a line break after it is refused (the pattern holds for the whole text)' $true ((Test-HarnessReportEnvName "FIXTURE_REPORT_JSON`n") -clike '*must match*')
     # The plan of one step: only plugins of the layout that declare a report
     $rep = { param($Env, [string[]]$Fields, $PidField = 'pid') [pscustomobject]@{ Env = $Env; Fields = $Fields; PidField = $PidField; PeriodMs = 250 } }
     $plugins = [ordered]@{ rec = [pscustomobject]@{ Report = (& $rep 'REC_JSON' @('blocks', 'opens')) }; mon = [pscustomobject]@{ Report = $null }; spare = [pscustomobject]@{ Report = (& $rep 'SPARE_JSON' @('x') '') } }
@@ -3512,6 +4089,60 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add "wiring: a retried launch starts REAPER only through the guarded launch, at most twice; nothing else calls it or the host ($($hostCallers -join ', '))" $false (
         @(& $at $retry 'Invoke-HarnessLaunchOnce').Count -eq 2 -and 'Invoke-HarnessHost' -notin $retry.Name -and 'Enter-HarnessLocks' -notin $retry.Name -and
         (@($hostCallers | Sort-Object) -join ',') -ceq 'Invoke-HarnessHost<-Invoke-HarnessLaunchOnce,Invoke-HarnessLaunchOnce<-Invoke-HarnessLaunch,Invoke-HarnessLaunchOnce<-Invoke-HarnessLaunch')
+    # Probe variables reach only the scenario's own render: exactly these three calls give -ProbeEnv (by name, one by one)
+    $probeEnvCalls = @(foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1') + @(Get-Item (Join-Path $RepoRoot 'run.ps1'), (Join-Path $RepoRoot 'doctor.ps1'))) {
+            $tree = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
+            $given = $tree.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and
+                    @($node.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'ProbeEnv' }).Count }, $true)
+            foreach ($c in $given) {
+                $fn = $c.Parent
+                while ($fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
+                $what = ($c.GetCommandName() -ceq 'Invoke-HarnessRender') ? "Invoke-HarnessRender($($c.CommandElements[2].Extent.Text))" : $c.GetCommandName()
+                "$what<-$($fn ? $fn.Name : 'top')"
+            }
+        })
+    $probeEnvWant = 'Invoke-HarnessLuaStep<-Invoke-HarnessReportRender', 'Invoke-HarnessRender($r.Project)<-Invoke-HarnessRenderScenario', 'Invoke-HarnessReportRender<-Invoke-HarnessRenderScenario'
+    & $add "wiring: -ProbeEnv is given by exactly three calls: the test render (-renderproject of `$r.Project), the report render, and its driver step ($(@($probeEnvCalls | Sort-Object) -join ', '))" $false (
+        (@($probeEnvCalls | Sort-Object) -join '|') -ceq ($probeEnvWant -join '|'))
+    # No code of the harness changes its own environment (a variable set there would reach every launch)
+    $envWrites = {
+        param([System.Management.Automation.Language.Ast]$SyntaxTree)
+        $isEnvPath = { param($el) $el -isnot [System.Management.Automation.Language.CommandParameterAst] -and $el.Extent.Text -imatch '\A[''"]?env:' }
+        @($SyntaxTree.FindAll({ param($node)
+                    ($node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.DriveName -ieq 'env') -or
+                    ($node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $node.Member.Value -ieq 'SetEnvironmentVariable') -or
+                    ($node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -in 'Set-Item', 'New-Item', 'Set-Content', 'Remove-Item', 'Clear-Item', 'Add-Content', 'si', 'ni', 'sc', 'ri', 'rm', 'del', 'cli' -and
+                        @($node.CommandElements | Select-Object -Skip 1 | Where-Object { & $isEnvPath $_ }).Count)
+                }, $true) | ForEach-Object { $_.Extent.Text })
+    }
+    $envWriteOf = { param([string]$Code) @(& $envWrites ([System.Management.Automation.Language.Parser]::ParseInput($Code, [ref]$null, [ref]$null))).Count }
+    $writeSamples = '$env:X_ONE = 1', '$env:X_ONE += ''a''', '[Environment]::SetEnvironmentVariable(''X_ONE'', ''1'')', 'Set-Item Env:X_ONE 1', 'New-Item -Path Env:X_ONE -Value 1', 'Set-Content env:X_ONE 1',
+        'Remove-Item Env:\X_ONE', 'Clear-Item -LiteralPath ''Env:X_ONE''', 'function f { $env:X_ONE = 2 }'
+    $missed = @($writeSamples | Where-Object { (& $envWriteOf $_) -eq 0 })
+    & $add "wiring: the rule finds every way of setting a variable of the process environment (missed: $($missed -join ', '))" $true ($missed.Count -eq 0 -and (& $envWriteOf '$p = $env:PATH; Get-Item Env:PATH; Remove-Item -LiteralPath $envFile') -eq 0)
+    $ownWrites = @(foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1') + @(Get-Item (Join-Path $RepoRoot 'run.ps1'), (Join-Path $RepoRoot 'doctor.ps1'))) {
+            foreach ($w in (& $envWrites ([System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)))) { "$($f.Name): $w" }
+        })
+    & $add "wiring: no file of src/, run.ps1 or doctor.ps1 sets a variable of its own environment ($($ownWrites -join ', '))" $false ($ownWrites.Count -eq 0)
+    # Every launch checks the environment it is given before it takes anything, and takes the plugin variables out of what it inherits
+    $onceAst = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Scenarios.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-HarnessLaunchOnce' }, $true)
+    $unsetGiven = @($onceAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.HashtableAst] }, $true) | Where-Object {
+            @($_.KeyValuePairs | Where-Object { $_.Item1.Extent.Text -ceq 'Unset' -and $_.Item2.Extent.Text -clike '*PluginEnvNames*' }).Count })
+    $envCheck = @(& $at $launch 'Test-HarnessLaunchEnvironment')
+    & $add "wiring: Invoke-HarnessLaunchOnce checks the environment first (before the skip marker, the locks and the host), and gives the host the names to unset ($($envCheck -join ','); $(@($launch | ForEach-Object { $_.Name }) -join ','))" $false (
+        $envCheck.Count -eq 1 -and $envCheck[0] -lt (& $at $launch 'Get-HarnessSkipMarkerHit')[0] -and $envCheck[0] -lt (& $at $launch 'Enter-HarnessLocks')[0] -and $envCheck[0] -lt (& $at $launch 'Invoke-HarnessHost')[0] -and
+        $unsetGiven.Count -eq 1)
+    # The probe run is made after every reference render, right before the scenario's own render; collection is the suite's
+    $renderSc = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessRenderScenario'
+    $runAt = @(& $at $renderSc 'New-HarnessProbeRun')
+    $probeCallers = @(& $callers @('New-HarnessProbeRun', 'Save-HarnessProbeFiles') | Sort-Object)
+    $firstRun = $runAt.Count ? $runAt[0] : -1
+    $refsBefore = @(@(& $at $renderSc 'New-HarnessRun') + @(& $at $renderSc 'Get-HarnessReference') | Where-Object { $_ -gt $firstRun })
+    & $add "wiring: New-HarnessProbeRun is called once, by Invoke-HarnessRenderScenario after every run it makes and every reference render; Save-HarnessProbeFiles only by Invoke-HarnessSuite ($($probeCallers -join ', '))" $false (
+        ($probeCallers -join ',') -ceq 'New-HarnessProbeRun<-Scenarios.psm1:Invoke-HarnessRenderScenario,Save-HarnessProbeFiles<-Suite.psm1:Invoke-HarnessSuite' -and $runAt.Count -eq 1 -and $refsBefore.Count -eq 0 -and
+        @(& $at $renderSc 'Invoke-HarnessRender' | Where-Object { $_ -gt $firstRun }).Count -eq 1 -and @(& $at $renderSc 'Invoke-HarnessRender' | Where-Object { $_ -lt $firstRun }).Count -eq 2 -and
+        (& $at $renderSc 'Invoke-HarnessReportRender')[0] -gt $firstRun)
+    & $add 'wiring: the suite collects before it keeps, so the manifest line has the status after collection' $false ((& $at $suite 'Save-HarnessProbeFiles')[0] -lt (& $at $suite 'Save-HarnessKeptRender')[0])
     # The learn project and the check of what REAPER saved must agree on the track names, so both get the same list
     $learnAst = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Learn.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-HarnessLearn' }, $true)
     $namesArg = {
@@ -3749,7 +4380,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot }, { Get-SourceCases $scratch }, { Get-RenderCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-VariantCases $scratch $RepoRoot }, { Get-ListingCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-VariantCases $scratch $RepoRoot }, { Get-ListingCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ProbeCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {

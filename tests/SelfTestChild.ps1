@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) # the parent decodes UTF-8
 
 $src = Join-Path $RepoRoot 'src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Probe', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $RepoRoot 'tests/FakeReaper.psm1') -ErrorAction Stop
 
 function Write-Case([string]$Label, [bool]$Bad, [bool]$Passed) { Write-Output ("RESULT`t{0}`t{1}`t{2}" -f [int]$Bad, [int]$Passed, $Label) }
@@ -32,6 +32,10 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     $so = $p.StandardOutput.ReadToEndAsync(); $se = $p.StandardError.ReadToEndAsync()
     $p.WaitForExit()
     [pscustomobject]@{ Exit = $p.ExitCode; Out = $so.Result; Err = $se.Result }
+}
+# Puts a variable of this process back as it was: a .NET method gets $null as '', which would leave it set, but empty
+function Restore-ChildEnvVariable([string]$VarName, $WasValue) {
+    if ($null -eq $WasValue) { Remove-Item -LiteralPath "Env:$VarName" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($VarName, [string]$WasValue) }
 }
 
 $pwshExe = (Get-Process -Id $PID).Path
@@ -260,6 +264,30 @@ $echoLauncher = { param($psi) $psi.FileName = $pwshExe; $psi.ArgumentList.Insert
 $run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -ReaperArgs '-renderproject', 'D:\my dir\a b.rpp' -TimeoutSec 30 -Launcher $echoLauncher
 $received = try { @([IO.File]::ReadAllLines((Join-Path $echoDir 'argv.txt'))) } catch { @() }
 Write-Case 'arguments: a real process receives the private ini and a path with spaces as one argument each' $false ($run.Status -eq 'Exited' -and ($received -join "`n") -ceq (@('-nosplash', '-newinst', $flag, $pinned.Ini, '-renderproject', 'D:\my dir\a b.rpp') -join "`n"))
+# ---- the environment a launch inherits: the plugin variables of the configuration are taken out unless it sets them
+$envSeen = @{}
+$envLauncher = { param($psi) foreach ($n in 'EXAMPLE_PROBE_ONE', 'EXAMPLE_PROBE_TWO', 'EXAMPLE_PROBE_THREE') { $envSeen[$n] = $psi.Environment.ContainsKey($n) ? [string]$psi.Environment[$n] : $null }
+    $psi.FileName = $pwshExe; $psi.ArgumentList.Clear(); foreach ($part in '-NoProfile', '-Command', 'exit 0') { $psi.ArgumentList.Add($part) }; [Diagnostics.Process]::Start($psi) }.GetNewClosure()
+$envWas = @{}
+foreach ($n in 'EXAMPLE_PROBE_ONE', 'EXAMPLE_PROBE_TWO', 'EXAMPLE_PROBE_THREE') { $envWas[$n] = [Environment]::GetEnvironmentVariable($n); [Environment]::SetEnvironmentVariable($n, "left in the shell: $n") }
+try {
+    $run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -Unset 'EXAMPLE_PROBE_ONE', 'EXAMPLE_PROBE_TWO' -Environment @{ EXAMPLE_PROBE_TWO = 'set by this launch' } -Launcher $envLauncher
+} finally { foreach ($n in $envWas.get_Keys()) { Restore-ChildEnvVariable $n $envWas[$n] } }
+Write-Case "environment: a name to unset is not inherited; one the launch sets has its value; any other is inherited as before ($($envSeen['EXAMPLE_PROBE_ONE']) | $($envSeen['EXAMPLE_PROBE_TWO']) | $($envSeen['EXAMPLE_PROBE_THREE']))" $true (
+    $run.Status -eq 'Exited' -and $null -eq $envSeen['EXAMPLE_PROBE_ONE'] -and $envSeen['EXAMPLE_PROBE_TWO'] -ceq 'set by this launch' -and $envSeen['EXAMPLE_PROBE_THREE'] -ceq 'left in the shell: EXAMPLE_PROBE_THREE' -and
+    $null -eq [Environment]::GetEnvironmentVariable('EXAMPLE_PROBE_ONE'))
+# ---- the check of every launch's environment comes before anything is taken: a value outside the work directory starts nothing
+$h3Lock = "Local\ReaperHarness-selftest-$PID-h3"
+$seenH3 = @{ Called = $false }
+$h3Work = Join-Path $Work 'h3-work'
+$null = New-Item -ItemType Directory -Force -Path $h3Work
+$h3Ctx = @{ Work = $h3Work; StillRunning = $null; SkipMarkers = @(); Locks = @($h3Lock); LockWaitSec = 5; Launcher = (New-StandIn 'exit 0' $seenH3); Installed = @{}; Started = [Collections.Generic.List[object]]::new()
+    LaunchLog = [Collections.Generic.List[object]]::new(); Launches = 0; PluginEnvNames = @() }
+$h3Why = try { $null = & (Get-Module Scenarios) { param($c, $h) Invoke-HarnessLaunchOnce -Ctx $c -HostArgs $h } $h3Ctx @{ Environment = @{ X_ONE = 'C:\elsewhere' } }; '' } catch { $_.Exception.Message }
+Write-Case "launch environment: a value outside the work directory: REAPER is not started, the stand-in is never called and no lock is taken ($h3Why)" $true (
+    $h3Why -clike 'REAPER was not started: the value of X_ONE is not a path inside the work directory' -and -not $seenH3.Called -and $h3Ctx.Launches -eq 0 -and $h3Ctx.Started.Count -eq 0 -and (Test-HarnessLockFree -FullName $h3Lock))
+$h3Name = try { $null = & (Get-Module Scenarios) { param($c, $h) Invoke-HarnessLaunchOnce -Ctx $c -HostArgs $h } $h3Ctx @{ Environment = @{ COMSPEC = (Join-Path $h3Work 'x') } }; '' } catch { $_.Exception.Message }
+Write-Case "launch environment: a denied name with a value in the work directory starts nothing either ($h3Name)" $true ($h3Name -clike "REAPER was not started: 'COMSPEC' is a variable Windows or a runtime reads; the harness may not set it" -and -not $seenH3.Called)
 Exit-HarnessLocks $standInLock
 & $useDefaultLock $realGui
 # The text of the message box command itself, with an apostrophe in the title and the path; real boxes come below
@@ -1739,6 +1767,232 @@ try { $null = & $reportRenderRun @{ CopiesAtStart = $copiesAtStart } } finally {
 Write-Case "end to end: an old copy of a report is gone before the REAPER of a judged render starts ($($copiesAtStart -join ','))" $true (($copiesAtStart -join ',') -ceq '0')
 Write-Case 'end to end: a file in the record directory of the project makes the row FAIL: something was recorded' $true (
     $r.verdict -ceq 'FAIL' -and $null -ne $recRow -and $recRow.status -ceq 'FAIL' -and $recRow.detail -ceq '1 file(s) appeared in the record directory of the project: something was recorded')
+
+# ---- probe variables: a plugin told where a copy of its script is and an empty directory to write into ----
+# Gain declares two probe variables and a report variable, as a test build would; the source is the WAV file of the
+# file-source cases. The result directories of these runs sit right below the scratch directory: a probe directory path
+# is at most 140 characters (a name of 100 then fits in a path of 241), and the work directory of this child is too
+# deep for that.
+$pbRoot = Split-Path -Parent $Work
+# Precondition: a probe directory path over the limit makes the scenario INCOMPLETE before its render starts. The longest one
+# these runs make (the longest run leaf with the longest scenario id) has to fit, or every probe case below is INCOMPLETE
+$pbLimit = & @(Get-Module Probe)[0] { $script:MaxDirPath }
+$pbLongest = [IO.Path]::Join($pbRoot, 'pf10', 'work', '20260101-000000-run1', 'tv-sh.out').Length
+Write-Case "end to end: probe: precondition: the probe directories of these runs fit the limit of a probe directory path ($pbLongest of $pbLimit characters; with a longer temporary directory every probe case below is INCOMPLETE)" $false ($pbLongest -le $pbLimit)
+$pbProbeDir = Join-Path $Work 'probe'
+$null = New-Item -ItemType Directory -Force -Path $pbProbeDir
+[IO.File]::WriteAllText((Join-Path $pbProbeDir 'take1.json'), '{"example":1}')
+[IO.File]::WriteAllText((Join-Path $pbProbeDir 'take1-shifted.json'), '{"example":2}')
+$pbShaOf = { param([string]$ShaPath) (Get-FileHash -LiteralPath $ShaPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+$pbSha = & $pbShaOf (Join-Path $pbProbeDir 'take1.json')
+$pbShiftedSha = & $pbShaOf (Join-Path $pbProbeDir 'take1-shifted.json')
+$pbNames = 'EXAMPLE_PROBE_SCRIPT', 'EXAMPLE_PROBE_OUT', 'EXAMPLE_PROBE_JSON'
+$pbBase = { param([string]$ScenarioId) [ordered]@{ id = $ScenarioId; kind = 'render'; layout = 'take'; sr = 44100; compare = 'none'; notSilent = $true; probe = $true } }
+$pbChange = {
+    param($c, [object[]]$ScenarioList)
+    & $noExt $c
+    $c.plugins.gain.probe = [ordered]@{ EXAMPLE_PROBE_SCRIPT = @{ file = 'probe/take1.json' }; EXAMPLE_PROBE_OUT = @{ dir = $true } }
+    $c.plugins.gain.report = @{ env = 'EXAMPLE_PROBE_JSON'; fields = @('blocks', 'opens'); pid = 'pid'; periodMs = 100 }
+    $c.layouts.take = [ordered]@{ tracks = @([ordered]@{ name = 'Take'; source = $true; file = 'sources/voice.wav'; fx = @(@{ plugin = 'gain' }) }) }
+    $c.scenarios = $ScenarioList; $c.negative = @()
+}
+$pbLog = [Collections.Generic.List[object]]::new()
+$pbSpecOf = {
+    param([hashtable]$ProbePlus = @{})
+    $told = @{ Script = 'EXAMPLE_PROBE_SCRIPT'; Out = 'EXAMPLE_PROBE_OUT'; Steps = 2 }
+    foreach ($k in $ProbePlus.get_Keys()) { $told[$k] = $ProbePlus[$k] }
+    @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; EnvNames = @($pbNames) + 'REAPER_HARNESS_JOB'; EnvLog = $pbLog; Probe = $told }
+}
+$pbRunOf = {
+    param([hashtable]$RunCfg, [string]$RunLeaf, [hashtable]$RunSpec, [hashtable]$RunAlso = @{})
+    $one = $RunCfg.Clone(); $one.ResultDir = Join-Path $pbRoot $RunLeaf
+    $pbLog.Clear()
+    $suiteRun = $null; $why = ''
+    Set-FakeReaper $RunSpec
+    try { $suiteRun = Invoke-HarnessSuite @one @RunAlso -NoNegative -SelfTestHooks $hooks }
+    catch { $why = "the run threw: $($_.Exception.Message) " }
+    finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+    [pscustomobject]@{ Run = $suiteRun; Why = $why; Res = $one.ResultDir; Log = @($pbLog) }
+}
+$pbRowOf = { param($Finished, [string]$RowId) try { @($Finished.Run.runs[0].scenarios | Where-Object { $_.id -ceq $RowId })[0] } catch { $null } }
+$pbNamesOf = { param($FileList) @($FileList | ForEach-Object { $_['name'] }) -join ',' }
+$pbBlank = { param($LogEntry) @($pbNames | Where-Object { $LogEntry[$_] }).Count -eq 0 }
+# One round of five scenarios: t1 (compare none), td (compare dry), tp (the same plugin without probe, compare repeat),
+# tv (two variants, one with its own script), tr (judged by the report as well); final.json is written by the stand-in
+# process as it exits, so it is only there when collection waits for the end of the launch
+$pbDryScen = & $pbBase 'td'; $pbDryScen.compare = 'dry'
+$pbPlainScen = [ordered]@{ id = 'tp'; kind = 'render'; layout = 'take'; sr = 44100; compare = 'repeat' }
+$pbTv = & $pbBase 'tv'
+$pbTv.variants = @([ordered]@{ id = 'sh'; probe = [ordered]@{ EXAMPLE_PROBE_SCRIPT = @{ file = 'probe/take1-shifted.json' } } }, [ordered]@{ id = 'pl' })
+$pbJudged = & $pbBase 'tr'
+$pbJudged.host = @{ runFxWhenStopped = $false; informOfflineState = $false }
+$pbJudged.report = [ordered]@{ gain = [ordered]@{ blocks = @{ delta = 10 } } }
+$pbCfgA = & $writeVariant { param($c) & $pbChange $c @((& $pbBase 't1'), $pbDryScen, $pbPlainScen, $pbTv, $pbJudged) }
+$pbCfgA.ReaperExe = $pwshExe
+# This process has all three variables set while the round runs: a launch that inherited one would write where it points
+$pbShell = Join-Path $Work 'probe-shell'
+$null = New-Item -ItemType Directory -Force -Path $pbShell
+$pbWas = @{}
+foreach ($n in $pbNames) { $pbWas[$n] = [Environment]::GetEnvironmentVariable($n) }
+try {
+    [Environment]::SetEnvironmentVariable('EXAMPLE_PROBE_SCRIPT', (Join-Path $pbShell 'script.json'))
+    [Environment]::SetEnvironmentVariable('EXAMPLE_PROBE_OUT', $pbShell)
+    [Environment]::SetEnvironmentVariable('EXAMPLE_PROBE_JSON', (Join-Path $pbShell 'report.json'))
+    $pbA = & $pbRunOf $pbCfgA 'pa' (& $pbSpecOf @{ LateFinal = $true })
+} finally { foreach ($n in $pbNames) { Restore-ChildEnvVariable $n $pbWas[$n] } }
+$pbStampA = & $safe { @(Get-ChildItem -LiteralPath (Join-Path $pbA.Res 'renders') -Directory)[0].Name }
+$pbRunDirA = & $safe { [IO.Path]::Join($pbA.Res, 'renders', $pbStampA, 'run1') }
+$pbT1 = & $pbRowOf $pbA 't1'
+$pbFilesA = & $safe { @($pbT1.facts['probe']['files']) }
+Write-SafeCase 'end to end: probe: a render with probe variables, compare none, no keep: PASS; final.json (written as the stand-in exited) and the step files are collected under renders/<stamp>/run1/t1.out, each with the sha256 of the file there' { "$($pbA.Why)$($pbT1.detail)" } $false {
+    $pbA.Run.verdict -ceq 'PASS' -and $pbT1.status -ceq 'PASS' -and (& $pbNamesOf $pbFilesA) -ceq 'final.json,step-001.json,step-002.json' -and
+    @($pbFilesA | Where-Object { $_['temporary'] -or $_['sha256'] -cne (& $pbShaOf ([IO.Path]::Join($pbRunDirA, 't1.out', $_['name']))) }).Count -eq 0 -and
+    $pbT1.facts['probe']['dir'] -ceq "renders/$pbStampA/run1/t1.out" -and $pbT1.facts['probe']['collected'] -eq 3 -and $pbT1.facts['probe']['left'] -eq 0 -and $pbT1.facts['probe']['pid'] -gt 0 -and
+    $pbT1.detail -clike '*; probe: 3 files collected, * bytes' }
+$pbFinalA = & $safe { [IO.File]::ReadAllText([IO.Path]::Join($pbRunDirA, 't1.out', 'final.json')) | ConvertFrom-Json -AsHashtable }
+Write-SafeCase 'end to end: probe: the plugin read the copy of the configured script: its final.json names the sha256 of probe/take1.json, as the facts do' { "$($pbFinalA['script'])" } $false {
+    $pbFinalA['script'] -ceq $pbSha -and @($pbT1.facts['probe']['variables'] | Where-Object { $_['name'] -ceq 'EXAMPLE_PROBE_SCRIPT' -and $_['path'] -ceq 'probe/take1.json' -and $_['sha256'] -ceq $pbSha }).Count -eq 1 }
+$pbLeftA = @(Get-ChildItem -LiteralPath (Join-Path $pbA.Res 'work') -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -clike '*.probe-*' -or $_.Name -clike '*.out' } | ForEach-Object { $_.Name })
+Write-SafeCase 'end to end: probe: after the green round no input copy and no probe directory is left in the work directory, and no manifest is named' { $pbLeftA -join ', ' } $false {
+    $pbA.Run.verdict -ceq 'PASS' -and $pbLeftA.Count -eq 0 -and $pbA.Run.PSObject.Properties['manifest'] -and $null -eq $pbA.Run.manifest }
+$pbLogA = @($pbA.Log)
+$pbLearn = @($pbLogA | Where-Object { $_['REAPER_HARNESS_JOB'] -clike '*\_learn-*.job.lua' })
+Write-SafeCase 'end to end: probe: the learn launch inherits none of the declared probe and report variables although this process had all three set, nothing was written where they pointed, and they are as they were' { "$($pbLearn.Count) learn launches" } $true {
+    $pbLearn.Count -ge 1 -and @($pbLearn | Where-Object { -not (& $pbBlank $_) }).Count -eq 0 -and @(Get-ChildItem -LiteralPath $pbShell -Force).Count -eq 0 -and
+    @($pbNames | Where-Object { [Environment]::GetEnvironmentVariable($_) -cne $pbWas[$_] }).Count -eq 0 }
+$pbDryRef = @($pbLogA | Where-Object { $_['args'] -clike '*\_dry-take-*.rpp' })
+$pbDryTest = @($pbLogA | Where-Object { $_['args'] -clike '*\td.rpp' })
+Write-SafeCase 'end to end: probe: compare dry: the dry reference is told no variable, the scenario''s own render both probe paths' { "$((& $pbRowOf $pbA 'td').detail)" } $true {
+    (& $pbRowOf $pbA 'td').status -ceq 'PASS' -and $pbDryRef.Count -eq 1 -and (& $pbBlank $pbDryRef[0]) -and $pbDryTest.Count -eq 1 -and
+    $pbDryTest[0]['EXAMPLE_PROBE_SCRIPT'] -clike '*\td.probe-EXAMPLE_PROBE_SCRIPT.json' -and $pbDryTest[0]['EXAMPLE_PROBE_OUT'] -clike '*\td.out' -and -not $pbDryTest[0]['EXAMPLE_PROBE_JSON'] }
+$pbPlainLog = @($pbLogA | Where-Object { $_['args'] -clike '*\tp-first.rpp' -or $_['args'] -clike '*\tp.rpp' })
+Write-SafeCase 'end to end: probe: a scenario of the same plugin without probe (compare repeat) tells neither of its two launches a variable' { "$((& $pbRowOf $pbA 'tp').detail)" } $true {
+    (& $pbRowOf $pbA 'tp').status -ceq 'PASS' -and $pbPlainLog.Count -eq 2 -and @($pbPlainLog | Where-Object { -not (& $pbBlank $_) }).Count -eq 0 }
+$pbT1Log = @($pbLogA | Where-Object { $_['args'] -clike '*\t1.rpp' })
+$pbWorkA = & $safe { [IO.Path]::Join($pbA.Res, 'work', "$pbStampA-run1") }
+Write-SafeCase 'end to end: probe: the render of t1 is told exactly its two paths in the work directory, and not the report variable' { "$(& $safe { $pbT1Log[0]['EXAMPLE_PROBE_SCRIPT'] }) | $(& $safe { $pbT1Log[0]['EXAMPLE_PROBE_OUT'] })" } $false {
+    $pbT1Log.Count -eq 1 -and $pbT1Log[0]['EXAMPLE_PROBE_SCRIPT'] -ceq [IO.Path]::Join($pbWorkA, 't1.probe-EXAMPLE_PROBE_SCRIPT.json') -and $pbT1Log[0]['EXAMPLE_PROBE_OUT'] -ceq [IO.Path]::Join($pbWorkA, 't1.out') -and
+    -not $pbT1Log[0]['EXAMPLE_PROBE_JSON'] }
+$pbVar = @(foreach ($v in 'sh', 'pl') {
+        $vRow = & $pbRowOf $pbA "tv-$v"
+        [pscustomobject]@{ Row = $vRow; Final = (& $safe { [IO.File]::ReadAllText([IO.Path]::Join($pbRunDirA, "tv-$v.out", 'final.json')) | ConvertFrom-Json -AsHashtable }) }
+    })
+Write-SafeCase 'end to end: probe: variants: each has its own directory, and its final.json names the hash of its own script: the override of the shifted one, the scenario''s for the plain one' { "$($pbVar[0].Row.detail) | $($pbVar[1].Row.detail)" } $false {
+    $pbVar[0].Row.status -ceq 'PASS' -and $pbVar[1].Row.status -ceq 'PASS' -and $pbVar[0].Final['script'] -ceq $pbShiftedSha -and $pbVar[1].Final['script'] -ceq $pbSha -and
+    $pbVar[0].Row.facts['probe']['dir'] -ceq "renders/$pbStampA/run1/tv-sh.out" -and $pbVar[1].Row.facts['probe']['dir'] -ceq "renders/$pbStampA/run1/tv-pl.out" -and
+    @($pbVar[0].Row.facts['probe']['variables'] | Where-Object { $_['path'] -ceq 'probe/take1-shifted.json' -and $_['sha256'] -ceq $pbShiftedSha }).Count -eq 1 }
+$pbTr = & $pbRowOf $pbA 'tr'
+$pbTrLog = @($pbLogA | Where-Object { $_['REAPER_HARNESS_JOB'] -clike '*\tr.job.lua' })
+Write-SafeCase 'end to end: probe: a render judged by a report: its one driver launch is told the report path and both probe paths; the report is judged and the files collected' { "$($pbTr.detail)" } $false {
+    $pbTr.status -ceq 'PASS' -and $pbTr.facts['report']['gain']['blocks']['delta'] -eq 10 -and $pbTr.facts['probe']['collected'] -eq 3 -and $pbTrLog.Count -eq 1 -and
+    $pbTrLog[0]['EXAMPLE_PROBE_JSON'] -clike '*\tr.report-gain.json' -and $pbTrLog[0]['EXAMPLE_PROBE_SCRIPT'] -clike '*\tr.probe-EXAMPLE_PROBE_SCRIPT.json' -and $pbTrLog[0]['EXAMPLE_PROBE_OUT'] -clike '*\tr.out' }
+# keep and -KeepWork: the manifest line, the facts of the kept render, and what stays in the work directory
+$pbKept = & $pbBase 't1'; $pbKept.keep = $true
+$pbCfgB = & $writeVariant { param($c) & $pbChange $c @($pbKept) }
+$pbCfgB.ReaperExe = $pwshExe
+$pbB = & $pbRunOf $pbCfgB 'pb' (& $pbSpecOf @{ LateFinal = $true }) @{ KeepWork = $true }
+$pbStampB = & $safe { @(Get-ChildItem -LiteralPath (Join-Path $pbB.Res 'renders') -Directory)[0].Name }
+$pbT1B = & $pbRowOf $pbB 't1'
+$pbLineB = & $safe { @(Get-Content -LiteralPath ([IO.Path]::Join($pbB.Res, 'renders', $pbStampB, 'manifest.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json -AsHashtable } | Where-Object { $_['scenario'] -ceq 't1' })[0] }
+$pbPairs = { param($FileList) @($FileList | ForEach-Object { "$($_['name'])=$($_['sha256'])" }) -join ',' }
+Write-SafeCase 'end to end: probe: keep: the manifest line has probe with dir run1/t1.out, the pid, and the files and hashes of the run without keep; facts.kept.probe.dir starts renders/' { "$($pbB.Why)$($pbT1B.detail)" } $false {
+    $pbB.Run.verdict -ceq 'PASS' -and $pbLineB['probe']['dir'] -ceq 'run1/t1.out' -and $pbLineB['probe']['pid'] -gt 0 -and @($pbLineB['probe']['files']).Count -eq 3 -and
+    (& $pbPairs $pbLineB['probe']['files']) -ceq (& $pbPairs $pbFilesA) -and $pbT1B.facts['kept']['probe']['dir'] -ceq "renders/$pbStampB/run1/t1.out" -and $pbB.Run.manifest -ceq "renders/$pbStampB/manifest.jsonl" }
+$pbWorkB = & $safe { [IO.Path]::Join($pbB.Res, 'work', "$pbStampB-run1") }
+Write-SafeCase 'end to end: probe: -KeepWork: the input copy and the emptied directory stay in the work directory, the files are under renders all the same' { $pbWorkB } $false {
+    (& $pbShaOf ([IO.Path]::Join($pbWorkB, 't1.probe-EXAMPLE_PROBE_SCRIPT.json'))) -ceq $pbSha -and (Test-Path -LiteralPath ([IO.Path]::Join($pbWorkB, 't1.out')) -PathType Container) -and
+    @(Get-ChildItem -LiteralPath ([IO.Path]::Join($pbWorkB, 't1.out')) -Force).Count -eq 0 -and @(Get-ChildItem -LiteralPath ([IO.Path]::Join($pbB.Res, 'renders', $pbStampB, 'run1', 't1.out')) -File).Count -eq 3 }
+# What a plugin may write into its directory, one round each: only plain files with plain names, within the limits
+$pbOutside = Join-Path $Work 'probe-outside'
+$null = New-Item -ItemType Directory -Force -Path $pbOutside
+[IO.File]::WriteAllText((Join-Path $pbOutside 'secret.json'), '{"outside":1}')
+$pbOutsideIntact = { $there = @(Get-ChildItem -LiteralPath $pbOutside -Force); $there.Count -eq 1 -and $there[0].Name -ceq 'secret.json' -and [IO.File]::ReadAllText($there[0].FullName) -ceq '{"outside":1}' }
+$pbKeptNamed = { param([string]$Res, [string]$LeafName) @(Get-ChildItem -LiteralPath (Join-Path $Res 'renders') -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ceq $LeafName }).Count }
+$pbCfgF = & $writeVariant { param($c) & $pbChange $c @(& $pbBase 't1') }
+$pbCfgF.ReaperExe = $pwshExe
+$pbFaults = @(
+    @{ F = 'Subdir'; S = 'INCOMPLETE'; N = 3; W = '*; probe: 3 files collected, * bytes; not collected: a subdirectory sub'; X = { param($Probed) Test-Path -LiteralPath ([IO.Path]::Join($Probed.Work, 't1.out', 'sub', 'x.json')) -PathType Leaf } }
+    @{ F = 'Junction'; S = 'INCOMPLETE'; N = 3; W = '*; probe: 3 files collected, * bytes; not collected: a link or junction link (not followed)'; X = { param($Probed) (& $pbOutsideIntact) -and (& $pbKeptNamed $Probed.Res 'secret.json') -eq 0 } }
+    @{ F = 'DirLink'; S = 'INCOMPLETE'; N = 0; W = '*; probe: nothing collected: the directory was replaced by a link or junction'; X = { param($Probed) (& $pbOutsideIntact) -and (& $pbKeptNamed $Probed.Res 't1.out') -eq 0 } }
+    @{ F = 'BadName'; S = 'INCOMPLETE'; N = 3; W = '*; probe: 3 files collected, * bytes; not collected: 2 entries whose name is not allowed *'; X = { param($Probed) $rowText = $Probed.Row | ConvertTo-Json -Depth 30; -not $rowText.Contains('bad name') -and -not $rowText.Contains('.hidden') } }
+    @{ F = 'Big'; S = 'INCOMPLETE'; N = 3; W = '*; probe: 3 files collected, * bytes; not collected: big.bin is larger than 4194304 bytes'; X = $null }
+    @{ F = 'Many'; S = 'INCOMPLETE'; N = 32; W = '*; probe: 32 files collected, 64 bytes; not collected: more than 32 files: 1 file left in the work directory'; X = $null }
+    @{ F = 'Total'; S = 'INCOMPLETE'; N = 4; W = '*; probe: 4 files collected, 16777216 bytes; not collected: more than 16777216 bytes in all: 1 file left in the work directory'; X = $null }
+    @{ F = 'None'; S = 'INCOMPLETE'; N = 0; W = '*; probe: 0 files collected, 0 bytes; not collected: 0 files to collect, fewer than the 1 asked for (min)'; X = $null }
+    @{ F = 'TmpOnly'; S = 'INCOMPLETE'; N = 1; W = '*; probe: 1 file collected, 2 bytes, 1 temporary; not collected: 0 files to collect, fewer than the 1 asked for (min)'
+        X = { param($Probed) $only = @($Probed.Row.facts['probe']['files'])[0]; $only['name'] -ceq 'final.json.4242.tmp' -and $only['temporary'] -eq $true } }
+    @{ F = 'Tmp'; S = 'PASS'; N = 4; W = '*; probe: 4 files collected, * bytes, 1 temporary'; X = { param($Probed) $Probed.Row.facts['probe']['temporary'] -eq 1 } }
+)
+$pbAt = 0
+foreach ($pbF in $pbFaults) {
+    $pbAt++
+    $pbGot = & $pbRunOf $pbCfgF "pf$pbAt" (& $pbSpecOf @{ Fault = $pbF.F; Outside = $pbOutside })
+    $pbGotRow = & $pbRowOf $pbGot 't1'
+    $pbProbed = [pscustomobject]@{ Row = $pbGotRow; Res = $pbGot.Res; Work = (& $safe { @(Get-ChildItem -LiteralPath (Join-Path $pbGot.Res 'work') -Directory)[0].FullName }) }
+    Write-SafeCase "end to end: probe: a plugin that writes $($pbF.F): the round and the row are $($pbF.S), $(Get-HarnessCount $pbF.N 'file') collected" { "$($pbGot.Why)$($pbGotRow.detail)" } ($pbF.S -cne 'PASS') {
+        $pbGot.Run.verdict -ceq $pbF.S -and $pbGotRow.status -ceq $pbF.S -and $pbGotRow.detail -clike $pbF.W -and $pbGotRow.facts['probe']['collected'] -eq $pbF.N -and (-not $pbF.X -or (& $pbF.X $pbProbed)) }
+}
+$pbSkip = & $pbRunOf $pbCfgF 'ps' ((& $pbSpecOf @{}) + @{ RenderSkip = 1 })
+$pbSkipRow = & $pbRowOf $pbSkip 't1'
+Write-SafeCase 'end to end: probe: a render that wrote no file is INCOMPLETE, and what the plugin wrote is collected all the same' { "$($pbSkip.Why)$($pbSkipRow.detail)" } $true {
+    $pbSkip.Run.verdict -ceq 'INCOMPLETE' -and $pbSkipRow.status -ceq 'INCOMPLETE' -and $pbSkipRow.detail -clike 'the render produced no file; probe: 3 files collected, * bytes' -and
+    (& $pbNamesOf $pbSkipRow.facts['probe']['files']) -ceq 'final.json,step-001.json,step-002.json' }
+# The licence reminder ends the first launch of the render: the directory is the plugin's again only when it is empty
+$pbNag = @{ Launches = 0; Seen = [Collections.Generic.List[object]]::new(); Pids = [Collections.Generic.List[object]]::new(); Spec = $null }
+$pbNagOnce = {
+    param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
+    $told = $HostArgs['Environment']
+    $outDir = ($told -is [Collections.IDictionary] -and $told.Contains('EXAMPLE_PROBE_OUT')) ? [string]$told['EXAMPLE_PROBE_OUT'] : ''
+    if ($outDir) {
+        $pbNag.Launches++
+        $copyFile = [string]$told['EXAMPLE_PROBE_SCRIPT']
+        $pbNag.Seen.Add([pscustomobject]@{ There = (Test-Path -LiteralPath $outDir -PathType Container); Entries = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
+                Sha = ((Test-Path -LiteralPath $copyFile -PathType Leaf) ? (Get-FileHash -LiteralPath $copyFile -Algorithm SHA256).Hash.ToLowerInvariant() : '') })
+    }
+    $launched = & $realOnce -Ctx $RunCtx -HostArgs $HostArgs -Label $Label
+    if ($outDir) { $pbNag.Pids.Add($launched.Pid) }
+    if ($outDir -and $pbNag.Launches -eq 1) { $null = $pbNag.Spec.Probe.Remove('Fault'); $launched.Status = 'Modal'; $launched.Modal = 'license-nag' }
+    $launched
+}.GetNewClosure()
+$pbNag.Spec = & $pbSpecOf @{ Fault = 'None' }
+& $setOnce $pbNagOnce
+try { $pbN1 = & $pbRunOf $pbCfgF 'pn' $pbNag.Spec } finally { & $setOnce $realOnce }
+$pbN1Row = & $pbRowOf $pbN1 't1'
+Write-SafeCase 'end to end: probe: a licence reminder ends the first launch, which wrote nothing: the directory stays and is empty, the input copy is unchanged, the launch is started once more, the row is PASS and its pid is the second launch''s' { "$($pbN1.Why)$($pbN1Row.detail); pids $($pbNag.Pids -join ', '), facts $(& $safe { $pbN1Row.facts['probe']['pid'] })" } $false {
+    $pbN1.Run.verdict -ceq 'PASS' -and $pbN1Row.status -ceq 'PASS' -and @($pbN1.Run.runs[0].retries).Count -eq 1 -and $pbNag.Seen.Count -eq 2 -and $pbNag.Seen[1].There -and $pbNag.Seen[1].Entries -eq 0 -and
+    $pbNag.Seen[1].Sha -ceq $pbSha -and $pbN1Row.facts['probe']['collected'] -eq 3 -and $pbNag.Pids.Count -eq 2 -and $pbNag.Pids[0] -ne $pbNag.Pids[1] -and $pbN1Row.facts['probe']['pid'] -eq $pbNag.Pids[1] }
+$pbNag.Launches = 0; $pbNag.Seen.Clear(); $pbNag.Pids.Clear(); $pbNag.Spec = & $pbSpecOf @{}
+& $setOnce $pbNagOnce
+try { $pbN2 = & $pbRunOf $pbCfgF 'po' $pbNag.Spec } finally { & $setOnce $realOnce }
+$pbN2Row = & $pbRowOf $pbN2 't1'
+Write-SafeCase 'end to end: probe: a licence reminder ends a first launch that wrote into the directory: no retry, the row INCOMPLETE with the reminder and why it was not started again, what was written collected' { "$($pbN2.Why)$($pbN2Row.detail)" } $true {
+    $pbN2.Run.verdict -ceq 'INCOMPLETE' -and $pbN2Row.status -ceq 'INCOMPLETE' -and $pbN2Row.detail -clike 'stuck on dialog license-nag *, ended; not retried: the first launch wrote into t1.out; probe: 3 files collected, * bytes' -and
+    @($pbN2.Run.runs[0].retries).Count -eq 0 -and $pbNag.Launches -eq 1 }
+# A probe scenario that does not run because learning failed: nothing to collect, and its row says only why it did not run
+$pbGapOnce = {
+    param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
+    $launched = & $realOnce -Ctx $RunCtx -HostArgs $HostArgs -Label $Label
+    if ($Label -ceq 'learn') { $launched.Status = 'Timeout' }
+    $launched
+}.GetNewClosure()
+& $setOnce $pbGapOnce
+try { $pbGap = & $pbRunOf $pbCfgF 'pg' (& $pbSpecOf @{}) } finally { & $setOnce $realOnce }
+$pbGapRow = & $pbRowOf $pbGap 't1'
+$pbGapFacts = & $safe { $pbGapRow.facts }
+Write-SafeCase 'end to end: probe: a probe scenario learning did not cover is not run, nothing is collected for it and its row has no probe facts' { "$($pbGap.Why)$($pbGapRow.detail)" } $true {
+    $pbGap.Run.verdict -ceq 'INCOMPLETE' -and $pbGapRow.status -ceq 'INCOMPLETE' -and $pbGapRow.detail -clike 'not run: *' -and $pbGapRow.detail -cnotlike '*probe*' -and
+    ($null -eq $pbGapFacts -or -not $pbGapFacts.Contains('probe')) }
+# The same reminder on the one driver launch of a render judged by a report: its probe directory is an output of that
+# launch too, so files the first launch wrote mean no retry
+$pbCfgJ = & $writeVariant { param($c) & $pbChange $c @($pbJudged) }
+$pbCfgJ.ReaperExe = $pwshExe
+$pbNag.Launches = 0; $pbNag.Seen.Clear(); $pbNag.Pids.Clear(); $pbNag.Spec = & $pbSpecOf @{}
+& $setOnce $pbNagOnce
+try { $pbN3 = & $pbRunOf $pbCfgJ 'pj' $pbNag.Spec } finally { & $setOnce $realOnce }
+$pbN3Row = & $pbRowOf $pbN3 'tr'
+Write-SafeCase 'end to end: probe: a licence reminder ends the driver launch of a render judged by a report after it wrote into the directory: no retry, and the row says why' { "$($pbN3.Why)$($pbN3Row.detail)" } $true {
+    $pbN3.Run.verdict -ceq 'INCOMPLETE' -and $pbN3Row.status -ceq 'INCOMPLETE' -and $pbN3Row.detail -clike '*stuck on dialog license-nag *, ended; not retried: the first launch wrote into tr.out*' -and
+    @($pbN3.Run.runs[0].retries).Count -eq 0 -and $pbNag.Launches -eq 1 -and $pbN3Row.facts['probe']['collected'] -eq 3 }
 
 # ---- listing parameters ----
 # Fixture Gain with parameters of its own: a name used twice, one with a path in it, REAPER's three at the end

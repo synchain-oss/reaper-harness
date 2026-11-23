@@ -245,7 +245,9 @@ pwsh D:\tools\reaper-harness\run.ps1 -Config tests\reaper-harness.json -CfgDir D
   single launch INCOMPLETE now and then. SKIPPED means the suite did not start at all (a skip marker, another
   `reaper.exe`, a preflight reason); the reasons are printed.
 - The work files of a round that is not green are kept under `<ResultDir>/work/`; they hold your plugin states, so
-  keep them out of repositories too.
+  keep them out of repositories too, and the files a test build wrote into its [probe directory](CONFIG.md#probes),
+  collected under `<ResultDir>/renders/`, as well: they hold whatever the plugin chose to write, paths of your machine
+  among them.
 
 ## 5. Skip markers and GUI locks
 

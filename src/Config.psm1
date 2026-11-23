@@ -71,6 +71,12 @@ function New-HarnessSpec {
             pid      = (SStr $script:FieldPattern -Doc 'the field holding the id of the process that wrote the file: it must be the REAPER of that step')
             periodMs = (SInt 10 10000 -Doc 'how often at most the plugin writes the file, default 500')
         }) @('env', 'fields') -Doc 'the plugin writes counts of its own to a small JSON file'
+    $defs.probeValue = SAny @(
+        (SObj ([ordered]@{ file = $relPath }) @('file'))
+        (SObj ([ordered]@{ dir = (SBool -Doc 'true: a new empty directory for each render'); min = (SInt 0 32 -Doc 'the fewest files the plugin must write there, default 1') }) @('dir'))
+    ) '{ file } or { dir, min }' -Doc 'a path the harness makes: the copy of a file of the configuration, or a new empty directory'
+    $probeName = '^[A-Z][A-Z0-9_]{2,63}$'
+    $probeMap = SMap $probeName (SRef probeValue) -Min 1
     $defs.reportBound = SAny @((SNum -1e15 1e15), (SObj ([ordered]@{ min = (SNum -1e15 1e15); max = (SNum -1e15 1e15) }) -MinKeys 1)) 'a number (exactly that) or { min, max }'
     $defs.reportCriterion = SObj ([ordered]@{ delta = (SRef reportBound); value = (SRef reportBound) }) -MinKeys 1 -Doc 'delta: how much the field grew over the stretch; value: what it reads at its end'
     $defs.reportExpect = SMap $script:IdPattern (SMap $script:FieldPattern (SRef reportCriterion) -Min 1) -Min 1 -Doc 'plugin id -> field -> criterion'
@@ -81,6 +87,7 @@ function New-HarnessSpec {
             params    = $params
             states    = (SMap $script:StatePattern (SRef stateSource) -Min 1 -Doc 'named plugin states taken from a project or a file')
             report    = (SRef report)
+            probe     = (SMap $probeName (SRef probeValue) -Min 1 -Doc 'environment variables the plugin reads, each set to a path the harness makes, for the renders that ask for them (scenarios[].probe); names as report.env, with a longer deny list (docs/SAFETY.md)')
         })
     $defs.fx = SObj ([ordered]@{
             plugin = (SStr $script:IdPattern -Doc 'id from plugins')
@@ -117,6 +124,7 @@ function New-HarnessSpec {
             id     = (SStr $script:StatePattern -Doc 'appended to the scenario id: <id>[-<matrix>]-<variant id>')
             fx     = (SMap $script:IdPattern (SRef variantFx) -Min 1 -Doc 'plugin id -> state and parameters')
             bypass = $bypass
+            probe  = (SMap $probeName (SRef probeValue) -Min 1 -Doc 'replaces values of the scenario''s probe')
         }) @('id')
     $defs.matrix = SObj ([ordered]@{ mode = (SArr $mode -Min 1 -Unique); sr = (SArr $rate -Min 1 -Unique); block = (SArr $block -Min 1 -Unique) })
     # The device step renders nothing, so a render mode would only multiply identical scenarios
@@ -175,6 +183,7 @@ function New-HarnessSpec {
     foreach ($e in $criteria.GetEnumerator()) { $renderProps[$e.Key] = $e.Value }
     $renderProps.stems = SArr (SRef stem) -Min 1 -Doc 'tracks rendered as stems of their own, next to the master'
     $renderProps.report = SRef reportExpect
+    $renderProps.probe = SAny @((SBool), $probeMap) 'true, or variable -> { file } or { dir, min }' -Doc 'set the probe variables of the plugins of the layout for this render and collect what they write; an object replaces some values'
     $renderProps.host = SRef host
     $renderProps.matrix = SRef matrix
     $renderProps.keep = SBool -Doc 'keep the render (and its stems) under renders/ of the result directory, with a line in its manifest'
@@ -223,11 +232,11 @@ $script:Spec = New-HarnessSpec
 function Get-HarnessConfigSpec { $script:Spec }
 function Get-HarnessParamNamePattern { $script:ParamNamePattern }
 
-# Negative variant of a kind: the same fields without matrix, keep, keepFirst and variants, plus expect and expectDetail (both required).
+# Negative variant of a kind: the same fields without matrix, keep, keepFirst, variants and probe, plus expect and expectDetail (both required).
 function Get-NegativeKindSpec([string]$Kind) {
     $k = $script:Spec.Kinds[$Kind]
     $Props = [ordered]@{}
-    foreach ($e in $k.props.GetEnumerator()) { if ($e.Key -cnotin 'matrix', 'keep', 'keepFirst', 'variants') { $Props[$e.Key] = $e.Value } }
+    foreach ($e in $k.props.GetEnumerator()) { if ($e.Key -cnotin 'matrix', 'keep', 'keepFirst', 'variants', 'probe') { $Props[$e.Key] = $e.Value } }
     $Props.expect = SStr -Enum $script:Expectable
     $Props.expectDetail = SStr -Doc 'regex (.NET, case sensitive) the outcome detail must match'
     SObj $Props (@($k.req) + 'expect', 'expectDetail')
@@ -469,7 +478,7 @@ function New-CriteriaDefaults { [ordered]@{ maxDiffDb = $null; lag = 0; peakMaxD
 function New-RenderDefaults {
     $d = New-CriteriaDefaults
     $d.stems = @(); $d.report = [ordered]@{}; $d.host = (New-HostDefaults); $d.mutate = $null; $d.keep = $false; $d.variant = $null; $d.variantLayout = $null
-    $d.keepFirst = $false; $d.tailSeconds = 0.0; $d.tailFrames = [long]0
+    $d.keepFirst = $false; $d.tailSeconds = 0.0; $d.tailFrames = [long]0; $d.probe = $null
     $d
 }
 
@@ -522,7 +531,8 @@ function Get-HarnessVariantKey([string]$FxPlugin, [string]$FxState, $FxParams) {
     $FxPlugin + ($FxState ? "@$FxState" : '') + '|' + (@($FxParams.get_Keys() | ForEach-Object { '{0}={1}' -f $_, $FxParams[$_].Normalized.ToString('R', [Globalization.CultureInfo]::InvariantCulture) }) -join ';')
 }
 
-# The plugins: id -> @{ Id; Kind (vst3 | jsfx); Bundle; Jsfx; ExpectPdc (samples, or 'report'); Params; States (name -> source) }.
+# The plugins: id -> @{ Id; Kind (vst3 | jsfx); Bundle; Jsfx; ExpectPdc (samples, or 'report'); Params; States (name -> source);
+# Report; Probe (name -> ConvertTo-ProbeEntry) }. Report and probe names share one table, without regard to case.
 function ConvertTo-Plugins($Raw, $Problems) {
     $Plugins = [ordered]@{}
     $envs = @{}
@@ -547,16 +557,94 @@ function ConvertTo-Plugins($Raw, $Problems) {
             $report = [pscustomobject]@{ Env = [string]$rep['env']; Fields = @($rep['fields'] | ForEach-Object { [string]$_ }); PidField = [string](Get-Or $rep 'pid' ''); PeriodMs = [int](Get-Or $rep 'periodMs' 500) }
             $why = Test-HarnessReportEnvName $report.Env
             if ($why) { $Problems.Add("config.plugins.$k.report.env: $why") }
-            if ($envs.ContainsKey($report.Env)) { $Problems.Add("config.plugins.$k.report.env: '$($report.Env)' is the report variable of $($envs[$report.Env]) too") }
-            $envs[$report.Env] = $k
+            if ($envs.ContainsKey($report.Env)) { $Problems.Add("config.plugins.$k.report.env: '$($report.Env)' is $(Get-EnvHolder $envs[$report.Env]) too") }
+            $envs[$report.Env] = @{ Plugin = $k; Kind = 'the report variable' }
+        }
+        $probe = [ordered]@{}
+        $rawProbe = Get-Or $r 'probe' $null
+        if ($rawProbe) {
+            if ($hasJs) { $Problems.Add("config.plugins.$k.probe: probe variables are for VST3 plugins (a JSFX reads no environment)") }
+            foreach ($n in $rawProbe.get_Keys()) {
+                $probe[$n] = ConvertTo-ProbeEntry $rawProbe[$n] "config.plugins.$k.probe.$n" $n $k $false $Problems
+                $why = Test-HarnessReportEnvName $n -What 'a probe variable' -Strict
+                if ($why) { $Problems.Add("config.plugins.$k.probe.${n}: $why") }
+                if ($envs.ContainsKey($n)) { $Problems.Add("config.plugins.$k.probe.${n}: '$n' is $(Get-EnvHolder $envs[$n]) too") }
+                $envs[$n] = @{ Plugin = $k; Kind = 'a probe variable' }
+            }
+            if (@($probe.get_Values() | Where-Object { $_.Kind -ceq 'dir' }).Count -gt 1) { $Problems.Add("config.plugins.$k.probe: at most one dir variable") }
         }
         $pdc = Get-Or $r 'expectPdc' 0
         $Plugins[$k] = [pscustomobject]@{
             Id = $k; Kind = ($hasJs ? 'jsfx' : 'vst3'); Bundle = [string](Get-Or $r 'bundle' ''); Jsfx = [string](Get-Or $r 'jsfx' ''); ExpectPdc = (($pdc -is [string]) ? 'report' : [int]$pdc)
-            Params = (ConvertTo-ParamTable (Get-Or $r 'params' $null)); States = $States; Report = $report
+            Params = (ConvertTo-ParamTable (Get-Or $r 'params' $null)); States = $States; Report = $report; Probe = $probe
         }
     }
     $Plugins
+}
+
+# Who holds a plugin variable name already: "the report variable of <id>" or "a probe variable of <id>".
+function Get-EnvHolder($Holder) { "$($Holder.Kind) of $($Holder.Plugin)" }
+
+# One probe value: @{ Name; Plugin; Kind (file | dir); File (config-relative, '' for a dir); Min (0 for a file). An
+# override that gives no min has Min $null and takes the one below it (Merge-HarnessProbe).
+function ConvertTo-ProbeEntry($Raw, [string]$Path, [string]$Name, [string]$Owner, [bool]$Override, $Problems) {
+    if ($Raw.Contains('file')) { return [pscustomobject]@{ Name = $Name; Plugin = $Owner; Kind = 'file'; File = [string]$Raw['file']; Min = 0 } }
+    if (-not [bool]$Raw['dir']) { $Problems.Add("$Path.dir: only true (a new empty directory for each render)") }
+    $least = $Raw.Contains('min') ? [int]$Raw['min'] : ($Override ? $null : 1)
+    [pscustomobject]@{ Name = $Name; Plugin = $Owner; Kind = 'dir'; File = ''; Min = $least }
+}
+
+# The probe variables the plugins of a layout declare (name -> entry), in the order of its plugin list.
+function Get-LayoutProbe($UsedIn, $PluginTable) {
+    $probe = [ordered]@{}
+    foreach ($pluginId in $UsedIn.Plugins) {
+        if (-not $PluginTable.Contains($pluginId)) { continue }
+        $declared = $PluginTable[$pluginId].Probe
+        foreach ($n in $declared.get_Keys()) { $probe[$n] = $declared[$n] }
+    }
+    $probe
+}
+
+# Overrides of a scenario's or a variant's probe: name -> entry, each a variable of Base of the same kind.
+function ConvertTo-ProbeOverrides($Raw, [string]$Path, $Base, [string]$layoutId, $Problems) {
+    $over = [ordered]@{}
+    foreach ($n in $Raw.get_Keys()) {
+        if (-not $Base.Contains($n)) { $Problems.Add("$Path.${n}: not a probe variable of a plugin in layout '$layoutId'"); continue }
+        $e = ConvertTo-ProbeEntry $Raw[$n] "$Path.$n" $n $Base[$n].Plugin $true $Problems
+        if ($e.Kind -cne $Base[$n].Kind) { $Problems.Add("$Path.${n}: $n is a $($Base[$n].Kind) variable"); continue }
+        $over[$n] = $e
+    }
+    $over
+}
+
+# A probe with overrides on top (pure): a new map, neither is changed; a dir override without min keeps the one below.
+function Merge-HarnessProbe($Base, $Top) {
+    $m = [ordered]@{}
+    foreach ($n in $Base.get_Keys()) { $m[$n] = $Base[$n] }
+    foreach ($n in $Top.get_Keys()) {
+        $e = $Top[$n]
+        if ($null -eq $e.Min) { $e = $e.PSObject.Copy(); $e.Min = $Base[$n].Min }
+        $m[$n] = $e
+    }
+    $m
+}
+
+# The effective probe of a render scenario: every variable the plugins of its layout declare, its overrides on top.
+# $null without probe (or false), and without a defined layout (a problem of its own already).
+function ConvertTo-ScenarioProbe($Raw, [string]$Path, $UsedIn, $PluginTable, [string]$CompareKind, $Problems) {
+    if ($null -eq $UsedIn -or $null -eq $Raw -or ($Raw -is [bool] -and -not $Raw)) { return $null }
+    $probe = Get-LayoutProbe $UsedIn $PluginTable
+    if (-not $probe.get_Count()) { $Problems.Add("$Path.probe: layout '$($UsedIn.Id)' uses no plugin that declares probe variables"); return $null }
+    foreach ($pluginId in @($probe.get_Values() | ForEach-Object { $_.Plugin } | Select-Object -Unique)) {
+        $uses = @($UsedIn.Tracks | ForEach-Object { $_.Fx } | Where-Object { $_.Plugin -ceq $pluginId }).Count
+        if ($uses -ne 1) { $Problems.Add("$Path.probe: the layout uses '$pluginId' $uses times; a plugin told its paths needs exactly one instance") }
+    }
+    $dirs = @($probe.get_Values() | Where-Object { $_.Kind -ceq 'dir' }).Count
+    if ($dirs -gt 1) { $Problems.Add("$Path.probe: the plugins of the layout declare $dirs dir variables; a render collects one directory") }
+    # The dry reference has no FX; a repeat or a compare variant would render the plugin a second time without them
+    if ($CompareKind -cin 'repeat', 'variant') { $Problems.Add("$Path.probe: a render that sets probe variables compares with ""dry"" or ""none"": a repeat or a compare variant would load the plugin again without them") }
+    if ($Raw -is [bool]) { return $probe }
+    Merge-HarnessProbe $probe (ConvertTo-ProbeOverrides $Raw "$Path.probe" $probe $UsedIn.Id $Problems)
 }
 
 # Report criteria (plugin -> field -> { delta, value }) of a transport state or a render: plugin -> field -> @{ Delta;
@@ -841,6 +929,7 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
             # The second render would be the driver's render step and the first -renderproject: a difference between the
             # two ways of rendering would read as a plugin that is not deterministic
             if ($o.report.get_Count() -and $o.compare.Kind -eq 'repeat' -and $reports) { $Problems.Add("$Path.report: a repeat that reports its residual cannot judge plugin reports as well: its two renders would be made in two different ways") }
+            $o.probe = ConvertTo-ScenarioProbe (Get-Or $Raw 'probe' $null) $Path $layout $PluginTable $o.compare.Kind $Problems
             $o.mutate = $null
             $o.keep = [bool](Get-Or $Raw 'keep' $false)
             $o.keepFirst = [bool](Get-Or $Raw 'keepFirst' $false)
@@ -924,7 +1013,7 @@ function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int
 
 # ---- parameter variants of a render ----
 # The variants of one scenario item, checked once before its matrix is expanded: @{ Id; Fx (plugin -> @{ State; Params });
-# Bypass } each. None when the item has none, or when its layout is not defined (a problem of its own already).
+# Bypass; Probe (name -> override) } each. None when the item has none, or when its layout is not defined (a problem of its own already).
 function ConvertTo-Variants($ScenarioRaw, [string]$Path, $Layouts, $PluginTable, $Problems) {
     if ($ScenarioRaw['kind'] -cne 'render' -or -not $ScenarioRaw.Contains('variants')) { return , @() }
     if (-not $ScenarioRaw.Contains('compare')) { $Problems.Add("${Path}: a scenario with variants needs compare (`"none`" to only render)") }
@@ -952,8 +1041,14 @@ function ConvertTo-Variants($ScenarioRaw, [string]$Path, $Layouts, $PluginTable,
             $over[$pluginId] = [pscustomobject]@{ State = $vState; Params = $vParams }
         }
         $bypass = ConvertTo-Bypass (Get-Or $variantRaw 'bypass' $null) "$vp.bypass" $used $Problems @($PluginTable.get_Keys())
+        $vProbe = [ordered]@{}
+        if ($variantRaw.Contains('probe')) {
+            $scenarioProbe = Get-Or $ScenarioRaw 'probe' $false
+            if ($scenarioProbe -is [bool] -and -not $scenarioProbe) { $Problems.Add("$vp.probe: needs probe on the scenario") }
+            else { $vProbe = ConvertTo-ProbeOverrides $variantRaw['probe'] "$vp.probe" (Get-LayoutProbe $Layouts[$layoutId] $PluginTable) $layoutId $Problems }
+        }
         # Checked like the others, but not expanded: its id would clash again in every leg of a matrix
-        if (-not $twice) { [pscustomobject]@{ Id = $vid; Fx = $over; Bypass = $bypass } }
+        if (-not $twice) { [pscustomobject]@{ Id = $vid; Fx = $over; Bypass = $bypass; Probe = $vProbe } }
     }
     , @($list)
 }
@@ -995,7 +1090,21 @@ function New-HarnessVariantScenario($Scenario, $Variant, $BaseLayout) {
     $s.variantLayout = New-HarnessVariantLayout $BaseLayout $Variant
     $s.bypass = Join-HarnessBypass $Scenario.bypass $Variant.Bypass
     if ($s.compare.Kind -ceq 'variant' -and $s.compare.SameLayout -and -not $s.compare.OwnBypass) { $c = $s.compare.PSObject.Copy(); $c.Bypass = $s.bypass; $s.compare = $c }
+    # A new map: the legs of a matrix and the other variants share the scenario's
+    if ($Variant.PSObject.Properties['Probe'] -and $Variant.Probe.get_Count() -and $s.probe) { $s.probe = Merge-HarnessProbe $s.probe $Variant.Probe }
     $s
+}
+
+# Every report and probe variable name of a configuration (-OnlyReports: the report names), sorted (wrap the call in
+# @()); none for one built by hand without them.
+function Get-HarnessPluginEnvNames($Conf, [switch]$OnlyReports) {
+    $table = ($Conf -is [Collections.IDictionary]) ? $Conf['Plugins'] : (($null -ne $Conf -and $Conf.PSObject.Properties['Plugins']) ? $Conf.Plugins : $null)
+    if ($null -eq $table) { return }
+    $names = foreach ($p in @($table.get_Values())) {
+        if ($p.PSObject.Properties['Report'] -and $p.Report) { $p.Report.Env }
+        if ($p.PSObject.Properties['Probe'] -and $p.Probe -and -not $OnlyReports) { @($p.Probe.get_Keys()) }
+    }
+    @($names | Where-Object { $_ } | Sort-Object -Unique)
 }
 
 # One learned entry per setting (Get-HarnessVariantKey): the display texts asked of one parameter of it must agree, over
@@ -1111,4 +1220,4 @@ function Read-HarnessConfigExtensions([Parameter(Mandatory)][string]$Path) {
 }
 
 Export-ModuleMember -Function Read-HarnessConfig, Read-HarnessConfigExtensions, Test-HarnessConfigData, Get-HarnessConfigSpec, ConvertTo-HarnessJsonSchema, Get-HarnessBuiltinNegatives,
-    Get-HarnessConfigDefaults, Get-HarnessDryLayout, Stop-Usage, Find-RoutingCycle, ConvertTo-ChannelNumber, Get-HarnessParamNamePattern, Test-HarnessResidualReported, Test-HarnessScenarioReports
+    Get-HarnessConfigDefaults, Get-HarnessDryLayout, Stop-Usage, Find-RoutingCycle, ConvertTo-ChannelNumber, Get-HarnessParamNamePattern, Test-HarnessResidualReported, Test-HarnessScenarioReports, Get-HarnessPluginEnvNames

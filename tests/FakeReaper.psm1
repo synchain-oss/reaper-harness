@@ -14,6 +14,17 @@
 # "Report delay as PDC" off it delays the audio instead.
 #   Set-FakeReaper -Spec @{ Pwsh; CfgDir; Plugins (REAPER name -> @{ Bundle; Cid }); Seen (a list) }
 #       EnvName, EnvSeen (a list): the value of that variable in the environment of every launch ('' when unset)
+#       EnvNames (a list), EnvLog (a list): every launch adds [ordered]@{ args (its arguments joined); <name> (the value
+#       of each of EnvNames in its environment, '' when unset) }
+#       Probe = @{ Script; Out; Steps; Fault; LateFinal; LateTmp; Outside }: a launch that renders (-renderproject or
+#       the driver's render step) and has the variable Out set writes into that directory step-001.json ... step-<Steps>.json
+#       and final.json ({"script":"<sha256 of the file the variable Script names, or null>","bytes":<its length>}).
+#       LateFinal: final.json is written by the stand-in process as its very last step (LateTmp: final.json.4242.tmp
+#       too), so it is only there once the process has exited. Faults: Subdir (also sub\x.json), Junction (also a
+#       junction "link" to the directory Outside), DirLink (the directory replaced by a junction to Outside), BadName
+#       (also "bad name!.json" and ".hidden"), Big (also big.bin of 4 MiB + 1), Many (only m-01.json ... m-33.json),
+#       Total (only t1.bin ... t5.bin of 4 MiB each), Tmp (also final.json.4242.tmp), TmpOnly (only
+#       final.json.4242.tmp), None (nothing)
 #       FileAtStart (a list): whether the file that variable names was there when a launch started; the launch writes it
 #       CopiesAtStart (a list): how many copies of the step's reports were there when a driver step started
 #       JSFX are found by their add name ("JS:<path under Effects>") in the configuration directory's Effects
@@ -665,6 +676,43 @@ function Invoke-FakeStep([string]$JobFile) {
     $behave
 }
 
+# What a plugin with probe variables writes into its directory (Spec.Probe; see the header). Returns the text of
+# final.json when the stand-in process is to write it last, else ''.
+function Write-FakeProbe($psi) {
+    $p = $script:Spec['Probe']
+    if (-not $p) { return '' }
+    $outDir = [string]$psi.Environment[$p.Out]
+    if (-not $outDir) { return '' }
+    $scriptFile = [string]$psi.Environment[$p.Script]
+    $final = ($scriptFile -and (Test-Path -LiteralPath $scriptFile -PathType Leaf)) ?
+        ('{{"script":"{0}","bytes":{1}}}' -f [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($scriptFile))).ToLowerInvariant(), ([IO.FileInfo]::new($scriptFile).Length)) : '{"script":null,"bytes":null}'
+    $fault = [string]$p['Fault']
+    $put = { param([string]$Leaf, [string]$Text) [IO.File]::WriteAllText((Join-Path $outDir $Leaf), $Text) }
+    $sized = { param([string]$Leaf, [long]$Length) $fs = [IO.File]::Create((Join-Path $outDir $Leaf)); try { $fs.SetLength($Length) } finally { $fs.Dispose() } }
+    switch ($fault) {
+        'None' { return '' }
+        'Many' { for ($i = 1; $i -le 33; $i++) { & $put ('m-{0:d2}.json' -f $i) '{}' }; return '' }
+        'Total' { for ($i = 1; $i -le 5; $i++) { & $sized "t$i.bin" 4194304 }; return '' }
+        'TmpOnly' { & $put 'final.json.4242.tmp' '{}'; return '' }
+    }
+    for ($i = 1; $i -le [int]($p['Steps'] ?? 0); $i++) { & $put ('step-{0:d3}.json' -f $i) "{""step"":$i}" }
+    switch ($fault) {
+        'Subdir' { $null = New-Item -ItemType Directory -Path (Join-Path $outDir 'sub'); & $put 'sub\x.json' '{}' }
+        'Junction' { $null = New-Item -ItemType Junction -Path (Join-Path $outDir 'link') -Target $p.Outside }
+        'BadName' { & $put 'bad name!.json' '{}'; & $put '.hidden' '{}' }
+        'Big' { & $sized 'big.bin' 4194305 }
+        'Tmp' { & $put 'final.json.4242.tmp' '{}' }
+    }
+    if ($p['LateFinal']) { return $final }
+    & $put 'final.json' $final
+    if ($fault -ceq 'DirLink') {
+        # The plugin replaces its directory by a junction to another one that holds files of its own
+        Remove-Item -LiteralPath $outDir -Recurse -Force
+        $null = New-Item -ItemType Junction -Path $outDir -Target $p.Outside
+    }
+    ''
+}
+
 function Invoke-FakeLaunch($psi) {
     $given = @($psi.ArgumentList)
     $script:JobBinaries = $null
@@ -674,13 +722,28 @@ function Invoke-FakeLaunch($psi) {
         $script:Spec.EnvSeen.Add($told)
         if ($told -and $script:Spec.ContainsKey('FileAtStart')) { $script:Spec.FileAtStart.Add((Test-Path -LiteralPath $told)); [IO.File]::WriteAllText($told, '{}') }
     }
+    if ($script:Spec['EnvNames']) {
+        $logged = [ordered]@{ args = ($given -join ' ') }
+        foreach ($n in $script:Spec.EnvNames) { $logged[$n] = [string]$psi.Environment[$n] }
+        $script:Spec.EnvLog.Add($logged)
+    }
     $behave = 'quick'
     $renderAt = [array]::IndexOf($given, '-renderproject')
+    $jobPath = [string]$psi.Environment['REAPER_HARNESS_JOB']
+    $rendering = $renderAt -ge 0 -or ($jobPath -and (ConvertFrom-FakeLua ([IO.File]::ReadAllText($jobPath)))['step'] -ceq 'render')
     if ($renderAt -ge 0) { Invoke-FakeRender $given[$renderAt + 1] }
-    elseif ($psi.Environment['REAPER_HARNESS_JOB']) { $behave = Invoke-FakeStep $psi.Environment['REAPER_HARNESS_JOB'] }
+    elseif ($jobPath) { $behave = Invoke-FakeStep $jobPath }
+    $late = $rendering ? (Write-FakeProbe $psi) : ''
     $psi.FileName = $script:Spec.Pwsh
     $psi.ArgumentList.Clear()
-    foreach ($part in '-NoProfile', '-NonInteractive', '-Command', @{ quick = 'exit 0'; linger = 'Start-Sleep -Milliseconds 1500'; hang = 'Start-Sleep -Seconds 60' }[$behave]) { $psi.ArgumentList.Add($part) }
+    $command = @{ quick = 'exit 0'; linger = 'Start-Sleep -Milliseconds 1500'; hang = 'Start-Sleep -Seconds 60' }[$behave]
+    if ($late) {
+        # The stand-in writes final.json (and a .tmp) last, right before it exits: the text and the place travel in its environment
+        $psi.Environment['FAKE_PROBE_DIR'] = [string]$psi.Environment[$script:Spec.Probe.Out]
+        $psi.Environment['FAKE_PROBE_FINAL'] = $late
+        $command = 'Start-Sleep -Milliseconds 400; ' + ($script:Spec.Probe['LateTmp'] ? "[IO.File]::WriteAllText((Join-Path `$env:FAKE_PROBE_DIR 'final.json.4242.tmp'), '{}'); " : '') + "[IO.File]::WriteAllText((Join-Path `$env:FAKE_PROBE_DIR 'final.json'), `$env:FAKE_PROBE_FINAL); exit 0"
+    }
+    foreach ($part in '-NoProfile', '-NonInteractive', '-Command', $command) { $psi.ArgumentList.Add($part) }
     $proc = [Diagnostics.Process]::Start($psi)
     foreach ($c in $script:PendingCopies) { [IO.File]::WriteAllText($c.File, [IO.File]::ReadAllText($c.File).Replace('__PID__', "$($proc.Id + $c.Shift)")) }
     $script:PendingCopies.Clear()

@@ -119,10 +119,13 @@ only those, are classified:
 A stuck dialog ends the launch and the scenario is INCOMPLETE. The evaluation reminder shows up on some launches
 only (about one in six in our runs). A launch it ended (by its process ID, as always) is done once more, after
 deleting the files that launch was to write, so that nothing the first attempt left counts for the second: through
-every guard again (the skip marker, the locks, the configuration directory), only once, never after a process that
-could not be ended, and not at all when one of those files cannot be deleted. Each retry is listed under the round's
-`retries` ([RESULTS.md](RESULTS.md)). A second reminder ends the launch like any stuck dialog; buy a licence or run
-again.
+every guard again (the skip marker, the locks, the configuration directory), only once, and never after a process
+that could not be ended. A [probe directory](#probe-variables-and-collected-files) is not deleted: it stays, the
+plugin is told its path again, and it must still be empty. The probe input copy is reused as it is and hashed again
+after the launch. There is no retry when one of those files cannot be deleted or the first launch wrote into its
+probe directory, and the reason of the row says so (`; not retried: the first launch wrote into <id>.out`). Each
+retry is listed under the round's `retries` ([RESULTS.md](RESULTS.md)). A second reminder ends the launch like any
+stuck dialog; buy a licence or run again.
 
 REAPER also looks for a new version about once a day and shows `REAPER New Version Notification` when there is one,
 which would end that launch the same way. So every launch first writes `verchk=0` under `[REAPER]` in the private
@@ -155,11 +158,13 @@ On REAPER 7.82 with the Dummy device (which has no inputs) the record bit was ne
 editor. What keeps that contained:
 
 - the report variable is set in the environment of the REAPER that one driver step starts, and nowhere else: not in the
-  harness's own process, not for any other launch. The self-test checks both;
+  harness's own process, not for any other launch. The self-test checks both. Every other launch takes the name out of
+  the environment it inherits, so a variable of that name left in your shell reaches no REAPER;
 - a configuration cannot use it to change anything else: names Windows, the .NET and PowerShell runtimes, REAPER and
   what it loads (ReaScript's Python and Lua, Qt in a plugin), a plugin format or WebView2 read (`APPDATA`,
   `USERPROFILE`, `HOME`, `TEMP`, `TMPDIR`, `PATH`, anything starting `REAPER_`, `WEBVIEW2_`, `DOTNET_`, `COR_`, `VST3_`,
-  `PYTHON`, `LUA_`, `QT_` and the like) are refused before REAPER starts, like the two-character names and lower case;
+  `PYTHON`, `LUA_`, `QT_` and the like) are refused before REAPER starts, like the two-character names and lower case.
+  This is the list of the released version; [probe variables](#probe-variables-and-collected-files) have a longer one;
 - the path is a new file in the work directory for every step, deleted before the start;
 - the file is what a plugin wrote, so it is read as untrusted: at most 64 KiB, strict JSON, only the declared numeric
   fields. Nothing else in it reaches a result or a log. The driver's copies of it are deleted before the step starts,
@@ -177,6 +182,63 @@ tool with `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` pointed at a scratch profi
 a directory of it. That is yours to do: the tool never sets them, and then its before-and-after check of the default
 REAPER resource directory looks at the scratch profile, not at the real one, so run the check on the real one yourself. The configuration directory comes from
 `-CfgDir` either way.
+
+## Probe variables and collected files
+
+[Probe variables](CONFIG.md#probes) give a test build of a plugin a file to read and a directory to write into. What
+keeps that contained:
+
+- **The values.** A configuration gives a probe variable no value of its own: the value is always a path the harness
+  made for that launch. It is either a copy of a file of the configuration directory or a new empty directory in the
+  work directory. The file is resolved like an extension path, is at most 1 MiB and is hashed before REAPER starts; it
+  is copied for each launch, and the copy's hash must be the checked one. No text, number or other path of the
+  configuration reaches an environment. What the file holds does come from the configuration directory, and a test
+  build runs code of its own inside REAPER anyway: the deny list is defence in depth, not a boundary.
+- **The names** follow the rules of report variables ([above](#plugin-reports-and-windows)), and no two plugin
+  variables of a configuration share a name. Their deny list is longer: the families that make a runtime or a library
+  load a file or take options are refused too, anything starting `SSL_`, `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`,
+  `PERL`, `RUBY`, `GIT_`, `CHROME`, `MSEDGE`, `REQUESTS_`, `HTTP` (`HTTPS_` too), `NO_PROXY` or `ALL_PROXY`, the name
+  `SSLKEYLOGFILE`, and any name ending in `_PROXY`. They matter where the content the value leads to comes from the
+  configuration: a probe file variable gets a copy of a file of the configuration directory, which could be a CA
+  bundle or a module path. A report variable's value is the path of a file the plugin itself writes, so keeping the
+  released list for it gives up nothing, and keeps released configurations valid.
+- **Which launch.** They are set for the REAPER of the launch that renders a scenario that asks for them (`probe`), and
+  nowhere else: not in the harness's own process, not for the learn launch, a reference, a negative case or another
+  kind. They ride on the existing guarded launch: there is no new way to start REAPER, and the launch path, the locks,
+  the watchdog and the module check are unchanged.
+- **Inherited variables.** Every launch takes each declared report and probe name of the configuration out of the
+  environment it inherits, unless it sets that name itself, so a variable left in your shell reaches no launch. Only
+  declared names are taken out, and only names that passed the deny list can be declared; any other variable is
+  inherited as before.
+- **The runtime check.** Extension code is PowerShell in the harness's own process, so a configuration is not the only
+  caller. Every launch, whoever asks for it, checks each environment value it is to set before it takes anything: a
+  full path strictly inside the work directory, under a name that passes the deny list (the job variable aside): the
+  list of report variables for a declared report name of the configuration (exactly that name), the longer list of
+  probe variables for every other name, a probe variable or a name an extension asks for.
+  Otherwise REAPER is not started and the row is INCOMPLETE. The self-test checks which launch gets the variables,
+  that inherited ones are taken out, and the runtime check.
+- **The licence reminder.** A launch it ended is started once more only when its probe directory is still empty
+  ([above](#dialogs)): the files of the first attempt never mix with the second's. The input copy is not made again;
+  it is hashed after the launch like any copy.
+- **Collection.**
+  - It runs after the scenario's launches have ended, and never while a REAPER of the round may still run (one the
+    watchdog could not end).
+  - It looks at the top level only, never recurses and never follows a link or junction it finds there. The directory
+    itself must not be one either (only an ancestor of the work directory may be); that is checked once, before the
+    listing. A process that outlives REAPER and swaps the directory in that moment is not guarded against: a test
+    build runs code of its own under your account anyway, and such a plugin could move the files itself.
+  - A name is used anywhere only after it passes the name check.
+  - At most 32 files, 16 MiB in all and 4 MiB each; nothing beyond is moved.
+  - A file another process holds (a sharing violation) is tried again at most three times, 200 ms apart; any other
+    error is not tried again. A file that could not be moved stays in the work directory, and one that could not be
+    read back after the move has no hash; either makes the row INCOMPLETE.
+  - The files go under the rules of kept renders ([below](#source-files-and-kept-renders)): under the result
+    directory, links resolved, never overwritten, the run directory claimed once.
+- **The files** are the plugin's and untrusted: what is in them is read only to hash it and is never printed; the
+  result has their names (only names that passed the check), sizes and hashes. The plugin runs under your account, so
+  they may hold anything it could read, paths of this machine among them: the harness does not mask what is in them.
+  Keep them out of repositories, like the work files ([INTEGRATING.md](INTEGRATING.md)).
+- **Outcomes.** A collection problem is INCOMPLETE. It never turns a FAIL into anything else.
 
 ## Outcomes never lie in your favour
 
@@ -218,14 +280,15 @@ REAPER never sees the file itself:
 - `NewRun` refuses a file at another rate than the render or with more channels than it, for the kinds of extensions
   too: nothing is resampled or mixed down without being said.
 
-[Kept renders](CONFIG.md#keep) are the only files a run leaves in `-ResultDir` besides its result file and `work/`:
+[Kept renders](CONFIG.md#keep) and the files collected from a [probe directory](CONFIG.md#probes) are the only files a
+run leaves in `-ResultDir` besides its result file and `work/`:
 
 - they go to `<ResultDir>/renders/<run stamp>/`, which must be under `-ResultDir` after expanding links and junctions
   before anything is made in it, and so must each file's place; a real path that cannot be read (links in a circle) is
   refused the same way. When the directory is refused nothing of the run is kept; when a place is, that file stays in
   the work directory;
-- the first kept scenario claims that directory by creating its manifest, which must not be there yet: a run started in
-  the same second finds it and keeps nothing;
+- the first scenario that keeps or collects claims that directory by creating its manifest, which must not be there
+  yet: a run started in the same second finds it and keeps nothing;
 - nothing is ever overwritten: a place that is taken leaves the file in the work directory;
 - the manifest is masked like a result file, and names a plugin binary like it, by bundle name and 12 hex digits of
   its hash; the hashes it gives in full are of data of the run (the kept files, the source files, the configuration,
@@ -385,6 +448,9 @@ any run.
 - A render asked to have a tail whose master or any stem does not have exactly the frames asked for is `INCOMPLETE`:
   nothing shows that the tail was rendered.
 - A residual that is only reported but could not be measured (no overlapping finite samples) is `INCOMPLETE`.
+- A render that asks for a probe directory and gets fewer files than `min` (default 1) is `INCOMPLETE`, and so is one
+  whose directory could not be looked at: replaced by a link or junction, more than 10000 entries, or a process of the
+  round still running.
 
 ## Scripts
 

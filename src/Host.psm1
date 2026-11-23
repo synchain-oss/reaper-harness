@@ -233,6 +233,7 @@ function Stop-HostRefuse([string]$Why) { throw [System.InvalidOperationException
 # be ended can be tested.
 # StartedList: a list of the caller; it gets one row (Pid, StartUtc) right after the start, so that the caller knows of
 # the process even when something later in here throws. Get-HarnessOwnProcessesLeft reads those rows.
+# Unset: environment variables removed from what the process inherits (Environment then sets its own).
 function Invoke-HarnessHost {
     param(
         [Parameter(Mandatory)][string]$ReaperExe,
@@ -248,7 +249,8 @@ function Invoke-HarnessHost {
         [scriptblock]$Sampler = $null,
         [scriptblock]$ModuleSampler = $null,
         [scriptblock]$Stopper = $null,
-        $StartedList = $null
+        $StartedList = $null,
+        [string[]]$Unset = @()
     )
     if (-not (Test-HarnessLockHeld -Lock $Lock -Name (Get-HarnessDefaultGuiLock))) { Stop-HostRefuse 'REAPER is only started while holding the default GUI lock: pass the object from Enter-HarnessLocks as -Lock' }
     $cfgArgs = @('-nosplash', '-newinst', '-cfgfile', (Get-HarnessCfgArgument))
@@ -261,6 +263,8 @@ function Invoke-HarnessHost {
     foreach ($element in ($cfgArgs + $ReaperArgs)) { $psi.ArgumentList.Add($element) }
     $psi.UseShellExecute = $false
     if ($WorkDir) { $psi.WorkingDirectory = $WorkDir }
+    # Unset: names taken out of the inherited environment; what this launch sets comes after, so it wins
+    foreach ($k in $Unset) { $null = $psi.Environment.Remove($k) }
     foreach ($k in $Environment.get_Keys()) { $psi.Environment[[string]$k] = [string]$Environment[$k] }
     $startedUtc = [DateTime]::UtcNow # taken before the start: files written by this launch are never older
     $proc = $Launcher ? (& $Launcher $psi) : [Diagnostics.Process]::Start($psi)
