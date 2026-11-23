@@ -440,7 +440,7 @@
             "$ref": "#/$defs/probeValue"
           },
           "minProperties": 1,
-          "description": "environment variables the plugin reads, each set to a path the harness makes, for the renders that ask for them (scenarios[].probe); names as report.env"
+          "description": "environment variables the plugin reads, each set to a path the harness makes, for the renders that ask for them (scenarios[].probe); names as report.env, with a longer deny list (docs/SAFETY.md)"
         }
       },
       "additionalProperties": false

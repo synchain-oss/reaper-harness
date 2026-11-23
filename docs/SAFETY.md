@@ -164,9 +164,7 @@ editor. What keeps that contained:
   what it loads (ReaScript's Python and Lua, Qt in a plugin), a plugin format or WebView2 read (`APPDATA`,
   `USERPROFILE`, `HOME`, `TEMP`, `TMPDIR`, `PATH`, anything starting `REAPER_`, `WEBVIEW2_`, `DOTNET_`, `COR_`, `VST3_`,
   `PYTHON`, `LUA_`, `QT_` and the like) are refused before REAPER starts, like the two-character names and lower case.
-  So are the families that make a runtime or a library load a file or take options: anything starting `SSL_`,
-  `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`, `PERL`, `RUBY`, `GIT_`, `CHROME`, `MSEDGE`, `REQUESTS_`, `HTTP`
-  (`HTTPS_` too), `NO_PROXY` or `ALL_PROXY`, the name `SSLKEYLOGFILE`, and any name ending in `_PROXY`;
+  This is the list of the released version; [probe variables](#probe-variables-and-collected-files) have a longer one;
 - the path is a new file in the work directory for every step, deleted before the start;
 - the file is what a plugin wrote, so it is read as untrusted: at most 64 KiB, strict JSON, only the declared numeric
   fields. Nothing else in it reaches a result or a log. The driver's copies of it are deleted before the step starts,
@@ -197,7 +195,13 @@ keeps that contained:
   configuration reaches an environment. What the file holds does come from the configuration directory, and a test
   build runs code of its own inside REAPER anyway: the deny list is defence in depth, not a boundary.
 - **The names** follow the rules of report variables ([above](#plugin-reports-and-windows)), and no two plugin
-  variables of a configuration share a name.
+  variables of a configuration share a name. Their deny list is longer: the families that make a runtime or a library
+  load a file or take options are refused too, anything starting `SSL_`, `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`,
+  `PERL`, `RUBY`, `GIT_`, `CHROME`, `MSEDGE`, `REQUESTS_`, `HTTP` (`HTTPS_` too), `NO_PROXY` or `ALL_PROXY`, the name
+  `SSLKEYLOGFILE`, and any name ending in `_PROXY`. They matter where the content the value leads to comes from the
+  configuration: a probe file variable gets a copy of a file of the configuration directory, which could be a CA
+  bundle or a module path. A report variable's value is the path of a file the plugin itself writes, so keeping the
+  released list for it gives up nothing, and keeps released configurations valid.
 - **Which launch.** They are set for the REAPER of the launch that renders a scenario that asks for them (`probe`), and
   nowhere else: not in the harness's own process, not for the learn launch, a reference, a negative case or another
   kind. They ride on the existing guarded launch: there is no new way to start REAPER, and the launch path, the locks,
@@ -208,7 +212,9 @@ keeps that contained:
   inherited as before.
 - **The runtime check.** Extension code is PowerShell in the harness's own process, so a configuration is not the only
   caller. Every launch, whoever asks for it, checks each environment value it is to set before it takes anything: a
-  full path strictly inside the work directory, under a name that passes the deny list (the job variable aside).
+  full path strictly inside the work directory, under a name that passes the deny list (the job variable aside): the
+  list of report variables for a declared report name of the configuration (exactly that name), the longer list of
+  probe variables for every other name, a probe variable or a name an extension asks for.
   Otherwise REAPER is not started and the row is INCOMPLETE. The self-test checks which launch gets the variables,
   that inherited ones are taken out, and the runtime check.
 - **The licence reminder.** A launch it ended is started once more only when its probe directory is still empty

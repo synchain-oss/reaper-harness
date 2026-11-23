@@ -87,7 +87,7 @@ function New-HarnessSpec {
             params    = $params
             states    = (SMap $script:StatePattern (SRef stateSource) -Min 1 -Doc 'named plugin states taken from a project or a file')
             report    = (SRef report)
-            probe     = (SMap $probeName (SRef probeValue) -Min 1 -Doc 'environment variables the plugin reads, each set to a path the harness makes, for the renders that ask for them (scenarios[].probe); names as report.env')
+            probe     = (SMap $probeName (SRef probeValue) -Min 1 -Doc 'environment variables the plugin reads, each set to a path the harness makes, for the renders that ask for them (scenarios[].probe); names as report.env, with a longer deny list (docs/SAFETY.md)')
         })
     $defs.fx = SObj ([ordered]@{
             plugin = (SStr $script:IdPattern -Doc 'id from plugins')

@@ -757,7 +757,7 @@ plugin decides what to count. Audio is never in it.
 
 | key | |
 |---|---|
-| `env` | required: the variable that gets the file's path, `[A-Z][A-Z0-9_]{2,63}`. A name Windows, a runtime, REAPER or what it loads, a plugin format or WebView2 reads is refused ([SAFETY.md](SAFETY.md#plugin-reports-and-windows)); so is one that another plugin of the configuration uses |
+| `env` | required: the variable that gets the file's path, `[A-Z][A-Z0-9_]{2,63}`. A name Windows, a runtime, REAPER or what it loads, a plugin format or WebView2 reads is refused ([SAFETY.md](SAFETY.md#plugin-reports-and-windows); a [probe variable](#probes) has a longer list); so is one that another plugin of the configuration uses |
 | `fields` | required, 1 … 32 distinct names: the numeric fields to take from the file. Nothing else in it is read or recorded |
 | `pid` | the field that holds the id of the process that wrote the file: it must be the REAPER of this step, or the file is no evidence |
 | `periodMs` | how often the plugin writes while something changes, 10 … 10000, default 500 |
@@ -831,9 +831,12 @@ It never reads those files.
 | `{ "file": "<path>" }` | the full path of a copy of a file of the configuration directory, made in the work directory for each launch (`<id>.probe-<NAME><ext>`). The path is resolved like a [source file](#source-files): relative to the configuration file and inside its directory. The file is at most 1 MiB and hashed before REAPER starts; the copy must have that hash |
 | `{ "dir": true, "min": <n> }` | the full path of a new, empty directory in the work directory (`<id>.out`); what the plugin writes there is collected. `min`: how many files must be collected, 0 … 32, default 1. `dir` is only ever `true`. At most one per plugin |
 
-- Names: as `env` of a [report](#reports): `[A-Z][A-Z0-9_]{2,63}`, the same deny list
-  ([SAFETY.md](SAFETY.md#probe-variables-and-collected-files)), and unique among all report and probe names of the
-  configuration. VST3 plugins only: a JSFX reads no environment.
+- Names: as `env` of a [report](#reports): `[A-Z][A-Z0-9_]{2,63}`, the same deny list and more, and unique among all
+  report and probe names of the configuration. A probe variable may also not use the families that make a runtime or
+  a library load a file or take options: names starting `SSL_`, `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`, `PERL`,
+  `RUBY`, `GIT_`, `CHROME`, `MSEDGE`, `REQUESTS_`, `HTTP`, `NO_PROXY` or `ALL_PROXY`, `SSLKEYLOGFILE`, and any name
+  ending in `_PROXY`. A report's `env` may: [SAFETY.md](SAFETY.md#probe-variables-and-collected-files) says why. VST3
+  plugins only: a JSFX reads no environment.
 - What the plugin sees: a full path, without quotes, that can hold any character the result directory does (spaces,
   non-ASCII), so read the variable as Unicode (`_wgetenv`, `GetEnvironmentVariableW`). The copy is not read-only, but a
   copy that changed during the launch makes the row INCOMPLETE (`the probe input <NAME> changed during the launch`), and

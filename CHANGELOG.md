@@ -21,11 +21,12 @@ stays backward compatible or raises that number, and the entry of that version s
   refuses, before REAPER starts, an environment value that is not a path inside the work directory or a name on the
   deny list, whoever asks for it (an extension too). A variable the configuration does not declare is inherited as
   before.
-- The deny list of report and probe names takes in the families that make a runtime or a library load a file or take
-  options: names starting `SSL_`, `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`, `PERL`, `RUBY`, `GIT_`, `CHROME`,
-  `MSEDGE`, `REQUESTS_`, `HTTP` (`HTTPS_` too), `NO_PROXY` or `ALL_PROXY`, `SSLKEYLOGFILE`, and any name ending in
-  `_PROXY`.
-  A `report.env` in one of them, accepted before, is now a usage error: rename it.
+- Probe variable names have a longer deny list than report names: the families that make a runtime or a library load
+  a file or take options are refused too, names starting `SSL_`, `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`, `PERL`,
+  `RUBY`, `GIT_`, `CHROME`, `MSEDGE`, `REQUESTS_`, `HTTP` (`HTTPS_` too), `NO_PROXY` or `ALL_PROXY`, `SSLKEYLOGFILE`,
+  and any name ending in `_PROXY`. At launch they apply to every name that is not a declared report name of the
+  configuration (a probe variable, a name an extension asks for). `report.env` keeps the released list, so released
+  configurations stay valid.
 - A launch the evaluation licence reminder ended and that is not started again says why in the reason of its row:
   `; not retried: <file> of the first launch could not be deleted`, or `; not retried: the first launch wrote into
   <id>.out` (a probe directory, which a retry keeps and which must still be empty).
