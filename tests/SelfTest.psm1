@@ -3552,6 +3552,22 @@ function Get-ProbeCases([string]$Tmp, [string]$RepoRoot) {
     try { $r16 = & $collect $m16 'p16' } finally { $held.Dispose() }
     & $add "probe collection: a file held open (tried again three times) stays where it is and the row is INCOMPLETE ($($r16.Got.Detail))" $true (
         $r16.Got.Status -ceq 'INCOMPLETE' -and $r16.Got.Detail -clike '*final.json could not be moved there*' -and (Test-Path -LiteralPath (Join-Path $m16.Out 'final.json')) -and $r16.Got.Facts.collected -eq 1 -and $r16.Got.Facts.left -eq 1)
+    # A file another program holds for a moment (a scanner): a retry moves it. The holder says when it has the file open
+    $m16b = & $made 'w16b'
+    & $write $m16b.Out @('final.json')
+    $heldMark = Join-Path $root 'w16b-held'
+    $holdPsi = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    foreach ($part in '-NoProfile', '-NonInteractive', '-Command', '$h = [IO.File]::Open($env:HOLD_FILE, ''Open'', ''Read'', ''None''); [IO.File]::WriteAllText($env:HOLD_MARK, ''x''); Start-Sleep -Milliseconds 150; $h.Dispose()') { $holdPsi.ArgumentList.Add($part) }
+    $holdPsi.UseShellExecute = $false; $holdPsi.CreateNoWindow = $true
+    $holdPsi.Environment['HOLD_FILE'] = Join-Path $m16b.Out 'final.json'; $holdPsi.Environment['HOLD_MARK'] = $heldMark
+    $holdProc = [Diagnostics.Process]::Start($holdPsi)
+    $holdUntil = [datetime]::UtcNow.AddSeconds(20)
+    while (-not (Test-Path -LiteralPath $heldMark) -and -not $holdProc.HasExited -and [datetime]::UtcNow -lt $holdUntil) { Start-Sleep -Milliseconds 10 }
+    $wasHeld = Test-Path -LiteralPath $heldMark
+    $r16b = & $collect $m16b 'p16b'
+    $null = $holdProc.WaitForExit(20000)
+    & $add "probe collection: a file another program holds for a moment is moved on a retry ($($r16b.Got.Status): $($r16b.Got.Detail))" $false (
+        $wasHeld -and $r16b.Got.Status -ceq 'PASS' -and $r16b.Got.Facts.collected -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $m16b.Out 'final.json')))
     $m17 = & $made 'w17'
     & $write $m17.Out @('final.json')
     [IO.File]::WriteAllText((Join-Path $root 'w17/take1.probe-EXAMPLE_PROBE_SCRIPT.json'), '{"gain":0}')
