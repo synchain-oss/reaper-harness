@@ -6,6 +6,27 @@ stays backward compatible or raises that number, and the entry of that version s
 
 ## Unreleased
 
+- `probe` on a VST3 plugin declares environment variables of a test build whose values are paths the harness makes
+  for one render: `{ "file": "<path>" }` gets a copy of a file of the configuration directory (at most 1 MiB, hashed
+  before REAPER starts and copied for each launch), `{ "dir": true }` a new empty directory in the work directory.
+  `probe` on a `render` scenario (`true`, or overrides; a variant may override the scenario's) sets them for that
+  scenario's own render only; afterwards the files the plugin wrote into the directory are moved to
+  `renders/<run stamp>/run<round>/<id>.out/` with or without `keep`: the top level only, names of letters, digits,
+  `.`, `_` and `-`, at most 32 files, 4 MiB each and 16 MiB in all, at least `min` (default 1), never following a
+  link. The harness never reads them. The detail adds `; probe: ...`, the row has `facts.probe` (names, sizes and
+  hashes, the pid of the REAPER that rendered) and a kept render's manifest line has `probe`; a collection problem is
+  INCOMPLETE. The example `plugin-probe` shows it.
+- Two hardenings of every launch: each takes the declared report and probe names of the configuration out of the
+  environment it inherits (unless it sets them), so a variable left in your shell reaches no REAPER; and each
+  refuses, before REAPER starts, an environment value that is not a path inside the work directory or a name on the
+  deny list, whoever asks for it (an extension too). A variable the configuration does not declare is inherited as
+  before.
+- The deny list of report and probe names takes in the families that make a runtime or a library load a file or take
+  options: names starting `SSL_`, `OPENSSL_`, `CURL_`, `NODE_`, `JAVA`, `JDK_`, `PERL`, `RUBY`, `GIT_`, `CHROME`,
+  `MSEDGE`, `REQUESTS_`, `HTTP`, `HTTPS_`, `NO_PROXY` or `ALL_PROXY`, `SSLKEYLOGFILE`, and any name ending in `_PROXY`.
+  A `report.env` in one of them, accepted before, is now a usage error: rename it.
+- Configurations and rows without `probe` are as before, except that no launch inherits the declared report and probe
+  names; a manifest line has `probe: null`. Configuration, result file and manifest stay `schema: 1`.
 - `maxDiffDb: "report"` on a `render` scenario or on a stem measures the residual against the reference (dry, repeat
   or a compare variant) and writes it down instead of judging it: the line ends `; reported: ...`, the row has
   `facts.comparison` (whether the two are identical, the lag it was measured at and the best lag, the residual peak in

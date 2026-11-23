@@ -58,6 +58,9 @@ A plugin has exactly one of `bundle` and `jsfx`.
 - `params`: parameter values every FX of this plugin gets (an FX's own `params` go on top), see [layouts](#layouts).
 - `states`: named plugin states, see [states](#states). VST3 plugins only.
 - `report`: counts the plugin writes about itself to a small file, see [reports](#reports).
+- `probe`: environment variables of a test build whose values are paths the harness makes for one render: a copy of a
+  file for the plugin to read, or a new directory for it to write into, whose files are collected. See
+  [probes](#probes). VST3 plugins only.
 
 ### states
 
@@ -341,6 +344,7 @@ Renders the layout and compares the render with a reference.
 | `mono` | render one channel instead of two |
 | `bypass` | `true` (every FX) or a list of plugin ids rendered bypassed |
 | `report` | what the plugins report about this render, see [reports](#reports) |
+| `probe` | `true` or overrides: the layout's plugin gets its [probe variables](#probes) for this render, and what it writes there is collected |
 | `compare` | `"dry"` (default): the same layout without any FX; `"repeat"`: the same render twice; `"none"`: no reference, the render is judged on its own; or a variant `{ "layout", "block", "mode", "bypass" }`, where the fields given replace the scenario's own |
 | `maxDiffDb` | allowed residual in dBFS at the expected lag, -400 … 24 (a mix of several tracks can differ by more than full scale); `"report"`: the residual is measured and written down, never judged ([reported residuals](#reported-residuals)); absent means the renders must be bit-identical |
 | `lag` | the expected lag in samples, test render later than the reference is positive; default 0 |
@@ -488,6 +492,7 @@ the default `learnBatchSize` that is the one row `learn`; with `learnBatchSize` 
 | `id` | required; `[a-z0-9][a-z0-9-]{0,39}`, unique within the scenario |
 | `fx` | plugin id → `{ "state": "<name>", "params": { ... } }` with at least one of the two (`params` as in [layouts](#layouts)); the plugin must be used in the scenario's layout |
 | `bypass` | `true` (every FX) or a list of plugin ids of the layout, rendered bypassed |
+| `probe` | overrides of the scenario's [probe variables](#probes), on top of the scenario's; the scenario needs `probe` |
 
 - Each variant is a scenario of its own: `<id>-<variant id>`, after a [matrix](#matrix)
   `<id>-<matrix suffix>-<variant id>` (the legs of the matrix outside, the variants inside, in the order written).
@@ -552,6 +557,10 @@ hashes of two renders differ even when their audio is identical, because REAPER 
 file; `comparison.master.identical` says whether the samples are. A record of whether a plugin is deterministic needs
 `keep` to be in the manifest; without it the row's `facts.comparison` has the same numbers. A repeat whose two renders
 differ keeps two files.
+
+With [probe](#probes) the line has `probe`: the variables and the files collected, in `run<round>/<id>.out/`. The
+files are collected with or without `keep`; without it there is no line, the row lists them (`facts.probe`) and the WAV
+stays a work file.
 
 A kept file is never overwritten: when its place is taken (by another scenario whose id and stem name give the same
 file name, or by a run started in the same second, which finds the manifest there and keeps nothing), the file stays
@@ -794,10 +803,78 @@ compared as for any render, and the detail adds ` | report <plugin>.<field>=<end
 action returns when the file is written, no deferred script runs meanwhile, and the realtime count did not move between
 the readings of an `offline` or `1x` render with the preference on.
 
+### probes
+
+A test build of a plugin can read environment variables of its own: a file to read (a script, a setting) and a
+directory to write into (what it saw, step by step). `probe` declares such variables. For the render of a scenario
+that asks for them, the harness gives each a value it made itself, and afterwards it collects what the plugin wrote.
+It never reads those files.
+
+```json
+"plugins": {
+  "tb": { "bundle": "My Probe Test Build.vst3",
+          "probe": { "EXAMPLE_PROBE_SCRIPT": { "file": "probe/take1.json" }, "EXAMPLE_PROBE_OUT": { "dir": true } } }
+},
+"layouts": { "take1": { "tracks": [ { "name": "Take", "source": true, "file": "sources/take1.wav", "fx": [ { "plugin": "tb" } ] } ] } },
+"scenarios": [
+  { "id": "take1", "kind": "render", "layout": "take1", "compare": "none", "notSilent": true, "probe": true,
+    "variants": [ { "id": "as-written" },
+                  { "id": "shifted", "probe": { "EXAMPLE_PROBE_SCRIPT": { "file": "probe/take1-shifted.json" } } } ] }
+]
+```
+
+`tb`, `My Probe Test Build.vst3`, the three names and the files stand for a test build of yours and its own files;
+[examples/plugin-probe](../examples/plugin-probe/reaper-harness.json) is a whole configuration.
+
+| value | the variable gets |
+|---|---|
+| `{ "file": "<path>" }` | the full path of a copy of a file of the configuration directory, made in the work directory for each launch (`<id>.probe-<NAME><ext>`). The path is resolved like a [source file](#source-files): relative to the configuration file and inside its directory. The file is at most 1 MiB and hashed before REAPER starts; the copy must have that hash |
+| `{ "dir": true, "min": <n> }` | the full path of a new, empty directory in the work directory (`<id>.out`); what the plugin writes there is collected. `min`: how many files must be collected, 0 … 32, default 1. `dir` is only ever `true`. At most one per plugin |
+
+- Names: as `env` of a [report](#reports): `[A-Z][A-Z0-9_]{2,63}`, the same deny list
+  ([SAFETY.md](SAFETY.md#probe-variables-and-collected-files)), and unique among all report and probe names of the
+  configuration. VST3 plugins only: a JSFX reads no environment.
+- What the plugin sees: a full path, without quotes, that can hold any character the result directory does (spaces,
+  non-ASCII), so read the variable as Unicode (`_wgetenv`, `GetEnvironmentVariableW`). The copy is not read-only, but a
+  copy that changed during the launch makes the row INCOMPLETE (`the probe input <NAME> changed during the launch`).
+  The directory exists, is empty, and only this launch was told its path. Its path is at most 140 characters, so that
+  a name of 100 still fits in 240; with a result directory deeper than that, the scenario is INCOMPLETE before REAPER
+  starts (`the probe directory path is too long for a plugin to write into it`).
+- `probe` on a `render` scenario: `true` (the variables as the plugin declares them) or overrides: name →
+  `{ "file": ... }` or `{ "dir": true, "min": <n> }` of a declared variable of that kind (`min` left out keeps the
+  plugin's). A [variant](#variants) may give overrides on top of the scenario's; the scenario needs `probe`. Another
+  recording is another layout: a variant can change the script, not the recording.
+- The layout uses the plugin exactly once, and has at most one `dir` variable. The scenario compares with `"none"` or
+  `"dry"`: a repeat or a compare variant would load the plugin again without its variables. `probe` on another kind,
+  in a negative case, on a layout without such a plugin, or naming a variable the plugin does not declare, is a usage
+  error before REAPER starts; so is a file that is not there, is a directory, leaves the configuration directory or is
+  over 1 MiB.
+- Only the scenario's own render gets the variables: not the learn launch, a reference, a negative case, another kind
+  or a scenario of the same plugin without `probe`, even when they are set in your shell. Every launch takes the
+  declared report and probe names out of the environment it inherits, unless it sets them itself. A variable the
+  configuration does not declare is inherited as before.
+- Collection runs after the scenario's launches have ended, whatever the verdict (a render that produced no file
+  included). It looks at the top level of the directory only. A file whose name is letters, digits, `.`, `_` and `-`
+  (at most 100, starting with a letter or digit, not ending with `.`, not a device name such as `CON`) and
+  that is at most 4 MiB is moved to `renders/<run stamp>/run<round>/<id>.out/` of the result directory, with or without
+  `keep`, up to 32 files and 16 MiB in all, in name order. A name ending in `.tmp` is moved and marked `temporary`; it
+  does not count for `min`.
+- A subdirectory, a link or junction (never followed), a name that is not allowed, a file over a limit, fewer than
+  `min` files, a directory replaced by a link or junction, or more than 10000 entries make the row INCOMPLETE with the
+  reason. What was not moved stays in `<id>.out` in the work directory, which a round that is not green keeps; a green
+  round removes the emptied directories and the copies.
+- The detail adds `; probe: <n> files collected, <bytes> bytes` (`, <t> temporary` when there are any, and
+  `; not collected: <reasons>`); the row's facts have `probe` ([RESULTS.md](RESULTS.md#a-row-scenarios)), and with
+  [keep](#keep) so has its manifest line.
+
+For a probe scenario PASS says that the render passed its audio criteria and that at least `min` files were
+collected. The harness never reads them: whether the plugin's own script ran correctly is for you to read in them.
+`min: 0` accepts a plugin that wrote nothing at all, so use it with care.
+
 ## negative cases
 
-A negative case is a scenario that must come out a certain way: the same fields as its kind (no `matrix`, `keep`
-or `variants`), plus
+A negative case is a scenario that must come out a certain way: the same fields as its kind (no `matrix`, `keep`,
+`variants` or `probe`), plus
 
 | key | |
 |---|---|
