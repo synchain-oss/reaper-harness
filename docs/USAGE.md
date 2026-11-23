@@ -138,6 +138,38 @@ While a run is going on, do not use REAPER on the same machine: the run refuses 
 `reaper.exe`, but cannot stop you from starting one in the middle. Create one of your skip markers first if you
 need to.
 
+The work directory of a round holds every render of the round until the round ends: about the scenarios x their
+renders (two for a `repeat` or a compare variant, one for `dry` and `none`, plus one dry reference per layout and
+setting) x the size of one render. A [tail](CONFIG.md#tails) of 60 s adds about 23 MB to each render of stereo float32
+at 48 kHz.
+
+### Is the plugin deterministic?
+
+A small scenario of its own renders the same project twice and says whether the two renders are bit-identical,
+without failing when they are not:
+
+```json
+{ "id": "verb-repeat", "kind": "render", "layout": "voice", "compare": "repeat", "maxDiffDb": "report", "notSilent": true, "keep": true }
+```
+
+`notSilent` matters here: two silent renders (a source that did not play, a plugin that muted, an FX that did not load)
+are bit-identical too and would read as a deterministic plugin; with it they FAIL. Otherwise the row passes either
+way. Its line ends `; reported: bit-identical`, or `; reported: not bit-identical, residual ...` with the residual
+peak, its RMS against the reference, where it is largest and where the first difference is;
+`facts.comparison` of the row has the numbers ([RESULTS.md](RESULTS.md#a-row-scenarios)), and with `keep` the
+manifest line has them too, with both renders when they differ ([CONFIG.md](CONFIG.md#keep)). One identical pair says
+something about that pair only: a plugin that draws random numbers can render identically once and differently the next
+time (Airwindows Consolidated at its default state was identical in 4 of 13 pairs, [validation
+record](validation/2026-11-22-repeat-report-tail.md#2-a-repeat-that-reports-airwindows-consolidated-at-its-default-state)),
+so render the pair more than once, in scenarios of their own or in more runs, before calling a plugin deterministic.
+Keep it out of a scenario with many [variants](CONFIG.md#variants): each variant renders twice. The comparer looks for the best lag by
+going over the two files 2 x `limits.lagSearch` + 1 times (129 times at the default 64), which takes time on long
+files; the residual itself is measured at the expected lag, so `limits.lagSearch` 0 gives the same residual sooner,
+its best lag then reading 0. Measured on two renders of 180 s, stereo, float32, 48 kHz: the comparison took about 28 s at
+the default and 1.5 s with `lagSearch` 0 ([validation record](validation/2026-11-22-repeat-report-tail.md)). The example
+[file-source-variants](../examples/file-source-variants/reaper-harness.json) has such a scenario, next to five
+variants of a plugin compared with dry and a render with a tail.
+
 ## Exit codes
 
 | code | |

@@ -193,6 +193,13 @@ REAPER resource directory looks at the scratch profile, not at the real one, so 
 - Keeping a render never improves its outcome: a file that could not be kept or read makes the row INCOMPLETE, a FAIL
   stays FAIL, and a render with NaN or Inf is a FAIL that is kept all the same
   ([below](#source-files-and-kept-renders)).
+- `maxDiffDb: "report"` is the only way a difference between two renders is never judged: every other difference
+  that stays PASS is one the configuration allows in numbers (`maxDiffDb`, `lag`, the level criteria). The word is
+  written in the configuration, which takes only that exact word (any other text is a usage error; in
+  criteria an extension builds by hand, any other text is bound as a number, and one that is no number makes the
+  scenario INCOMPLETE), and the line and the row say `reported`. Everything else is judged as before: readable,
+  comparable, finite, the same frame count, peak, silence and levels. A residual that could not be measured is
+  INCOMPLETE.
 
 ## Source files and kept renders
 
@@ -223,6 +230,8 @@ REAPER never sees the file itself:
 - the manifest is masked like a result file, and names a plugin binary like it, by bundle name and 12 hex digits of
   its hash; the hashes it gives in full are of data of the run (the kept files, the source files, the configuration,
   the plugin block as the run wrote it into the project), never of an installed binary;
+- the first render of a repeat is kept only when its residual is reported and the two renders differ, or when
+  `keepFirst` asks for it, next to the second and under the same rules; otherwise it stays a work file;
 - nothing removes these files: delete them when you are done with them.
 
 The version of the harness in the result and the manifest is read from its own `.git` as files: `HEAD`, for a worktree
@@ -373,6 +382,9 @@ any run.
   learned (its name, its binary and class ID, or its JSFX path) or reports no parameter index, a swept value was not
   read back as a number from 0 to 1 with its display text, or a parameter's value is not from 0 to 1, its display
   text is missing or its name is not exact. With no plugin to list the `params` row is `INCOMPLETE` too.
+- A render asked to have a tail whose master or any stem does not have exactly the frames asked for is `INCOMPLETE`:
+  nothing shows that the tail was rendered.
+- A residual that is only reported but could not be measured (no overlapping finite samples) is `INCOMPLETE`.
 
 ## Scripts
 

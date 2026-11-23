@@ -33,6 +33,12 @@
 #       (the first instance to sweep is not added), SweepOtherName (the instances to sweep show another name),
 #       SweepOtherBinary (their fx_ident names another binary), SweepError (the sweep stops with an error after its
 #       first instance)
+#       Renders: the renders since Set-FakeReaper are counted (-renderproject and the driver's render step alike).
+#       RenderSkip (n): the n-th render writes no file. TailLost: no item plays past the end of its file, as if REAPER
+#       ignored the longer item. Drift = @{ Plugin (bundle or JSFX ident); Step; Frame }: after that plugin's FX the
+#       sample at Frame of every channel is set to Step x the number of this render, so two renders differ there only
+#   An item longer than its file plays the file again from its start (REAPER's "loop source"), unless it has LOOP 0;
+#   then the rest of the item is silent
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
 #   ConvertFrom-FakeLua <text>                        reads a job file written by ConvertTo-HarnessLuaTable
 
@@ -51,12 +57,14 @@ public static class FakeMix {
         if (channels == 2) { for (int i = 0; i + 1 < n; i += 2) { dst[i] += gl * src[i]; dst[i + 1] += gr * src[i + 1]; } }
         else { for (int i = 0; i < n; i++) dst[i] += gl * src[i]; }
     }
-    // The first frames of a source on a track of ch channels, cut or padded with zeros; a source of one channel plays on
-    // every channel (what REAPER does with it is in the validation record, not here)
-    public static double[] Fit(double[] src, int srcCh, long frames, int ch) {
+    // The first frames of a source on a track of ch channels, cut, or longer: looped (the source again from its start)
+    // or padded with zeros; a source of one channel plays on every channel (what REAPER does with it is in the
+    // validation record, not here)
+    public static double[] Fit(double[] src, int srcCh, long frames, int ch, bool loop) {
         var y = new double[frames * ch];
         long have = src.Length / srcCh;
-        for (long f = 0; f < frames && f < have; f++) for (int c = 0; c < ch; c++) y[f * ch + c] = src[f * srcCh + Math.Min(c, srcCh - 1)];
+        if (have == 0) return y;
+        for (long f = 0; f < frames && (loop || f < have); f++) for (int c = 0; c < ch; c++) y[f * ch + c] = src[(f % have) * srcCh + Math.Min(c, srcCh - 1)];
         return y;
     }
     public static double[] Scale(double[] x, double g) { var y = new double[x.Length]; for (int i = 0; i < x.Length; i++) y[i] = g * x[i]; return y; }
@@ -79,7 +87,8 @@ $script:ReportParam = 'Report delay as PDC'
 
 $script:LearnLaunches = 0
 $script:JobBinaries = $null # the binaries the learn step of the last launch added (OwnModules)
-function Set-FakeReaper([hashtable]$Spec) { $script:Spec = $Spec; $script:LearnLaunches = 0 }
+$script:Renders = 0
+function Set-FakeReaper([hashtable]$Spec) { $script:Spec = $Spec; $script:LearnLaunches = 0; $script:Renders = 0 }
 function Get-FakeReaperLauncher { { param($psi) Invoke-FakeLaunch $psi } }
 function Get-FakeModuleSampler {
     {
@@ -231,7 +240,7 @@ function Get-FakePdc($fx) { (Test-FakeReportsPdc $fx) ? (Get-FakeDelay $fx) : 0 
 
 # ---- projects ----
 # Tracks of a project: Name, Volume, Pan, Mute, Isbus, Sel, MainSend, Recv (Src, Mode, Vol), Source (wav path or ''), Length
-# (of its item, $null without one),
+# (of its item, $null without one), Loop (of its item: on unless LOOP 0),
 # Fx (Kind, Name, Ident, Header, Bypassed, Params name -> value).
 function Read-FakeProject([string]$Text) {
     $tracks = [Collections.Generic.List[object]]::new()
@@ -255,7 +264,7 @@ function Read-FakeProject([string]$Text) {
             continue
         }
         if ($s -eq '<TRACK') {
-            $cur = [pscustomobject]@{ Name = ''; Volume = 1.0; Pan = 0.0; Mute = $false; Isbus = '0 0'; Sel = $false; MainSend = $true; Recv = [Collections.Generic.List[object]]::new(); Source = ''; Length = $null; Fx = [Collections.Generic.List[object]]::new() }
+            $cur = [pscustomobject]@{ Name = ''; Volume = 1.0; Pan = 0.0; Mute = $false; Isbus = '0 0'; Sel = $false; MainSend = $true; Recv = [Collections.Generic.List[object]]::new(); Source = ''; Length = $null; Loop = $true; Fx = [Collections.Generic.List[object]]::new() }
             $tracks.Add($cur); continue
         }
         if ($null -eq $cur) { continue }
@@ -268,6 +277,7 @@ function Read-FakeProject([string]$Text) {
         elseif ($s -match '^AUXRECV (\d+) (\d+) (\S+)') { $cur.Recv.Add([pscustomobject]@{ Src = [int]$Matches[1]; Mode = [int]$Matches[2]; Vol = [double]::Parse($Matches[3], $script:Inv) }) }
         elseif ($s -match '^FILE "(.*)"$') { $cur.Source = $Matches[1] }
         elseif ($s -match '^LENGTH (\S+)$') { $cur.Length = [double]::Parse($Matches[1], $script:Inv) }
+        elseif ($s -match '^LOOP (\d)$') { $cur.Loop = $Matches[1] -ne '0' }
         elseif ($s -match '^BYPASS (\d)') { $bypassNext = $Matches[1] -ne '0' }
         elseif ($s -match '^<(VST|JS) (.*)$') {
             $kind = $Matches[1]
@@ -299,17 +309,20 @@ function Get-FakeMix([string]$Text) {
         elseif ($flag[0] -eq '2') { for ($k = 0; $k -lt -[int]$flag[1]; $k++) { $stack.RemoveAt($stack.Count - 1) } }
     }
     # An item plays floor(LENGTH x rate) frames of its file: a length that falls short of the last frame loses it
+    $faults = $script:Spec ?? @{}
     $sources = @{}
     $len = 0
     foreach ($t in $tracks) {
         if (-not $t.Source) { continue }
-        $key = "$($t.Source)|$($t.Length)"
+        $key = "$($t.Source)|$($t.Length)|$($t.Loop)"
         if ($sources.ContainsKey($key)) { continue }
         $w = Read-HarnessWav $t.Source
         $frames = ($null -ne $t.Length) ? [long][Math]::Floor($t.Length * $rate) : $w.Frames
-        $sources[$key] = [FakeMix]::Fit($w.Samples, $w.Channels, $frames, $channels)
+        if ($faults['TailLost']) { $frames = [Math]::Min($frames, $w.Frames) }
+        $sources[$key] = [FakeMix]::Fit($w.Samples, $w.Channels, $frames, $channels, [bool]$t.Loop)
         $len = [Math]::Max($len, $sources[$key].Length)
     }
+    $drift = $faults['Drift']
     $memo = @{}
     $busy = @{}
     $get = $null
@@ -321,7 +334,7 @@ function Get-FakeMix([string]$Text) {
             $busy[$i] = $true
             $t = $tracks[$i]
             $pre = [double[]]::new($len)
-            if ($t.Source) { [FakeMix]::Add($pre, $sources["$($t.Source)|$($t.Length)"], 1.0, 1.0, $channels) }
+            if ($t.Source) { [FakeMix]::Add($pre, $sources["$($t.Source)|$($t.Length)|$($t.Loop)"], 1.0, 1.0, $channels) }
             for ($j = 0; $j -lt $n; $j++) { if ($parent[$j] -eq $i -and $tracks[$j].MainSend) { [FakeMix]::Add($pre, (& $get $j 'out'), 1.0, 1.0, $channels) } }
             foreach ($r in $t.Recv) {
                 if ($tracks[$r.Src].Mute) { continue } # mute silences every send of the track, pre-fader and pre-FX too
@@ -334,6 +347,12 @@ function Get-FakeMix([string]$Text) {
                 $trim = Get-FakeParamValue $fx 'Trim'
                 if ($null -ne $trim) { $post = [FakeMix]::Scale($post, 2 * $trim) }
                 if (-not (Test-FakeReportsPdc $fx) -and (Get-FakeDelay $fx)) { $post = [FakeMix]::Delay($post, (Get-FakeDelay $fx), $channels) }
+                $drifts = $drift -and (($fx.Kind -eq 'JS') ? ($fx.Ident -ceq $drift.Plugin) : ($script:Spec.Plugins.ContainsKey($fx.Name) -and $script:Spec.Plugins[$fx.Name].Bundle -ceq $drift.Plugin))
+                if ($drifts) {
+                    # A copy: $post may still be $pre, the tap before the FX
+                    $post = [double[]]$post.Clone()
+                    for ($ci = 0; $ci -lt $channels; $ci++) { $slot = [long]$drift.Frame * $channels + $ci; if ($slot -lt $post.Length) { $post[$slot] = $script:Renders * [double]$drift.Step } }
+                }
             }
             $out = [double[]]::new($len)
             if (-not $t.Mute) {
@@ -356,6 +375,8 @@ function Get-FakeMix([string]$Text) {
 }
 
 function Invoke-FakeRender([string]$Project) {
+    $script:Renders++
+    if (($script:Spec ?? @{})['RenderSkip'] -eq $script:Renders) { return } # REAPER rendered nothing
     $projectText = [IO.File]::ReadAllText($Project)
     $dir = [regex]::Match($projectText, '(?m)^\s*RENDER_FILE "(.*)"').Groups[1].Value
     $pattern = [regex]::Match($projectText, '(?m)^\s*RENDER_PATTERN "(.*)"').Groups[1].Value

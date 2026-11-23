@@ -240,7 +240,8 @@ The item of a file track starts at 0 and is as long as the file: frames / rate, 
 short of the last frame (when frames / rate times the rate falls short of the frames in floating point, the next
 larger number is written). The items of the other source tracks keep the length of the test signal
 (`signal.seconds`); a project renders as long as its longest item. A file is played as it is: the shift and the volume
-change of the built-in negative cases apply to their own internal layout only.
+change of the built-in negative cases apply to their own internal layout only. With a [tail](#tails) every item is
+longer by the tail and plays its source once.
 
 `render`, `device` and `savereopen` play the file wherever they would play the test signal, the dry reference
 included. `transport` places no items (what reaches the tested track comes through its input): a file in its layout is
@@ -341,7 +342,7 @@ Renders the layout and compares the render with a reference.
 | `bypass` | `true` (every FX) or a list of plugin ids rendered bypassed |
 | `report` | what the plugins report about this render, see [reports](#reports) |
 | `compare` | `"dry"` (default): the same layout without any FX; `"repeat"`: the same render twice; `"none"`: no reference, the render is judged on its own; or a variant `{ "layout", "block", "mode", "bypass" }`, where the fields given replace the scenario's own |
-| `maxDiffDb` | allowed residual in dBFS at the expected lag, -400 … 24 (a mix of several tracks can differ by more than full scale); absent means the renders must be bit-identical |
+| `maxDiffDb` | allowed residual in dBFS at the expected lag, -400 … 24 (a mix of several tracks can differ by more than full scale); `"report"`: the residual is measured and written down, never judged ([reported residuals](#reported-residuals)); absent means the renders must be bit-identical |
 | `lag` | the expected lag in samples, test render later than the reference is positive; default 0 |
 | `peakMaxDb` | the test render must not peak above this |
 | `notSilent` | the test render must peak above -120 dBFS |
@@ -350,6 +351,8 @@ Renders the layout and compares the render with a reference.
 | `rmsChangeDb` | channel → `[min, max]`: RMS of the test render minus RMS of the reference, per channel, in dB |
 | `stems` | tracks rendered as files of their own, see [stems](#stems) |
 | `keep` | `true`: keep the render and its stems under `renders/` of the result directory, see [keep](#keep) |
+| `keepFirst` | `true`: with `keep`, also keep the first render of a repeat whose residual is reported when the two are bit-identical; only allowed there, see [keep](#keep) |
+| `tailSeconds` | render this many seconds past the end of the longest source, 0 … 60 (default 0), see [tails](#tails) |
 | `variants` | the scenario once per variant, each with some plugins set otherwise, see [variants](#variants) |
 
 The pass criteria are fields of the scenario itself, not a nested object: in negative cases `expect` names the
@@ -361,7 +364,8 @@ pass on one. The verdict line always starts with the same facts, in this order:
 given (reference / test), `nan= inf=` when there are any, and `; failed: <reasons>` on a FAIL. Negative cases match
 that line with a regex.
 
-`maxDiffDb`, `lag` and `rmsChangeDb` need a reference; with `compare: "none"` they are usage errors.
+`maxDiffDb` (a number or `"report"`), `lag` and `rmsChangeDb` need a reference; with `compare: "none"` they are usage
+errors.
 
 Channel criteria: a channel is `L`, `R` or its number from 1. A channel the render does not have is a usage error
 (for example `R` of a `mono` render). The RMS of a channel is taken over its finite samples; NaN and Inf are
@@ -381,7 +385,9 @@ scenario's outcome is the worst of the master and the stems.
 - `compare: "reference"` (the default when the scenario has a reference) compares the stem with the same track's
   stem of the reference render (the dry layout, the first render, or the variant's layout, which must have the
   track); `"none"` judges it on its own.
-- A stem takes the scenario's `maxDiffDb`, `lag`, `peakMaxDb` and `notSilent` unless it gives its own. The channel
+- A stem takes the scenario's `maxDiffDb` (`"report"` too), `lag`, `peakMaxDb` and `notSilent` unless it gives its
+  own: a stem may report its residual while the master is judged by a number, or the other way round, and a stem with
+  `compare: "none"` that takes `"report"` is judged on its own. The channel
   criteria (`rmsDb`, `energyRatioDb`, `rmsChangeDb`) describe one signal's levels and balance, so a stem has only
   its own.
 - The stem file is named after the track, so a stem's track name may only use letters, digits, space and
@@ -396,6 +402,58 @@ fader and pan.
 
 There is no switch for bypassing an FX in the middle of a render; render two layouts (or the same layout with and
 without `bypass`) and compare them instead.
+
+### reported residuals
+
+`"maxDiffDb": "report"` (only this word, in lower case) measures the residual of a render against its reference and
+writes it down without judging it: the two may differ by any amount and at any best lag, and the row still passes.
+Everything else is judged as before: both renders readable, comparable and free of NaN and Inf, a render with frames,
+`peakMaxDb`, `notSilent` and the channel criteria. Two rules are added: the two renders must have the same number of
+frames (a FAIL otherwise: both come from the same project, so one of them is broken), and a residual that could not be
+measured (no overlapping finite samples) is INCOMPLETE. The verdict line goes on after its fixed facts with
+`; reported: bit-identical`, or with
+
+`; reported: not bit-identical, residual <x> dBFS (rms <y> dB against the reference) measured at lag <lag> (expected), best lag <b>, largest at <s> s, first difference at frame <n>`
+
+leaving out what could not be measured. The residual is measured at the expected lag (`lag`, 0 unless given). The best
+lag is the least-squares best lag within ±`limits.lagSearch`, only a diagnostic; it is also what `lag=` at the start of
+the line shows. The row's `facts.comparison` has the numbers, for the master and every stem compared with the
+reference ([RESULTS.md](RESULTS.md#a-row-scenarios)); with [keep](#keep) the manifest line has them too.
+
+It works with every reference: `compare: "repeat"` tells whether the plugin renders the same audio twice
+([USAGE.md](USAGE.md#is-the-plugin-deterministic)); `"dry"` or a compare variant tells how far the plugin takes the
+signal from the dry one or from the other variant, without a made-up limit. A repeat that reports cannot judge the
+[reports](#reports) of its plugins as well (a usage error): its first render would be made by `-renderproject` and the
+second by the driver's render step, and a difference between the two ways of rendering would read as a plugin that is
+not deterministic. A negative case may report its residual; it then cannot expect a FAIL for "not bit-identical",
+which is not judged.
+
+### tails
+
+`"tailSeconds": <0 ... 60>` on a `render` scenario renders that many seconds past the end of its longest source, so
+that a reverb or a delay is heard out in the file. The seconds become frames at the scenario's `sr` (half a frame
+rounds up), per leg of a [matrix](#matrix); a tail above 0 that is less than one frame is a usage error. Every item of
+the project is then longer by the tail, to the frame (the frames of its file, or of the test signal, plus the tail),
+and plays its source once (`LOOP 0`, whatever REAPER's preference to loop sources says), so the rest of the item is
+silence. The project, and so the render, is as long as the longest source plus the tail. The master and every stem
+must have exactly that many frames, or the row is INCOMPLETE (`the render <file> has <n> frames, not <m>: the tail was
+not rendered as asked`). The references (the dry render, the first render of a repeat, the compare variant) get the
+same tail; a dry reference with a tail is a render of its own, next to the one without.
+
+Latency a plugin reports is compensated as without a tail, and the tail holds what the plugin puts out after the source
+ends. A latency it does not report moves the end of the source into the tail, and a tail shorter than that latency
+loses the rest. The row's `facts.tail` gives the tail, the length the files were checked to have and the peak of the
+last 100 ms of the master and of each stem (`endPeakDb`: how far the tail decayed; only recorded, never judged). Only
+`render` scenarios and their negative cases have a tail; on other kinds `tailSeconds` is an unknown key.
+
+Measured on REAPER 7.82 (48 kHz, a 180 s stereo file, a tail of 3 s, the JSFX of the tool delaying by 8192 samples
+without reporting it): the master and the stem had exactly 8784000 frames, the end of the file (its last impulse, at its
+last frame) lay 8192 frames into the tail, and what followed was silence; with the effect bypassed the whole tail was
+exactly 0, so the items played their source once. The same held at the blocks 512, 2048 and 333 (none divides the
+length), for a mono file on the two-channel render, with the delay reported as latency (the tail then held nothing of the
+source), and in the render modes `offline`, `1x` and `online`, whose files held the same samples as the offline one. The
+JSFX leaves values of at most 1.5e-16 where its source is exactly 0, so its `endPeakDb` reads -316.478174 and not null
+([validation record](validation/2026-11-22-repeat-report-tail.md)).
 
 ### variants
 
@@ -469,15 +527,31 @@ a plugin that has latency or a tail when bypassed was not measured.
 
 `"keep": true` on a `render` scenario (on no other kind, and not in negative cases: usage errors) keeps what it
 rendered. After its verdict, whatever the verdict, its render moves out of the work directory to
-`<result directory>/renders/<run stamp>/run<round>/<id>.wav` and each stem to `<id>-stem-<track>.wav` next to it;
-the references (dry, first, compare variant) are not kept. A scenario of a matrix or with [variants](#variants)
-keeps each expanded scenario under its own id (`eq-gain-g025.wav`). The run stamp is the one of the work directories
-(`yyyyMMdd-HHmmss`), shared by all rounds of a run. Kept renders take room: 180 s of stereo float32 at 48 kHz are
-about 69 MB, so 200 kept variants of such a file are about 14 GB a round.
+`<result directory>/renders/<run stamp>/run<round>/<id>.wav` and each stem to `<id>-stem-<track>.wav` next to it; the
+references (dry, compare variant, and the first render of a repeat except as below) are not kept. A scenario of a
+matrix or with [variants](#variants) keeps each expanded scenario under its own id (`eq-gain-g025.wav`). The run stamp
+is the one of the work directories (`yyyyMMdd-HHmmss`), shared by all rounds of a run. Kept renders take room: 180 s
+of stereo float32 at 48 kHz are about 69 MB, so 200 kept variants of such a file are about 14 GB a round, and a
+[tail](#tails) of 60 s adds about 23 MB to each. Until a round ends, its work directory holds every render of the
+round as well: about the scenarios × their renders (two for a repeat or a compare variant, one for `dry` and `none`,
+plus one dry reference per layout and setting) × the size of one render. Nothing is deleted earlier than that: a green
+round removes them.
 
 Each kept scenario appends one line to `renders/<run stamp>/manifest.jsonl` as soon as it is done (the format is in
 [RESULTS.md](RESULTS.md#kept-renders)): what the files are, how they were rendered, what each source track played,
 and every FX with what REAPER read back. A render that failed (no file) still gets its line, with nothing moved.
+
+A repeat whose residual is [reported](#reported-residuals) (`compare: "repeat"`, `maxDiffDb: "report"` on the scenario
+or on a stem compared with the reference) keeps its first render too when the master or a stem compared with the
+reference is not bit-identical: `<id>-first.wav`, and `<id>-first-stem-<track>.wav` for those stems, next to the
+second. `keepFirst: true` keeps it also when the two are identical. The key itself, `false` too, needs `keep`,
+`compare: "repeat"` and a reported residual: anywhere else it is a usage error, as `lag` is without a reference.
+Otherwise the first render is a work file like the other references. The line describes it in `comparison.first` (null
+when it is not to be kept; a file of it that could not be moved has `path` null, as `output` does). The whole-file
+hashes of two renders differ even when their audio is identical, because REAPER writes the time of the render into the
+file; `comparison.master.identical` says whether the samples are. A record of whether a plugin is deterministic needs
+`keep` to be in the manifest; without it the row's `facts.comparison` has the same numbers. A repeat whose two renders
+differ keeps two files.
 
 A kept file is never overwritten: when its place is taken (by another scenario whose id and stem name give the same
 file name, or by a run started in the same second, which finds the manifest there and keeps nothing), the file stays

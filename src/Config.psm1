@@ -153,7 +153,7 @@ function New-HarnessSpec {
         }) -Doc 'the input fed to the tested track through its input FX chain: the harness test signal, or a WAV file at the scenario sample rate'
     # Criteria of one render file, also used by stems
     $criteria = [ordered]@{
-        maxDiffDb     = (SNum -400 24 -Doc 'allowed residual in dBFS (a mix of several tracks can differ by more than full scale); absent means bit-identical')
+        maxDiffDb     = (SAny @((SNum -400 24), (SStr -Enum 'report')) 'a number -400..24, or "report"' -Doc 'allowed residual in dBFS (a mix of several tracks can differ by more than full scale), or "report": measured and written down, never judged; absent means bit-identical')
         lag           = (SInt -4096 4096 -Doc 'expected lag in samples (the test render later than the reference is positive), default 0')
         peakMaxDb     = (SNum -400 24 -Doc 'the test render must not peak above this')
         notSilent     = (SBool -Doc 'the test render must peak above -120 dBFS')
@@ -178,6 +178,8 @@ function New-HarnessSpec {
     $renderProps.host = SRef host
     $renderProps.matrix = SRef matrix
     $renderProps.keep = SBool -Doc 'keep the render (and its stems) under renders/ of the result directory, with a line in its manifest'
+    $renderProps.keepFirst = SBool -Doc 'with keep, compare "repeat" and a reported residual: keep the first render too, also when the two are bit-identical'
+    $renderProps.tailSeconds = SNum 0 60 -Doc 'seconds rendered past the end of the longest source, at the scenario sample rate; default 0'
     $renderProps.variants = SArr (SRef variant) -Min 1 -Max 1000 -Doc 'one scenario per variant, the layout with its settings on top; needs compare'
     $p = & $common 'render'; foreach ($e in $renderProps.GetEnumerator()) { $p[$e.Key] = $e.Value }
     $Kinds.render = SObj $p @('id', 'kind', 'layout')
@@ -221,11 +223,11 @@ $script:Spec = New-HarnessSpec
 function Get-HarnessConfigSpec { $script:Spec }
 function Get-HarnessParamNamePattern { $script:ParamNamePattern }
 
-# Negative variant of a kind: the same fields without matrix, keep and variants, plus expect and expectDetail (both required).
+# Negative variant of a kind: the same fields without matrix, keep, keepFirst and variants, plus expect and expectDetail (both required).
 function Get-NegativeKindSpec([string]$Kind) {
     $k = $script:Spec.Kinds[$Kind]
     $Props = [ordered]@{}
-    foreach ($e in $k.props.GetEnumerator()) { if ($e.Key -cnotin 'matrix', 'keep', 'variants') { $Props[$e.Key] = $e.Value } }
+    foreach ($e in $k.props.GetEnumerator()) { if ($e.Key -cnotin 'matrix', 'keep', 'keepFirst', 'variants') { $Props[$e.Key] = $e.Value } }
     $Props.expect = SStr -Enum $script:Expectable
     $Props.expectDetail = SStr -Doc 'regex (.NET, case sensitive) the outcome detail must match'
     SObj $Props (@($k.req) + 'expect', 'expectDetail')
@@ -467,7 +469,19 @@ function New-CriteriaDefaults { [ordered]@{ maxDiffDb = $null; lag = 0; peakMaxD
 function New-RenderDefaults {
     $d = New-CriteriaDefaults
     $d.stems = @(); $d.report = [ordered]@{}; $d.host = (New-HostDefaults); $d.mutate = $null; $d.keep = $false; $d.variant = $null; $d.variantLayout = $null
+    $d.keepFirst = $false; $d.tailSeconds = 0.0; $d.tailFrames = [long]0
     $d
+}
+
+# A residual that is reported, not judged: maxDiffDb is the word "report", exactly (criteria built by hand are not
+# validated, so no other spelling may mean it).
+function Test-HarnessResidualReported($Holder) { $Holder.maxDiffDb -is [string] -and $Holder.maxDiffDb -ceq 'report' }
+
+# Whether a render scenario reports a residual: its own, or one of a stem compared with the reference.
+function Test-HarnessScenarioReports($Scenario) {
+    if (Test-HarnessResidualReported $Scenario) { return $true }
+    foreach ($st in @($Scenario.stems)) { if ($st.Compare -ceq 'reference' -and (Test-HarnessResidualReported $st.Criteria)) { return $true } }
+    $false
 }
 function New-HostDefaults { [pscustomobject]@{ AnticipativeFx = $true; RunFxWhenStopped = $true; InformOfflineState = $true } }
 
@@ -823,8 +837,18 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
             $o.stems = $stems.ToArray()
             $o.report = ConvertTo-ReportCriteria (Get-Or $Raw 'report' $null) "$Path.report" $PluginTable $layout $Problems
             if ($o.report.get_Count() -and $o.host.RunFxWhenStopped) { $Problems.Add("$Path.report: judging a render by a report needs host.runFxWhenStopped false: with it on, the plugin also runs in real time before and after the render") }
+            $reports = Test-HarnessScenarioReports $o
+            # The second render would be the driver's render step and the first -renderproject: a difference between the
+            # two ways of rendering would read as a plugin that is not deterministic
+            if ($o.report.get_Count() -and $o.compare.Kind -eq 'repeat' -and $reports) { $Problems.Add("$Path.report: a repeat that reports its residual cannot judge plugin reports as well: its two renders would be made in two different ways") }
             $o.mutate = $null
             $o.keep = [bool](Get-Or $Raw 'keep' $false)
+            $o.keepFirst = [bool](Get-Or $Raw 'keepFirst' $false)
+            if ($Raw.Contains('keepFirst') -and -not ($o.keep -and $o.compare.Kind -eq 'repeat' -and $reports)) { $Problems.Add("$Path.keepFirst: needs keep true, compare ""repeat"" and maxDiffDb ""report"" (on the scenario or a stem compared with the reference)") }
+            # Per leg: the frames of the tail at this leg's rate
+            $o.tailSeconds = [double](Get-Or $Raw 'tailSeconds' 0)
+            $o.tailFrames = [long][Math]::Round($o.tailSeconds * $o.sr, [MidpointRounding]::AwayFromZero)
+            if ($o.tailSeconds -gt 0 -and $o.tailFrames -lt 1) { $Problems.Add("$Path.tailSeconds: $($o.tailSeconds.ToString('R', [Globalization.CultureInfo]::InvariantCulture)) s is less than one frame at $($o.sr) Hz") }
             $o.variant = $null; $o.variantLayout = $null # set by New-HarnessVariantScenario
         }
         'device' { }
@@ -1087,4 +1111,4 @@ function Read-HarnessConfigExtensions([Parameter(Mandatory)][string]$Path) {
 }
 
 Export-ModuleMember -Function Read-HarnessConfig, Read-HarnessConfigExtensions, Test-HarnessConfigData, Get-HarnessConfigSpec, ConvertTo-HarnessJsonSchema, Get-HarnessBuiltinNegatives,
-    Get-HarnessConfigDefaults, Get-HarnessDryLayout, Stop-Usage, Find-RoutingCycle, ConvertTo-ChannelNumber, Get-HarnessParamNamePattern
+    Get-HarnessConfigDefaults, Get-HarnessDryLayout, Stop-Usage, Find-RoutingCycle, ConvertTo-ChannelNumber, Get-HarnessParamNamePattern, Test-HarnessResidualReported, Test-HarnessScenarioReports

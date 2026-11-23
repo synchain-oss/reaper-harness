@@ -865,10 +865,18 @@
               "description": "reference: with the same stem of the reference render (default unless the scenario compares with none); none: on its own"
             },
             "maxDiffDb": {
-              "type": "number",
-              "minimum": -400,
-              "maximum": 24,
-              "description": "allowed residual in dBFS (a mix of several tracks can differ by more than full scale); absent means bit-identical"
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": -400,
+                  "maximum": 24
+                },
+                {
+                  "type": "string",
+                  "const": "report"
+                }
+              ],
+              "description": "allowed residual in dBFS (a mix of several tracks can differ by more than full scale), or \"report\": measured and written down, never judged; absent means bit-identical"
             },
             "lag": {
               "type": "integer",
@@ -1037,10 +1045,18 @@
                 ]
               },
               "maxDiffDb": {
-                "type": "number",
-                "minimum": -400,
-                "maximum": 24,
-                "description": "allowed residual in dBFS (a mix of several tracks can differ by more than full scale); absent means bit-identical"
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": -400,
+                    "maximum": 24
+                  },
+                  {
+                    "type": "string",
+                    "const": "report"
+                  }
+                ],
+                "description": "allowed residual in dBFS (a mix of several tracks can differ by more than full scale), or \"report\": measured and written down, never judged; absent means bit-identical"
               },
               "lag": {
                 "type": "integer",
@@ -1135,6 +1151,16 @@
               "keep": {
                 "type": "boolean",
                 "description": "keep the render (and its stems) under renders/ of the result directory, with a line in its manifest"
+              },
+              "keepFirst": {
+                "type": "boolean",
+                "description": "with keep, compare \"repeat\" and a reported residual: keep the first render too, also when the two are bit-identical"
+              },
+              "tailSeconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 60,
+                "description": "seconds rendered past the end of the longest source, at the scenario sample rate; default 0"
               },
               "variants": {
                 "type": "array",
@@ -1508,10 +1534,18 @@
                 ]
               },
               "maxDiffDb": {
-                "type": "number",
-                "minimum": -400,
-                "maximum": 24,
-                "description": "allowed residual in dBFS (a mix of several tracks can differ by more than full scale); absent means bit-identical"
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": -400,
+                    "maximum": 24
+                  },
+                  {
+                    "type": "string",
+                    "const": "report"
+                  }
+                ],
+                "description": "allowed residual in dBFS (a mix of several tracks can differ by more than full scale), or \"report\": measured and written down, never judged; absent means bit-identical"
               },
               "lag": {
                 "type": "integer",
@@ -1599,6 +1633,12 @@
               },
               "host": {
                 "$ref": "#/$defs/host"
+              },
+              "tailSeconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 60,
+                "description": "seconds rendered past the end of the longest source, at the scenario sample rate; default 0"
               },
               "expect": {
                 "type": "string",
