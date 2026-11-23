@@ -97,12 +97,12 @@ holds what the learn launch read back per variant key (the key of `$Ctx.Blocks`)
 the tool, not members of `$Ctx.Api`.
 
 Every launch through these goes through the same guards, locks, watchdog, dialog handling and module check as the
-built-in kinds. Do not start REAPER any other way. Before it takes anything, every launch checks the environment it
-is to set: each value a full path inside the work directory, under a name the deny list allows (the job variable
-aside, [SAFETY.md](SAFETY.md#probe-variables-and-collected-files)). A declared report name of the configuration is held
-to the list of report variables; every other name, one given to `-ProbeEnv` included, to the longer list of probe
-variables. Otherwise it throws, REAPER is not started and the scenario is INCOMPLETE. And every launch takes the configuration's report and probe names out of the environment
-REAPER inherits, unless it sets them itself.
+built-in kinds. Do not start REAPER any other way. Before it takes anything, every launch checks the environment it is
+to set: each value a full path inside the work directory, under a name the deny list allows (the job variable aside,
+[SAFETY.md](SAFETY.md#probe-variables-and-collected-files)). A declared report name of the configuration is held to
+the list of report variables; every other name, one given to `-ProbeEnv` included, to the longer list of probe
+variables. Otherwise it throws, REAPER is not started and the scenario is INCOMPLETE. And every launch takes the
+configuration's report and probe names out of the environment REAPER inherits, unless it sets them itself.
 
 ### Preflight
 
