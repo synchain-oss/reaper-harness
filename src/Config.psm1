@@ -566,7 +566,7 @@ function ConvertTo-Plugins($Raw, $Problems) {
             if ($hasJs) { $Problems.Add("config.plugins.$k.probe: probe variables are for VST3 plugins (a JSFX reads no environment)") }
             foreach ($n in $rawProbe.get_Keys()) {
                 $probe[$n] = ConvertTo-ProbeEntry $rawProbe[$n] "config.plugins.$k.probe.$n" $n $k $false $Problems
-                $why = Test-HarnessReportEnvName $n -What 'a probe variable'
+                $why = Test-HarnessReportEnvName $n -What 'a probe variable' -Strict
                 if ($why) { $Problems.Add("config.plugins.$k.probe.${n}: $why") }
                 if ($envs.ContainsKey($n)) { $Problems.Add("config.plugins.$k.probe.${n}: '$n' is $(Get-EnvHolder $envs[$n]) too") }
                 $envs[$n] = @{ Plugin = $k; Kind = 'a probe variable' }
@@ -1095,14 +1095,14 @@ function New-HarnessVariantScenario($Scenario, $Variant, $BaseLayout) {
     $s
 }
 
-# Every report and probe variable name of a configuration, sorted (wrap the call in @()); none for one built by hand
-# without them.
-function Get-HarnessPluginEnvNames($Conf) {
+# Every report and probe variable name of a configuration (-OnlyReports: the report names), sorted (wrap the call in
+# @()); none for one built by hand without them.
+function Get-HarnessPluginEnvNames($Conf, [switch]$OnlyReports) {
     $table = ($Conf -is [Collections.IDictionary]) ? $Conf['Plugins'] : (($null -ne $Conf -and $Conf.PSObject.Properties['Plugins']) ? $Conf.Plugins : $null)
     if ($null -eq $table) { return }
     $names = foreach ($p in @($table.get_Values())) {
         if ($p.PSObject.Properties['Report'] -and $p.Report) { $p.Report.Env }
-        if ($p.PSObject.Properties['Probe'] -and $p.Probe) { @($p.Probe.get_Keys()) }
+        if ($p.PSObject.Properties['Probe'] -and $p.Probe -and -not $OnlyReports) { @($p.Probe.get_Keys()) }
     }
     @($names | Where-Object { $_ } | Sort-Object -Unique)
 }

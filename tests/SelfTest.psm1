@@ -1285,7 +1285,8 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a probe variable named NODE_OPTIONS (the runtime families)'; E = { param($c) & $probeVar $c 'NODE_OPTIONS' $probeFile }; M = (& $deniedProbe 'NODE_OPTIONS' "starts with NODE_, $byPrefix") }
         @{ L = 'a probe variable named SSLKEYLOGFILE'; E = { param($c) & $probeVar $c 'SSLKEYLOGFILE' $probeFile }; M = (& $deniedProbe 'SSLKEYLOGFILE' 'is a variable Windows or a runtime reads') }
         @{ L = 'a probe variable whose name ends in _PROXY'; E = { param($c) & $probeVar $c 'MY_PROXY' $probeFile }; M = (& $deniedProbe 'MY_PROXY' 'ends with _PROXY, which network libraries read') }
-        @{ L = 'a report variable named NODE_OPTIONS (the families added to the shared list hold for reports too)'; E = { param($c) $c['plugins']['bus']['report'] = [ordered]@{ env = 'NODE_OPTIONS'; fields = @('x') } }; M = "report.env: 'NODE_OPTIONS' starts with NODE_, $byPrefix; a report may not set it" }
+        @{ L = 'a probe variable named NODE_REPORT (a name a report variable may have)'; E = { param($c) & $probeVar $c 'NODE_REPORT' $probeFile }; M = (& $deniedProbe 'NODE_REPORT' "starts with NODE_, $byPrefix") }
+        @{ L = 'a probe variable named HTTP_REPORT_PATH (a name a report variable may have)'; E = { param($c) & $probeVar $c 'HTTP_REPORT_PATH' $probeFile }; M = (& $deniedProbe 'HTTP_REPORT_PATH' "starts with HTTP, $byPrefix") }
         @{ L = 'a probe variable name in lower case'; E = { param($c) & $probeVar $c 'probe_x' $probeFile }; M = "probe: key 'probe_x' does not match" }
         @{ L = 'a probe variable name of two characters'; E = { param($c) & $probeVar $c 'AB' $probeFile }; M = "probe: key 'AB' does not match" }
         @{ L = 'a probe variable named as the report variable of its own plugin'; E = { param($c) & $probeOn $c; $c['plugins']['bus']['report'] = [ordered]@{ env = 'EXAMPLE_PROBE_OUT'; fields = @('x') } }; M = "config.plugins.bus.probe.EXAMPLE_PROBE_OUT: 'EXAMPLE_PROBE_OUT' is the report variable of bus too" }
@@ -1322,6 +1323,17 @@ function Get-ConfigCases([string]$Tmp, [string]$RepoRoot) {
         $found = & $problems $mu.E
         & $add "configuration: $($mu.L) is a problem ($($found -join ' | '))" $true (@($found | Where-Object { $_ -match [regex]::Escape($mu.M) }).Count -gt 0)
     }
+    # A report variable keeps the deny list of the released version: a name of the families a probe variable may not use
+    # is accepted there, so a configuration valid before stays valid; -OnlyReports lists the report name alone
+    $familyOk = @(foreach ($familyEnv in 'NODE_REPORT', 'HTTP_REPORT_PATH', 'MY_PROXY', 'SSLKEYLOGFILE') {
+            $familyRaw = ConvertFrom-HarnessJson $text
+            & $probeOn $familyRaw
+            $familyRaw['plugins']['bus']['report'] = [ordered]@{ env = $familyEnv; fields = @('x') }
+            $familyConf = Test-HarnessConfigData -Raw $familyRaw -Kinds $extensions.Kinds
+            if (@($familyConf.Problems).Count -or -not $familyConf.Config -or (@(Get-HarnessPluginEnvNames $familyConf.Config -OnlyReports) -join ',') -cne $familyEnv -or
+                @(Get-HarnessPluginEnvNames $familyConf.Config).Count -ne 3) { "${familyEnv}: $(@($familyConf.Problems) -join ' | ')" }
+        })
+    & $add "configuration: a report variable named NODE_REPORT, HTTP_REPORT_PATH, MY_PROXY or SSLKEYLOGFILE (families a probe variable may not use) is accepted, as before, next to probe variables; -OnlyReports lists it alone ($($familyOk -join '; '))" $false ($familyOk.Count -eq 0)
     & $add 'configuration: a device scenario still takes a matrix of rates and block sizes' $false (@(& $problems { param($c) $d = & $scenario $c 'bus-device'; $d.Remove('block'); $d['matrix'] = [ordered]@{ sr = @(44100, 48000); block = @(64, 1024) } }).Count -eq 0)
     & $add 'configuration: every problem is listed at once, not just the first' $true (@(& $problems { param($c) $c['surprise'] = 1; $c['signal']['seconds'] = 'long' }).Count -ge 2)
     $badFile = Join-Path $Tmp 'config-bad.json'
@@ -3419,6 +3431,40 @@ function Get-ProbeCases([string]$Tmp, [string]$RepoRoot) {
     $notFull = @(& $envWhy @{ X_ONE = 'take1.out' }; & $envWhy @{ X_ONE = 'C:x' })
     & $add "launch environment: a relative and a drive-relative value are refused as not a full path ($($notFull -join ' | '))" $true (
         ($notFull -join '|') -ceq 'the value of X_ONE is not a full path|the value of X_ONE is not a full path')
+    # A declared report name (exact) is held to the list of a report, the released one; every other name, a probe
+    # variable or whatever an extension asks for, to the strict one
+    $declaredWhy = { param($EnvValues, [string[]]$Declared) Test-HarnessLaunchEnvironment $EnvValues $work $Declared }
+    & $add 'launch environment: names of the added families pass when they are declared report names (HTTP_REPORT_PATH, NODE_REPORT, MY_PROXY, SSLKEYLOGFILE)' $false (
+        $null -eq (& $declaredWhy @{ HTTP_REPORT_PATH = $inWork; NODE_REPORT = $inWork; MY_PROXY = $inWork; SSLKEYLOGFILE = $inWork } @('HTTP_REPORT_PATH', 'NODE_REPORT', 'MY_PROXY', 'SSLKEYLOGFILE')))
+    $undeclared = @(
+        @{ L = 'HTTP_REPORT_PATH without report names'; V = @{ HTTP_REPORT_PATH = $inWork }; D = @(); W = "'HTTP_REPORT_PATH' starts with HTTP, *; the harness may not set it" }
+        @{ L = 'HTTP_REPORT_PATH when the report name is HTTP_REPORT'; V = @{ HTTP_REPORT_PATH = $inWork }; D = @('HTTP_REPORT'); W = "'HTTP_REPORT_PATH' starts with HTTP, *; the harness may not set it" }
+        @{ L = 'HTTP_REPORT_PATH when the report name differs in case'; V = @{ HTTP_REPORT_PATH = $inWork }; D = @('Http_Report_Path'); W = "'HTTP_REPORT_PATH' starts with HTTP, *; the harness may not set it" }
+        @{ L = 'the probe variable NODE_PROBE next to the report name NODE_REPORT'; V = @{ NODE_REPORT = $inWork; NODE_PROBE = $inWork }; D = @('NODE_REPORT'); W = "'NODE_PROBE' starts with NODE_, *; the harness may not set it" }
+        @{ L = 'MY_PROXY, not declared'; V = @{ MY_PROXY = $inWork }; D = @('MY_REPORT'); W = "'MY_PROXY' ends with _PROXY, which network libraries read; the harness may not set it" }
+        @{ L = 'SSLKEYLOGFILE, not declared'; V = @{ SSLKEYLOGFILE = $inWork }; D = @(); W = "'SSLKEYLOGFILE' is a variable Windows or a runtime reads; the harness may not set it" }
+        @{ L = 'PATH, declared as a report name all the same'; V = @{ PATH = $inWork }; D = @('PATH'); W = "'PATH' is a variable Windows or a runtime reads; the harness may not set it" }
+    )
+    $undeclaredGot = @($undeclared | ForEach-Object { [string](& $declaredWhy $_.V $_.D) })
+    $undeclaredLet = @(for ($i = 0; $i -lt $undeclared.Count; $i++) { if ($undeclaredGot[$i] -cnotlike $undeclared[$i].W) { "$($undeclared[$i].L): $($undeclaredGot[$i])" } })
+    & $add "launch environment: a name of the added families that is not a declared report name is refused, and a declared one still meets the list of a report: $(@($undeclared | ForEach-Object { $_.L }) -join ', ') (wrong: $($undeclaredLet -join ' | '))" $true ($undeclaredLet.Count -eq 0)
+    # The wiring: the context takes the configuration's report names, and each launch hands them to that check. The
+    # configuration is built by hand, so its probe name NODE_PROBE (validation refuses it) shows that the check holds a
+    # probe name to the strict list too; a REAPER of the round that could not be ended stops each launch right after it
+    $wiredConf = [pscustomobject]@{ Limits = [pscustomobject]@{ lockWaitSec = 1 }; Signal = $null; Plugins = [ordered]@{
+            rec = [pscustomobject]@{ Report = [pscustomobject]@{ Env = 'HTTP_REPORT_PATH' }; Probe = [ordered]@{} }
+            tb = [pscustomobject]@{ Report = $null; Probe = [ordered]@{ NODE_PROBE = $null } } } }
+    $wiredCtx = New-HarnessContext -ReaperExe 'stand-in' -WorkDir $work -Driver 'x' -Config $wiredConf -Locks @('Local\x')
+    $wiredCtx.StillRunning = [pscustomobject]@{ Pid = 0; Label = 'self-test'; Lock = $null }
+    $onceWhy = { param($EnvValues) try { $once = & @(Get-Module Scenarios)[0] { param($c, $h) Invoke-HarnessLaunchOnce -Ctx $c -HostArgs $h } $wiredCtx @{ Environment = $EnvValues }; "not refused: $($once.Status)" } catch { $_.Exception.Message } }
+    $asReport = & $onceWhy @{ HTTP_REPORT_PATH = $inWork }
+    $asProbe = & $onceWhy @{ NODE_PROBE = $inWork }
+    $asOther = & $onceWhy @{ NODE_X = $inWork }
+    & $add "launch wiring: the context holds the configuration's report names only, and a launch that sets the report name HTTP_REPORT_PATH passes the check ($(@($wiredCtx.ReportEnvNames) -join ','); $asReport)" $false (
+        (@($wiredCtx.ReportEnvNames) -join ',') -ceq 'HTTP_REPORT_PATH' -and $asReport -ceq 'not refused: Blocked' -and $wiredCtx.Launches -eq 0)
+    & $add "launch wiring: a launch that sets the probe name NODE_PROBE or the undeclared NODE_X is refused before anything is taken ($asProbe | $asOther)" $true (
+        $asProbe -clike "REAPER was not started: 'NODE_PROBE' starts with NODE_, *; the harness may not set it" -and
+        $asOther -clike "REAPER was not started: 'NODE_X' starts with NODE_, *; the harness may not set it" -and $wiredCtx.Launches -eq 0)
 
     # The input files, before REAPER (one usage error for every problem; files of scenarios not picked are not read)
     [IO.File]::WriteAllText((Join-Path $cfgDir 'probe/take1.json'), '{"gain":-6}')
@@ -3728,7 +3774,9 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         $why = @(foreach ($n in $c.N) { [string](Test-HarnessReportEnvName $n) })
         & $add "report variable: refused, $($c.L) ($($why -join ' | '))" $true ($why.Count -eq $c.N.Count -and @($why | Where-Object { -not $_ -or ($c.W -and $_ -cnotlike "*starts with $($c.W),*") }).Count -eq 0)
     }
-    # The families that load a file or take options in whatever a plugin links: TLS, proxies, language runtimes, git, browsers
+    # The families that load a file or take options in whatever a plugin links (TLS, proxies, language runtimes, git,
+    # browsers): refused for a probe variable and at launch (-Strict); a report variable keeps the list of the released
+    # version, so a configuration valid before stays valid
     $families = @(
         @{ L = 'TLS names (a key log, a CA bundle)'; N = 'SSLKEYLOGFILE', 'SSL_CERT_FILE', 'OPENSSL_CONF', 'CURL_CA_BUNDLE', 'REQUESTS_CA_BUNDLE'; W = '' }
         @{ L = 'runtime names (Node, Java, Perl, Ruby)'; N = 'NODE_OPTIONS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', 'PERL5LIB', 'RUBYOPT'; W = '' }
@@ -3737,11 +3785,25 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'names only the prefix HTTP, NO_PROXY or ALL_PROXY catches (not ending in _PROXY)'; N = 'HTTP_CA_FILE', 'HTTPS_CA_FILE', 'NO_PROXY_LIST', 'ALL_PROXY_X'; W = '' }
     )
     foreach ($c in $families) {
-        $why = @(foreach ($n in $c.N) { [string](Test-HarnessReportEnvName $n) })
-        & $add "report variable: refused, $($c.L) ($($why -join ' | '))" $true ($why.Count -eq $c.N.Count -and @($why | Where-Object { -not $_ -or $_ -cnotlike '*; a report may not set it' }).Count -eq 0)
+        $why = @(foreach ($n in $c.N) { [string](Test-HarnessReportEnvName $n -What 'a probe variable' -Strict) })
+        & $add "probe variable: refused, $($c.L) ($($why -join ' | '))" $true ($why.Count -eq $c.N.Count -and @($why | Where-Object { -not $_ -or $_ -cnotlike '*; a probe variable may not set it' }).Count -eq 0)
+        $reportLet = @($c.N | Where-Object { $null -ne (Test-HarnessReportEnvName $_) })
+        & $add "report variable: accepted as in the released version, $($c.L) (refused: $($reportLet -join ', '))" $false ($reportLet.Count -eq 0)
     }
-    & $add 'report variable: a name ending in _PROXY says so' $true ((Test-HarnessReportEnvName 'MY_PROXY') -ceq "'MY_PROXY' ends with _PROXY, which network libraries read; a report may not set it")
-    & $add 'report variable: names that only contain a refused word are accepted (PROXY_X, MY_HTTP, NODEX is not NODE_)' $false (@(@('PROXY_X', 'MY_HTTP', 'NODEX', 'GITX') | Where-Object { $null -ne (Test-HarnessReportEnvName $_) }).Count -eq 0)
+    # One name, two answers: a report may have it, a probe variable may not
+    $sameName = @(
+        @{ N = 'NODE_REPORT'; T = "'NODE_REPORT' starts with NODE_, which REAPER, what it loads, WebView2, a runtime or the harness reads; a probe variable may not set it" }
+        @{ N = 'HTTP_REPORT_PATH'; T = "'HTTP_REPORT_PATH' starts with HTTP, which REAPER, what it loads, WebView2, a runtime or the harness reads; a probe variable may not set it" }
+        @{ N = 'MY_PROXY'; T = "'MY_PROXY' ends with _PROXY, which network libraries read; a probe variable may not set it" }
+    )
+    & $add "report variable: NODE_REPORT, HTTP_REPORT_PATH and MY_PROXY are accepted for a report" $false (@($sameName | Where-Object { $null -ne (Test-HarnessReportEnvName $_.N) }).Count -eq 0)
+    foreach ($c in $sameName) {
+        $probeWhy = Test-HarnessReportEnvName $c.N -What 'a probe variable' -Strict
+        & $add "probe variable: $($c.N) is refused, with the reason ($probeWhy)" $true ($probeWhy -ceq $c.T)
+    }
+    $strictLet = @($refused | Where-Object { $null -eq (Test-HarnessReportEnvName $_ -Strict) })
+    & $add "probe variable: every name a report may not have is refused too (let through: $($strictLet -join ', '))" $true ($strictLet.Count -eq 0)
+    & $add 'report variable: names that only contain a refused word are accepted, for a probe variable too (PROXY_X, MY_HTTP, NODEX is not NODE_)' $false (@(@('PROXY_X', 'MY_HTTP', 'NODEX', 'GITX') | Where-Object { $null -ne (Test-HarnessReportEnvName $_ -Strict) }).Count -eq 0)
     # The same list names who would set it: a report (default), a probe variable, the harness
     & $add 'report variable: -What names who would set it; without it every text says a report' $true (
         (Test-HarnessReportEnvName 'APPDATA' -What 'a probe variable') -ceq "'APPDATA' is a variable Windows or a runtime reads; a probe variable may not set it" -and

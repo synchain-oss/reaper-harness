@@ -106,6 +106,7 @@ function New-HarnessContext {
         Retries = [Collections.Generic.List[object]]::new() # launches started once more (see Invoke-HarnessLaunch)
         Started = [Collections.Generic.List[object]]::new() # every process started: Pid, StartUtc
         PluginEnvNames = @(Get-HarnessPluginEnvNames $Config) # removed from what every launch inherits, unless it sets them
+        ReportEnvNames = @(Get-HarnessPluginEnvNames $Config -OnlyReports) # held to the released deny list at launch
         ProbeFiles = @{} # probe file key -> the file checked before the start (Read-HarnessProbeFiles)
         ProbeRuns = @{} # scenario id -> @{ From }: its probe run was made, after From processes had been started
         Dirs = [Collections.Generic.List[string]]::new() # probe directories made in the work directory
@@ -192,14 +193,15 @@ function Invoke-HarnessLaunch {
 }
 
 # Every value a launch sets in the environment of REAPER must be a full path strictly inside the work directory, under a
-# name that passes the deny list (the job variable aside), whoever asks for it (an extension too). The first problem, or
-# $null. Pure.
-function Test-HarnessLaunchEnvironment([hashtable]$LaunchEnv, [string]$Work) {
+# name that passes the deny list (the job variable aside), whoever asks for it (an extension too). A declared report name
+# (ReportNames, exact) is held to the list of a report, every other name to the strict one (Test-HarnessReportEnvName
+# -Strict). The first problem, or $null. Pure.
+function Test-HarnessLaunchEnvironment([hashtable]$LaunchEnv, [string]$Work, [string[]]$ReportNames = @()) {
     if ($null -eq $LaunchEnv) { return $null }
     $root = [IO.Path]::GetFullPath($Work).TrimEnd('\', '/')
     foreach ($k in $LaunchEnv.get_Keys()) {
         $varName = [string]$k
-        if ($varName -cne 'REAPER_HARNESS_JOB') { $why = Test-HarnessReportEnvName $varName -What 'the harness'; if ($why) { return $why } }
+        if ($varName -cne 'REAPER_HARNESS_JOB') { $why = Test-HarnessReportEnvName $varName -What 'the harness' -Strict:($varName -cnotin $ReportNames); if ($why) { return $why } }
         $v = [string]$LaunchEnv[$k]
         if (-not [IO.Path]::IsPathFullyQualified($v)) { return "the value of $varName is not a full path" }
         $full = [IO.Path]::GetFullPath($v).TrimEnd('\', '/')
@@ -211,7 +213,7 @@ function Test-HarnessLaunchEnvironment([hashtable]$LaunchEnv, [string]$Work) {
 function Invoke-HarnessLaunchOnce {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs, [string]$Label = '')
     # Before anything is taken, so nothing has to be released; the scenario is INCOMPLETE through its caller's catch
-    $why = Test-HarnessLaunchEnvironment ($HostArgs['Environment'] ?? @{}) $Ctx.Work
+    $why = Test-HarnessLaunchEnvironment ($HostArgs['Environment'] ?? @{}) $Ctx.Work @($Ctx['ReportEnvNames'] | Where-Object { $_ })
     if ($why) { throw "REAPER was not started: $why" }
     $none = { param($s) [pscustomobject]@{ Status = $s; ExitCode = $null; Seconds = 0; Pid = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{}; SampleLost = @(); Modules = @{}; ModuleScans = 0; PluginModules = @(); StillRunning = $false } }
     if ($Ctx.StillRunning) { return & $none 'Blocked' }

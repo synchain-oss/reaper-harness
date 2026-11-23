@@ -492,20 +492,27 @@ function Test-HarnessScriptLint {
 
 # Variables a report may not set: what Windows, the .NET and PowerShell runtimes, REAPER and what it loads (ReaScript's
 # Python and Lua, Qt in a plugin), WebView2 and the harness itself read. Names, and prefixes (PYTHON takes PYTHONHOME and
-# PYTHONPATH along); compared without regard to case, as Windows does. The TLS, proxy and language-runtime families load a
-# file or take options in whatever a plugin links (a key log, a CA bundle, a proxy, a module path).
+# PYTHONPATH along); compared without regard to case, as Windows does. These are the lists of the released version.
 $script:DeniedNames = 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'USERNAME', 'USERDOMAIN', 'HOMEDRIVE', 'HOMEPATH', 'HOMESHARE',
     'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMW6432', 'ALLUSERSPROFILE', 'PUBLIC',
-    'PSMODULEPATH', 'COMPUTERNAME', 'NUMBER_OF_PROCESSORS', 'OS', 'DRIVERDATA', 'ONEDRIVE', 'SSLKEYLOGFILE'
-$script:DeniedPrefixes = 'REAPER_', 'WEBVIEW2_', 'COR_', 'CORECLR_', 'COMPLUS_', 'DOTNET_', 'PROCESSOR_', 'POWERSHELL_', 'PSEXEC_', 'VST_', 'VST3_', 'CLAP_', 'JUCE_', 'PYTHON', 'LUA_', 'QT_',
-    'SSL_', 'OPENSSL_', 'CURL_', 'NODE_', 'JAVA', 'JDK_', 'PERL', 'RUBY', 'GIT_', 'CHROME', 'MSEDGE', 'REQUESTS_', 'HTTP', 'NO_PROXY', 'ALL_PROXY'
+    'PSMODULEPATH', 'COMPUTERNAME', 'NUMBER_OF_PROCESSORS', 'OS', 'DRIVERDATA', 'ONEDRIVE'
+$script:DeniedPrefixes = 'REAPER_', 'WEBVIEW2_', 'COR_', 'CORECLR_', 'COMPLUS_', 'DOTNET_', 'PROCESSOR_', 'POWERSHELL_', 'PSEXEC_', 'VST_', 'VST3_', 'CLAP_', 'JUCE_', 'PYTHON', 'LUA_', 'QT_'
+# -Strict adds the families that make a runtime or a library load a file or take options in whatever a plugin links (a
+# key log, a CA bundle, a proxy, a module path), and names ending in _PROXY: for a probe variable, whose value can be a
+# copy of a file of the configuration, and at launch for every name that is not a declared report name. A report
+# variable keeps the released lists: its value is the path of a file the plugin itself writes, so the families would
+# guard nothing there, and a configuration valid before stays valid.
+$script:AddedDeniedNames = @('SSLKEYLOGFILE')
+$script:AddedDeniedPrefixes = 'SSL_', 'OPENSSL_', 'CURL_', 'NODE_', 'JAVA', 'JDK_', 'PERL', 'RUBY', 'GIT_', 'CHROME', 'MSEDGE', 'REQUESTS_', 'HTTP', 'NO_PROXY', 'ALL_PROXY'
 
 # $What names who would set it in the refusal: a report (the default), a probe variable, or the harness (the launch check).
-function Test-HarnessReportEnvName([string]$Variable, [string]$What = 'a report') {
+function Test-HarnessReportEnvName([string]$Variable, [string]$What = 'a report', [switch]$Strict) {
     if ($Variable -cnotmatch '\A[A-Z][A-Z0-9_]{2,63}\z') { return "'$Variable' must match ^[A-Z][A-Z0-9_]{2,63}$" }
-    if ($Variable -in $script:DeniedNames) { return "'$Variable' is a variable Windows or a runtime reads; $What may not set it" }
-    foreach ($p in $script:DeniedPrefixes) { if ($Variable.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { return "'$Variable' starts with $p, which REAPER, what it loads, WebView2, a runtime or the harness reads; $What may not set it" } }
-    if ($Variable.EndsWith('_PROXY', [StringComparison]::OrdinalIgnoreCase)) { return "'$Variable' ends with _PROXY, which network libraries read; $What may not set it" }
+    $deniedHere = $Strict.IsPresent ? @($script:DeniedNames + $script:AddedDeniedNames) : @($script:DeniedNames)
+    $prefixesHere = $Strict.IsPresent ? @($script:DeniedPrefixes + $script:AddedDeniedPrefixes) : @($script:DeniedPrefixes)
+    if ($Variable -in $deniedHere) { return "'$Variable' is a variable Windows or a runtime reads; $What may not set it" }
+    foreach ($p in $prefixesHere) { if ($Variable.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { return "'$Variable' starts with $p, which REAPER, what it loads, WebView2, a runtime or the harness reads; $What may not set it" } }
+    if ($Strict.IsPresent -and $Variable.EndsWith('_PROXY', [StringComparison]::OrdinalIgnoreCase)) { return "'$Variable' ends with _PROXY, which network libraries read; $What may not set it" }
     $null
 }
 
