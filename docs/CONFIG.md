@@ -868,13 +868,17 @@ It never reads those files.
   `min` files, a directory replaced by a link or junction, or more than 10000 entries make the row INCOMPLETE with the
   reason. What was not moved stays in `<id>.out` in the work directory, which a round that is not green keeps; a green
   round removes the emptied directories and the copies.
-- The detail adds `; probe: <n> files collected, <bytes> bytes` (`, <t> temporary` when there are any, and
+- The detail adds `; probe: <n> files collected, <bytes> bytes` (`1 file` when it is one; `, <t> temporary` when there are any, and
   `; not collected: <reasons>`); the row's facts have `probe` ([RESULTS.md](RESULTS.md#a-row-scenarios)), and with
   [keep](#keep) so has its manifest line.
 
 For a probe scenario PASS says that the render passed its audio criteria and that at least `min` files were
 collected. The harness never reads them: whether the plugin's own script ran correctly is for you to read in them.
-`min: 0` accepts a plugin that wrote nothing at all, so use it with care.
+`min: 0` accepts a plugin that wrote nothing at all, so use it with care. Measured on REAPER 7.82 with a test build that
+writes step files and a final file ([validation record](validation/2026-11-23-plugin-probe.md)): the final file, which the
+plugin writes when its instance is destroyed, was in the directory every time collection ran, at `1x` and at `online`; a
+render of 180 s took about 185 s as a row; and a script the plugin rejected still gave PASS, with the rejection in the
+plugin's own final file.
 
 ## negative cases
 

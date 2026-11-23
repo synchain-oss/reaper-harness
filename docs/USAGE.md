@@ -178,7 +178,8 @@ afterwards moves what the plugin wrote there to `renders/<run stamp>/run<round>/
 Only the scenarios with `probe` give the plugin its variables; every other launch takes them out of what it inherits,
 even when they are set in your shell. The example [plugin-probe](../examples/plugin-probe/reaper-harness.json) renders
 two recordings at `1x` and `online`, each with its script and a shifted one as a variant. A render at `1x` takes as
-long as the recording: a 4-minute recording needs `limits.renderTimeoutSec` above 240. PASS says the render passed its
+long as the recording (180 s took about 185 s as a row, [validation record](validation/2026-11-23-plugin-probe.md)): a
+4-minute recording needs `limits.renderTimeoutSec` above 240. PASS says the render passed its
 audio criteria and at least `min` files were collected; what the files say is for you to read.
 
 ## Exit codes
