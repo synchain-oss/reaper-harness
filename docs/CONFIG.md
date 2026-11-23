@@ -868,9 +868,9 @@ It never reads those files.
   `keep`, up to 32 files and 16 MiB in all, in name order. A name ending in `.tmp` is moved and marked `temporary`; it
   does not count for `min`.
 - A subdirectory, a link or junction (never followed), a name that is not allowed, a file over a limit, fewer than
-  `min` files, a directory replaced by a link or junction, or more than 10000 entries make the row INCOMPLETE with the
-  reason. What was not moved stays in `<id>.out` in the work directory, which a round that is not green keeps; a green
-  round removes the emptied directories and the copies.
+  `min` files, a directory replaced by a link or junction (checked once, before the listing), or more than 10000
+  entries make the row INCOMPLETE with the reason. What was not moved stays in `<id>.out` in the work directory, which
+  a round that is not green keeps; a green round removes the emptied directories and the copies.
 - The detail adds `; probe: <n> files collected, <bytes> bytes` (`1 file` when it is one; `, <t> temporary` when there are any, and
   `; not collected: <reasons>`); the row's facts have `probe` ([RESULTS.md](RESULTS.md#a-row-scenarios)), and with
   [keep](#keep) so has its manifest line.

@@ -221,9 +221,12 @@ keeps that contained:
   ([above](#dialogs)): the files of the first attempt never mix with the second's. The input copy is not made again;
   it is hashed after the launch like any copy.
 - **Collection.**
-  - It runs after the scenario's launches have ended, and never while a process of the round may still run.
-  - It looks at the top level only, never recurses and never follows a link or junction, the directory itself
-    included: only an ancestor of the work directory may be one.
+  - It runs after the scenario's launches have ended, and never while a REAPER of the round may still run (one the
+    watchdog could not end).
+  - It looks at the top level only, never recurses and never follows a link or junction it finds there. The directory
+    itself must not be one either (only an ancestor of the work directory may be); that is checked once, before the
+    listing. A process that outlives REAPER and swaps the directory in that moment is not guarded against: a test
+    build runs code of its own under your account anyway, and such a plugin could move the files itself.
   - A name is used anywhere only after it passes the name check.
   - At most 32 files, 16 MiB in all and 4 MiB each; nothing beyond is moved.
   - A file another process holds (a sharing violation) is tried again at most three times, 200 ms apart; any other
