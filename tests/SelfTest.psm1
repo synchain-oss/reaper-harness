@@ -3512,14 +3512,15 @@ function Get-ProbeCases([string]$Tmp, [string]$RepoRoot) {
         $changedRun.Why -ceq 'probe file probe/take1.json changed since it was checked' -and -not (Test-Path -LiteralPath (Join-Path $w6b 'take1.probe-EXAMPLE_PROBE_SCRIPT.json')) -and -not $ctx6b.ProbeRuns.Contains('take1'))
     $unchecked = New-HarnessProbeRun -Ctx (& $newCtx (Join-Path $root 'w6c') @{}) -Scenario (& $probeScen 'take1')
     & $add "probe run: a file that was not checked before the start is never copied ($($unchecked.Why))" $true ($unchecked.Why -ceq 'probe file probe/take1.json was not checked before the start')
-    # The limit itself: <work>\take1.out of 140 characters leaves a name of 100 room within 240, one of 141 does not
+    # The limit itself: <work>\take1.out of 140 characters is allowed (a name of 100 then fits in a path of 241), one of
+    # 141 is not
     $workOf = { param([int]$DirLength) Join-Path $root ('d' * ($DirLength - $root.Length - 11)) }
     $at140 = New-HarnessProbeRun -Ctx (& $newCtx (& $workOf 140) $checked) -Scenario (& $probeScen 'take1')
     $dir140 = Join-Path (& $workOf 140) 'take1.out'
     & $add "probe run: a directory path of 140 characters is allowed ($($dir140.Length) characters; $($at140.Why))" $false ($null -eq $at140.Why -and $dir140.Length -eq 140 -and (Test-Path -LiteralPath $dir140 -PathType Container))
     $deep = & $workOf 141
     $tooLong = New-HarnessProbeRun -Ctx (& $newCtx $deep $checked) -Scenario (& $probeScen 'take1')
-    & $add "probe run: a directory path of 141 characters, which leaves a plugin no room for a name of 100, is refused before REAPER starts ($($tooLong.Why))" $true (
+    & $add "probe run: a directory path of 141 characters, one over the limit, is refused before the render starts ($($tooLong.Why))" $true (
         $tooLong.Why -ceq 'the probe directory path is too long for a plugin to write into it' -and (Join-Path $deep 'take1.out').Length -eq 141 -and -not (Test-Path -LiteralPath (Join-Path $deep 'take1.out')))
     # A read-only file of the configuration gives a copy that is not read-only; a copy an earlier launch left is replaced
     $roSource = Join-Path $cfgDir 'probe/take1.json'

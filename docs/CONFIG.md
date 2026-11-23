@@ -842,8 +842,9 @@ It never reads those files.
   copy that changed during the launch makes the row INCOMPLETE (`the probe input <NAME> changed during the launch`), and
   so does one that cannot be read back afterwards (`the probe input <NAME> could not be read back: ...`).
   The directory exists, is empty, and only this launch was told its path. Its path is at most 140 characters, so that
-  a name of 100 still fits in 240; with a result directory deeper than that, the scenario is INCOMPLETE before REAPER
-  starts (`the probe directory path is too long for a plugin to write into it`).
+  a name of 100 characters still fits in a path of 241 (well under Windows' 260); with a result directory deeper than
+  that, the scenario is INCOMPLETE before its render starts (`the probe directory path is too long for a plugin to
+  write into it`).
 - `probe` on a `render` scenario: `true` (the variables as the plugin declares them) or overrides: name →
   `{ "file": ... }` or `{ "dir": true, "min": <n> }` of a declared variable of that kind (`min` left out keeps the
   plugin's). A [variant](#variants) may give overrides on top of the scenario's; the scenario needs `probe`. Another

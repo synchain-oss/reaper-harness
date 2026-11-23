@@ -35,7 +35,8 @@ $script:MaxTotal = 16MB
 $script:MaxFile = 4MB
 $script:MaxEntries = 10000
 $script:MaxInput = 1MB
-# A plugin writes <dir>\<name> with a name of up to 100 characters; a directory path longer than this leaves it no room
+# A plugin writes <dir>\<name> with a name of up to 100 characters: a directory path of at most this keeps that within
+# 241 characters, well under Windows' 260. A longer one makes the scenario INCOMPLETE before its render starts
 $script:MaxDirPath = 140
 
 function Read-HarnessProbeFiles {

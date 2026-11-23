@@ -1770,10 +1770,11 @@ Write-Case 'end to end: a file in the record directory of the project makes the 
 
 # ---- probe variables: a plugin told where a copy of its script is and an empty directory to write into ----
 # Gain declares two probe variables and a report variable, as a test build would; the source is the WAV file of the
-# file-source cases. The result directories of these runs sit right below the scratch directory: a probe directory has to
-# leave a plugin 100 characters within 240, and the work directory of this child is too deep for that.
+# file-source cases. The result directories of these runs sit right below the scratch directory: a probe directory path
+# is at most 140 characters (a name of 100 then fits in a path of 241), and the work directory of this child is too
+# deep for that.
 $pbRoot = Split-Path -Parent $Work
-# Precondition: a probe directory path over the limit makes the scenario INCOMPLETE before REAPER starts. The longest one
+# Precondition: a probe directory path over the limit makes the scenario INCOMPLETE before its render starts. The longest one
 # these runs make (the longest run leaf with the longest scenario id) has to fit, or every probe case below is INCOMPLETE
 $pbLimit = & @(Get-Module Probe)[0] { $script:MaxDirPath }
 $pbLongest = [IO.Path]::Join($pbRoot, 'pf10', 'work', '20260101-000000-run1', 'tv-sh.out').Length
