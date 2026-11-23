@@ -170,15 +170,19 @@ $script:KeptLocks = [Collections.Generic.List[object]]::new()
 # every guard again (skip marker, locks, the configuration directory), after deleting Outputs (the files the launch
 # is to write, so that nothing the first attempt left counts for the second). Only once, never after StillRunning; a
 # second reminder ends the launch like any stuck dialog. Each retry is listed in Ctx.Retries (the result has them).
+# A directory among Outputs (a probe directory) stays and must be empty. A launch that is not started again because of
+# what the first one left says why in NotRetried, which the reason of its row repeats (Get-HarnessHostFailure).
 function Invoke-HarnessLaunch {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs, [string]$Label = '', [string[]]$Outputs = @())
     $Run = Invoke-HarnessLaunchOnce -Ctx $Ctx -HostArgs $HostArgs -Label $Label
     if ($Run.Status -ceq 'Modal' -and $Run.Modal -ceq 'license-nag' -and -not $Run.StillRunning) {
         # What the first launch left behind must not be read as the second one's: when it cannot be removed, no retry
         # An output that is a directory (a probe directory) stays, and must be empty: the plugin is told its path again
+        $skip = { param([string]$Because) $Run | Add-Member -NotePropertyName NotRetried -NotePropertyValue $Because -Force -PassThru }
         foreach ($f in $Outputs) {
-            if (Test-Path -LiteralPath $f -PathType Container) { if (@(Get-ChildItem -LiteralPath $f -Force).Count) { return $Run }; continue }
-            if (Test-Path -LiteralPath $f) { try { Remove-Item -LiteralPath $f -Force } catch { return $Run } }
+            $leaf = Split-Path -Leaf $f
+            if (Test-Path -LiteralPath $f -PathType Container) { if (@(Get-ChildItem -LiteralPath $f -Force).Count) { return & $skip "the first launch wrote into $leaf" }; continue }
+            if (Test-Path -LiteralPath $f) { try { Remove-Item -LiteralPath $f -Force } catch { return & $skip "$leaf of the first launch could not be deleted" } }
         }
         $Ctx.Retries.Add([pscustomobject]@{ Label = $Label; Reason = 'license-nag' })
         Write-Host "  [retry] $Label`: the evaluation licence reminder ended the launch; starting it once more"
@@ -251,7 +255,7 @@ function Get-HarnessHostFailure($Run) {
         'SkipMarker' { return 'a skip marker appeared; REAPER was not started' }
         'Timeout' { return "timed out after $($Run.Seconds) s and was ended" }
         'Killed' { return "killed at the deadline ($($Run.Seconds) s)" }
-        'Modal' { return "stuck on dialog $($Run.Modal) (seen: $($Run.Windows -join ', ')), ended" }
+        'Modal' { return "stuck on dialog $($Run.Modal) (seen: $($Run.Windows -join ', ')), ended" + ($Run.PSObject.Properties['NotRetried'] ? "; not retried: $($Run.NotRetried)" : '') }
         'Error' { return "watching the process failed and it was ended: $($Run.Error)" }
     }
     if ($Run.ExitCode -ne 0) { return "exit code $($Run.ExitCode)" }

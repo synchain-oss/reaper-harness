@@ -3303,15 +3303,32 @@ function Get-TransportCases([string]$Tmp, [string]$RepoRoot) {
         $locked = Join-Path $Tmp 'retry-locked.wav'; Set-Content -LiteralPath $locked -Value 'x'
         $hold = [IO.File]::Open($locked, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
         try { $e = & $retry @((& $res Modal license-nag), (& $res Exited)) @($locked) } finally { $hold.Dispose() }
-        & $add 'retry: an output of the first launch that cannot be deleted means no retry (it would be read as the second one''s)' $true ($e.Calls -eq 1 -and $e.Retries.Count -eq 0 -and $e.Run.Status -ceq 'Modal')
+        $notRetriedOf = { param($Launched) $Launched.PSObject.Properties['NotRetried'] ? [string]$Launched.NotRetried : '' }
+        $eWhy = & $notRetriedOf $e.Run
+        & $add "retry: an output of the first launch that cannot be deleted means no retry (it would be read as the second one's), and the run says why ($eWhy)" $true (
+            $e.Calls -eq 1 -and $e.Retries.Count -eq 0 -and $e.Run.Status -ceq 'Modal' -and $eWhy -ceq 'retry-locked.wav of the first launch could not be deleted')
         # A probe directory among the outputs: it stays (the plugin is told its path again), and it must be empty
         $emptyOut = Join-Path $Tmp 'retry-empty.out'; $null = New-Item -ItemType Directory -Path $emptyOut
         $f = & $retry @((& $res Modal license-nag), (& $res Exited)) @($emptyOut)
         & $add 'retry: an output that is an empty directory is kept, and the launch is started once more' $false ($f.Calls -eq 2 -and $f.Retries.Count -eq 1 -and (Test-Path -LiteralPath $emptyOut -PathType Container))
         $fullOut = Join-Path $Tmp 'retry-full.out'; $null = New-Item -ItemType Directory -Path $fullOut; [IO.File]::WriteAllText((Join-Path $fullOut 'step-001.json'), '{}')
         $g = & $retry @((& $res Modal license-nag), (& $res Exited)) @($fullOut)
-        & $add 'retry: an output directory the first launch wrote into means no retry, and what it wrote stays' $true (
-            $g.Calls -eq 1 -and $g.Retries.Count -eq 0 -and $g.Run.Status -ceq 'Modal' -and (Test-Path -LiteralPath (Join-Path $fullOut 'step-001.json')))
+        $gWhy = & $notRetriedOf $g.Run
+        & $add "retry: an output directory the first launch wrote into means no retry, what it wrote stays, and the run says why ($gWhy)" $true (
+            $g.Calls -eq 1 -and $g.Retries.Count -eq 0 -and $g.Run.Status -ceq 'Modal' -and (Test-Path -LiteralPath (Join-Path $fullOut 'step-001.json')) -and
+            $gWhy -ceq 'the first launch wrote into retry-full.out' -and (& $notRetriedOf $f.Run) -ceq '')
+        $nagOf = { param([string[]]$Because) $o = [pscustomobject]@{ Status = 'Modal'; Modal = 'license-nag'; Windows = @('license-nag'); StillRunning = $false; Seconds = 1; ExitCode = $null }
+            if ($Because) { $o | Add-Member -NotePropertyName NotRetried -NotePropertyValue $Because[0] }; $o }
+        $nagText = @((Get-HarnessHostFailure (& $nagOf 'the first launch wrote into t1.out')), (Get-HarnessHostFailure (& $nagOf)))
+        & $add "retry: the reason of a launch that was not started again says why ($($nagText -join ' | '))" $true (
+            $nagText[0] -ceq 'stuck on dialog license-nag (seen: license-nag), ended; not retried: the first launch wrote into t1.out' -and $nagText[1] -ceq 'stuck on dialog license-nag (seen: license-nag), ended')
+        # A probe variable under the name of the job or of a report variable is refused before anything is written or started
+        $takenNames = foreach ($pair in @(@{ R = @{ EXAMPLE_PROBE_JSON = 'a' }; P = @{ EXAMPLE_PROBE_JSON = 'b' } }, @{ R = @{}; P = @{ REAPER_HARNESS_JOB = 'c' } })) {
+            $queue.Clear(); $queue.Enqueue((& $res Exited)); $calls.N = 0
+            try { $null = Invoke-HarnessLuaStep -Ctx ([pscustomobject]@{ Work = $Tmp }) -Name 'taken' -Step 'render' -ReportEnv $pair.R -ProbeEnv $pair.P; 'not refused' } catch { "$($_.Exception.Message) ($($calls.N) launches)" }
+        }
+        & $add "lua step: a probe variable named like the job or a report variable is refused before anything starts ($($takenNames -join ' | '))" $true (
+            ($takenNames -join '|') -ceq 'the variable EXAMPLE_PROBE_JSON is taken (0 launches)|the variable REAPER_HARNESS_JOB is taken (0 launches)' -and -not (Test-Path -LiteralPath (Join-Path $Tmp 'taken.job.lua')))
     } finally { $null = & $swap $was }
     $cases
 }
@@ -3398,6 +3415,10 @@ function Get-ProbeCases([string]$Tmp, [string]$RepoRoot) {
     $letThrough = @($refusedEnv | Where-Object { $null -eq (& $envWhy $_.V) } | ForEach-Object { $_.L })
     & $add "launch environment: refused: $(@($refusedEnv | ForEach-Object { $_.L }) -join ', ') (let through: $($letThrough -join ', '))" $true ($letThrough.Count -eq 0)
     & $add 'launch environment: a denied name says the harness may not set it' $true ((& $envWhy @{ PATH = $inWork }) -clike "*; the harness may not set it")
+    # Wherever the harness runs: REAPER starts in the work directory, so a relative value would mean something else there
+    $notFull = @(& $envWhy @{ X_ONE = 'take1.out' }; & $envWhy @{ X_ONE = 'C:x' })
+    & $add "launch environment: a relative and a drive-relative value are refused as not a full path ($($notFull -join ' | '))" $true (
+        ($notFull -join '|') -ceq 'the value of X_ONE is not a full path|the value of X_ONE is not a full path')
 
     # The input files, before REAPER (one usage error for every problem; files of scenarios not picked are not read)
     [IO.File]::WriteAllText((Join-Path $cfgDir 'probe/take1.json'), '{"gain":-6}')
@@ -3445,10 +3466,29 @@ function Get-ProbeCases([string]$Tmp, [string]$RepoRoot) {
         $changedRun.Why -ceq 'probe file probe/take1.json changed since it was checked' -and -not (Test-Path -LiteralPath (Join-Path $w6b 'take1.probe-EXAMPLE_PROBE_SCRIPT.json')) -and -not $ctx6b.ProbeRuns.Contains('take1'))
     $unchecked = New-HarnessProbeRun -Ctx (& $newCtx (Join-Path $root 'w6c') @{}) -Scenario (& $probeScen 'take1')
     & $add "probe run: a file that was not checked before the start is never copied ($($unchecked.Why))" $true ($unchecked.Why -ceq 'probe file probe/take1.json was not checked before the start')
-    $deep = Join-Path $root ('d' * (150 - $root.Length))
+    # The limit itself: <work>\take1.out of 140 characters leaves a name of 100 room within 240, one of 141 does not
+    $workOf = { param([int]$DirLength) Join-Path $root ('d' * ($DirLength - $root.Length - 11)) }
+    $at140 = New-HarnessProbeRun -Ctx (& $newCtx (& $workOf 140) $checked) -Scenario (& $probeScen 'take1')
+    $dir140 = Join-Path (& $workOf 140) 'take1.out'
+    & $add "probe run: a directory path of 140 characters is allowed ($($dir140.Length) characters; $($at140.Why))" $false ($null -eq $at140.Why -and $dir140.Length -eq 140 -and (Test-Path -LiteralPath $dir140 -PathType Container))
+    $deep = & $workOf 141
     $tooLong = New-HarnessProbeRun -Ctx (& $newCtx $deep $checked) -Scenario (& $probeScen 'take1')
-    & $add "probe run: a directory path that leaves a plugin no room for a name of 100 characters is refused before REAPER starts ($($tooLong.Why))" $true (
-        $tooLong.Why -ceq 'the probe directory path is too long for a plugin to write into it' -and -not (Test-Path -LiteralPath (Join-Path $deep 'take1.out')))
+    & $add "probe run: a directory path of 141 characters, which leaves a plugin no room for a name of 100, is refused before REAPER starts ($($tooLong.Why))" $true (
+        $tooLong.Why -ceq 'the probe directory path is too long for a plugin to write into it' -and (Join-Path $deep 'take1.out').Length -eq 141 -and -not (Test-Path -LiteralPath (Join-Path $deep 'take1.out')))
+    # A read-only file of the configuration gives a copy that is not read-only; a copy an earlier launch left is replaced
+    $roSource = Join-Path $cfgDir 'probe/take1.json'
+    [IO.File]::SetAttributes($roSource, [IO.FileAttributes]::ReadOnly)
+    try { $roRun = New-HarnessProbeRun -Ctx (& $newCtx (Join-Path $root 'w6e') $checked) -Scenario (& $probeScen 'take1') }
+    finally { [IO.File]::SetAttributes($roSource, [IO.FileAttributes]::Normal) }
+    $roCopy = Join-Path $root 'w6e/take1.probe-EXAMPLE_PROBE_SCRIPT.json'
+    & $add "probe run: the copy of a read-only file of the configuration is not read-only ($($roRun.Why))" $false (
+        $null -eq $roRun.Why -and [int]([IO.File]::GetAttributes($roCopy) -band [IO.FileAttributes]::ReadOnly) -eq 0)
+    $w6f = Join-Path $root 'w6f'
+    $null = New-Item -ItemType Directory -Force -Path $w6f
+    [IO.File]::WriteAllText((Join-Path $w6f 'take1.probe-EXAMPLE_PROBE_SCRIPT.json'), 'left by an earlier launch')
+    $overRun = New-HarnessProbeRun -Ctx (& $newCtx $w6f $checked) -Scenario (& $probeScen 'take1')
+    & $add "probe run: a copy an earlier launch left is replaced by one with the checked bytes ($($overRun.Why))" $false (
+        $null -eq $overRun.Why -and (Get-FileHash -LiteralPath (Join-Path $w6f 'take1.probe-EXAMPLE_PROBE_SCRIPT.json') -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $wantSha)
     $plain = New-HarnessProbeRun -Ctx (& $newCtx (Join-Path $root 'w6d') $checked) -Scenario ([pscustomobject]@{ id = 'x'; kind = 'render'; probe = $null })
     & $add 'probe run: nothing for a render without probe' $false ($null -eq $plain.Why -and $plain.Env.Count -eq 0)
 
@@ -3568,6 +3608,56 @@ function Get-ProbeCases([string]$Tmp, [string]$RepoRoot) {
     $null = $holdProc.WaitForExit(20000)
     & $add "probe collection: a file another program holds for a moment is moved on a retry ($($r16b.Got.Status): $($r16b.Got.Detail))" $false (
         $wasHeld -and $r16b.Got.Status -ceq 'PASS' -and $r16b.Got.Facts.collected -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $m16b.Out 'final.json')))
+    # Only a sharing violation is tried again (Start-Sleep counted, not slept): three times for a held file, never for one
+    # that is gone
+    $renders = (Get-Command Move-HarnessKeptFile).Module
+    $naps = [Collections.Generic.List[int]]::new()
+    & $renders { param($l) Set-Item function:script:Start-Sleep { param([int]$Milliseconds) $l.Add($Milliseconds) }.GetNewClosure() } $naps
+    try {
+        $goneWhy = Move-HarnessKeptFile -From (Join-Path $root 'no-such.json') -To (Join-Path $resDir 'renders/p16c/gone.json') -ResultDir $resDir -Retry
+        $goneNaps = $naps.Count
+        $heldFile = Join-Path $root 'held-16c.json'; [IO.File]::WriteAllText($heldFile, '{}')
+        $h16c = [IO.File]::Open($heldFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try { $heldWhy = Move-HarnessKeptFile -From $heldFile -To (Join-Path $resDir 'renders/p16c/held.json') -ResultDir $resDir -Retry } finally { $h16c.Dispose() }
+    } finally { & $renders { Remove-Item function:script:Start-Sleep } }
+    & $add "probe collection: a move is tried again only after a sharing violation: three times, 200 ms apart, for a held file; never for a file that is gone ($goneNaps, then $($naps.Count))" $true (
+        $goneWhy -clike 'gone.json could not be moved there: *' -and $goneNaps -eq 0 -and $heldWhy -clike 'held.json could not be moved there: *' -and $naps.Count -eq 3 -and
+        @($naps | Where-Object { $_ -ne 200 }).Count -eq 0 -and (Test-Path -LiteralPath $heldFile))
+    # A collected file whose hash cannot be taken: the row says which, it has no hash or size, and it stays under renders
+    $m16d = & $made 'w16d'
+    & $write $m16d.Out @('final.json', 'step-001.json')
+    $unreadableHash = { param([string]$Path) if ($Path -clike '*take1.out?final.json') { throw 'the file is in use by another process' }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $r16d = Invoke-WithModuleStub 'Save-HarnessProbeFiles' 'Get-HarnessSha256' $unreadableHash { & $collect $m16d 'p16d' }
+    $f16d = @($r16d.Got.Facts.files | Where-Object { $_.name -ceq 'final.json' })
+    & $add "probe collection: a collected file that cannot be read back: INCOMPLETE with its name, no sha256 or bytes, and it stays under renders ($($r16d.Got.Detail))" $true (
+        $r16d.Got.Status -ceq 'INCOMPLETE' -and $r16d.Got.Detail -ceq 'frames=1; probe: 2 files collected, 24 bytes; probe: collected, but final.json could not be read: the file is in use by another process' -and
+        $f16d.Count -eq 1 -and $null -eq $f16d[0].sha256 -and $null -eq $f16d[0].bytes -and (Test-Path -LiteralPath (Join-Path $resDir 'renders/p16d/run1/take1.out/final.json')))
+    # Held for a moment (two sharing violations): read on a retry
+    $m16e = & $made 'w16e'
+    & $write $m16e.Out @('final.json')
+    $busy = @{ N = 0 }
+    $briefly = { param([string]$Path)
+        if ($Path -clike '*take1.out?final.json') { $busy.N++; if ($busy.N -le 2) { throw [IO.IOException]::new('held by another process', -2147024864) } }
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }.GetNewClosure()
+    $r16e = Invoke-WithModuleStub 'Save-HarnessProbeFiles' 'Get-HarnessSha256' $briefly { & $collect $m16e 'p16e' }
+    & $add "probe collection: a collected file held for a moment is read on a retry ($($r16e.Got.Status): $($r16e.Got.Detail); $($busy.N) reads)" $false (
+        $r16e.Got.Status -ceq 'PASS' -and $busy.N -eq 3 -and $r16e.Got.Facts.files[0].sha256 -ceq (Get-HarnessSha256 (Join-Path $resDir 'renders/p16e/run1/take1.out/final.json')))
+    # An input copy that cannot be read back: noted, and the files are collected all the same
+    $m16f = & $made 'w16f'
+    & $write $m16f.Out @('final.json')
+    $inputHeld = { param([string]$Path) if ($Path -clike '*take1.probe-EXAMPLE_PROBE_SCRIPT.json') { throw 'the file is in use by another process' }; (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $r16f = Invoke-WithModuleStub 'Save-HarnessProbeFiles' 'Get-HarnessSha256' $inputHeld { & $collect $m16f 'p16f' }
+    & $add "probe collection: an input copy that cannot be read back is INCOMPLETE, and the files are collected all the same ($($r16f.Got.Detail))" $true (
+        $r16f.Got.Status -ceq 'INCOMPLETE' -and $r16f.Got.Detail -ceq 'frames=1; probe: the probe input EXAMPLE_PROBE_SCRIPT could not be read back: the file is in use by another process; probe: 1 file collected, 21 bytes' -and
+        $null -ne $r16f.Got.Facts -and $r16f.Got.Facts.collected -eq 1 -and (Test-Path -LiteralPath (Join-Path $resDir 'renders/p16f/run1/take1.out/final.json')))
+    # A directory swapped for a link after its attributes were read: its real path is not the work directory's leaf
+    $m16g = & $made 'w16g'
+    & $write $m16g.Out @('final.json')
+    $swapped = { param([string]$Path, [int]$Depth = 0) $real = Guard\Resolve-HarnessRealPath $Path $Depth; ($Path -clike '*\w16g\take1.out') ? "$real-elsewhere" : $real }
+    $r16g = Invoke-WithModuleStub 'Save-HarnessProbeFiles' 'Resolve-HarnessRealPath' $swapped { & $collect $m16g 'p16g' }
+    & $add "probe collection: a directory whose real path is not in the work directory (swapped after its attributes were read) is not collected from ($($r16g.Got.Detail))" $true (
+        $r16g.Got.Status -ceq 'INCOMPLETE' -and $r16g.Got.Detail -clike '*; probe: nothing collected: the directory was replaced by a link or junction' -and (Test-Path -LiteralPath (Join-Path $m16g.Out 'final.json')) -and
+        -not (Test-Path -LiteralPath (Join-Path $resDir 'renders/p16g')))
     $m17 = & $made 'w17'
     & $write $m17.Out @('final.json')
     [IO.File]::WriteAllText((Join-Path $root 'w17/take1.probe-EXAMPLE_PROBE_SCRIPT.json'), '{"gain":0}')
@@ -3593,14 +3683,21 @@ function Get-ProbeCases([string]$Tmp, [string]$RepoRoot) {
         $rowFacts['dir'] -ceq 'renders/p7/run1/take1.out' -and $keptFacts['probe']['dir'] -ceq 'renders/p7/run1/take1.out' -and $keptFacts['output']['path'] -ceq 'renders/p7/run1/take1.wav' -and
         $null -eq $nullDir['dir'] -and $null -eq (ConvertTo-HarnessProbeRowFacts $null 'renders/x') -and $rowFacts['files'][0]['name'] -ceq 'final.json' -and $f7.dir -ceq 'run1/take1.out' -and
         $null -eq (ConvertTo-HarnessKeptFacts ([ordered]@{ output = $null; stems = @(); comparison = $null; probe = $null }) 'renders/x')['probe'])
+    $leaky = [ordered]@{ variables = @([ordered]@{ name = 'EXAMPLE_PROBE_SCRIPT'; path = 'D:\Plug-ins\probe\take1.json' }); dir = 'run1/take1.out'
+        files = @([ordered]@{ name = 'final.json'; note = "Could not find a part of the path 'C:\audio work\x.json'." }) }
+    $maskedText = ConvertTo-HarnessJsonText -Value (ConvertTo-HarnessProbeRowFacts $leaky 'renders/p7')
+    & $add "probe facts: a local path anywhere in the probe facts is masked in the row ($maskedText)" $true (
+        $maskedText -cnotmatch '[A-Za-z]:[\\/]' -and $maskedText.Contains('"path":"<path>"') -and $maskedText.Contains('renders/p7/run1/take1.out'))
 
     # The cleanup after a green round: never recursive, never through a link
     $emptyDir = Join-Path $root 'clean-empty'; $null = New-Item -ItemType Directory -Path $emptyDir
     $fullDir = Join-Path $root 'clean-full'; $null = New-Item -ItemType Directory -Path $fullDir; [IO.File]::WriteAllText((Join-Path $fullDir 'x.json'), '{}')
     $linkDir = Join-Path $root 'clean-link'; $null = New-Item -ItemType Junction -Path $linkDir -Target $emptyDir
     $linkGone = Remove-HarnessEmptyDirectory -Path $linkDir
-    & $add 'probe cleanup: an empty directory is removed; one with a file in it and a junction are left as they are' $true (
+    $fileOnly = Join-Path $root 'clean-file.json'; [IO.File]::WriteAllText($fileOnly, '{}')
+    & $add 'probe cleanup: an empty directory is removed; one with a file in it, a junction and a file are left as they are' $true (
         -not $linkGone -and (Test-Path -LiteralPath $linkDir) -and -not (Remove-HarnessEmptyDirectory -Path $fullDir) -and (Test-Path -LiteralPath (Join-Path $fullDir 'x.json')) -and
+        -not (Remove-HarnessEmptyDirectory -Path $fileOnly) -and (Test-Path -LiteralPath $fileOnly -PathType Leaf) -and
         (Remove-HarnessEmptyDirectory -Path $emptyDir) -and -not (Test-Path -LiteralPath $emptyDir) -and -not (Remove-HarnessEmptyDirectory -Path (Join-Path $root 'nothing-here')))
     Remove-Item -LiteralPath $linkDir, $viaLink # the junctions only
     $cases
@@ -3637,6 +3734,7 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'runtime names (Node, Java, Perl, Ruby)'; N = 'NODE_OPTIONS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', 'PERL5LIB', 'RUBYOPT'; W = '' }
         @{ L = 'git and browser names'; N = 'GIT_SSH_COMMAND', 'CHROME_PATH', 'MSEDGE_ARGS'; W = '' }
         @{ L = 'proxy names (HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ALL_PROXY and any name ending in _PROXY)'; N = 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'MY_PROXY'; W = '' }
+        @{ L = 'names only the prefix HTTP, NO_PROXY or ALL_PROXY catches (not ending in _PROXY)'; N = 'HTTP_CA_FILE', 'HTTPS_CA_FILE', 'NO_PROXY_LIST', 'ALL_PROXY_X'; W = '' }
     )
     foreach ($c in $families) {
         $why = @(foreach ($n in $c.N) { [string](Test-HarnessReportEnvName $n) })

@@ -161,11 +161,11 @@ function Get-HarnessProbeSelection {
     @{ Move = $move.ToArray(); Problems = $problems.ToArray(); Left = $left }
 }
 
-# Never recursive: a directory with anything in it, or one that is a link or junction, is left as it is.
+# Never recursive: a directory with anything in it, or one that is a link or junction, is left as it is (and a file:
+# Directory.Delete refuses one).
 function Remove-HarnessEmptyDirectory([Parameter(Mandatory)][string]$Path) {
     try {
-        $attr = [IO.File]::GetAttributes($Path)
-        if (-not ($attr -band [IO.FileAttributes]::Directory) -or ($attr -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+        if ([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) { return $false }
         [IO.Directory]::Delete($Path, $false)
         $true
     } catch { $false }

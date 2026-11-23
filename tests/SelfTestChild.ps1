@@ -1773,6 +1773,11 @@ Write-Case 'end to end: a file in the record directory of the project makes the 
 # file-source cases. The result directories of these runs sit right below the scratch directory: a probe directory has to
 # leave a plugin 100 characters within 240, and the work directory of this child is too deep for that.
 $pbRoot = Split-Path -Parent $Work
+# Precondition: a probe directory path over the limit makes the scenario INCOMPLETE before REAPER starts. The longest one
+# these runs make (the longest run leaf with the longest scenario id) has to fit, or every probe case below is INCOMPLETE
+$pbLimit = & @(Get-Module Probe)[0] { $script:MaxDirPath }
+$pbLongest = [IO.Path]::Join($pbRoot, 'pf10', 'work', '20260101-000000-run1', 'tv-sh.out').Length
+Write-Case "end to end: probe: precondition: the probe directories of these runs fit the limit of a probe directory path ($pbLongest of $pbLimit characters; with a longer temporary directory every probe case below is INCOMPLETE)" $false ($pbLongest -le $pbLimit)
 $pbProbeDir = Join-Path $Work 'probe'
 $null = New-Item -ItemType Directory -Force -Path $pbProbeDir
 [IO.File]::WriteAllText((Join-Path $pbProbeDir 'take1.json'), '{"example":1}')
@@ -1932,7 +1937,7 @@ Write-SafeCase 'end to end: probe: a render that wrote no file is INCOMPLETE, an
     $pbSkip.Run.verdict -ceq 'INCOMPLETE' -and $pbSkipRow.status -ceq 'INCOMPLETE' -and $pbSkipRow.detail -clike 'the render produced no file; probe: 3 files collected, * bytes' -and
     (& $pbNamesOf $pbSkipRow.facts['probe']['files']) -ceq 'final.json,step-001.json,step-002.json' }
 # The licence reminder ends the first launch of the render: the directory is the plugin's again only when it is empty
-$pbNag = @{ Launches = 0; Seen = [Collections.Generic.List[object]]::new(); Spec = $null }
+$pbNag = @{ Launches = 0; Seen = [Collections.Generic.List[object]]::new(); Pids = [Collections.Generic.List[object]]::new(); Spec = $null }
 $pbNagOnce = {
     param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
     $told = $HostArgs['Environment']
@@ -1944,6 +1949,7 @@ $pbNagOnce = {
                 Sha = ((Test-Path -LiteralPath $copyFile -PathType Leaf) ? (Get-FileHash -LiteralPath $copyFile -Algorithm SHA256).Hash.ToLowerInvariant() : '') })
     }
     $launched = & $realOnce -Ctx $RunCtx -HostArgs $HostArgs -Label $Label
+    if ($outDir) { $pbNag.Pids.Add($launched.Pid) }
     if ($outDir -and $pbNag.Launches -eq 1) { $null = $pbNag.Spec.Probe.Remove('Fault'); $launched.Status = 'Modal'; $launched.Modal = 'license-nag' }
     $launched
 }.GetNewClosure()
@@ -1951,16 +1957,41 @@ $pbNag.Spec = & $pbSpecOf @{ Fault = 'None' }
 & $setOnce $pbNagOnce
 try { $pbN1 = & $pbRunOf $pbCfgF 'pn' $pbNag.Spec } finally { & $setOnce $realOnce }
 $pbN1Row = & $pbRowOf $pbN1 't1'
-Write-SafeCase 'end to end: probe: a licence reminder ends the first launch, which wrote nothing: the directory stays and is empty, the input copy is unchanged, the launch is started once more and the row is PASS' { "$($pbN1.Why)$($pbN1Row.detail)" } $false {
+Write-SafeCase 'end to end: probe: a licence reminder ends the first launch, which wrote nothing: the directory stays and is empty, the input copy is unchanged, the launch is started once more, the row is PASS and its pid is the second launch''s' { "$($pbN1.Why)$($pbN1Row.detail); pids $($pbNag.Pids -join ', '), facts $(& $safe { $pbN1Row.facts['probe']['pid'] })" } $false {
     $pbN1.Run.verdict -ceq 'PASS' -and $pbN1Row.status -ceq 'PASS' -and @($pbN1.Run.runs[0].retries).Count -eq 1 -and $pbNag.Seen.Count -eq 2 -and $pbNag.Seen[1].There -and $pbNag.Seen[1].Entries -eq 0 -and
-    $pbNag.Seen[1].Sha -ceq $pbSha -and $pbN1Row.facts['probe']['collected'] -eq 3 }
-$pbNag.Launches = 0; $pbNag.Seen.Clear(); $pbNag.Spec = & $pbSpecOf @{}
+    $pbNag.Seen[1].Sha -ceq $pbSha -and $pbN1Row.facts['probe']['collected'] -eq 3 -and $pbNag.Pids.Count -eq 2 -and $pbNag.Pids[0] -ne $pbNag.Pids[1] -and $pbN1Row.facts['probe']['pid'] -eq $pbNag.Pids[1] }
+$pbNag.Launches = 0; $pbNag.Seen.Clear(); $pbNag.Pids.Clear(); $pbNag.Spec = & $pbSpecOf @{}
 & $setOnce $pbNagOnce
 try { $pbN2 = & $pbRunOf $pbCfgF 'po' $pbNag.Spec } finally { & $setOnce $realOnce }
 $pbN2Row = & $pbRowOf $pbN2 't1'
-Write-SafeCase 'end to end: probe: a licence reminder ends a first launch that wrote into the directory: no retry, the row INCOMPLETE with the reminder as the reason, what was written collected' { "$($pbN2.Why)$($pbN2Row.detail)" } $true {
-    $pbN2.Run.verdict -ceq 'INCOMPLETE' -and $pbN2Row.status -ceq 'INCOMPLETE' -and $pbN2Row.detail -clike 'stuck on dialog license-nag *; probe: 3 files collected, * bytes' -and @($pbN2.Run.runs[0].retries).Count -eq 0 -and
-    $pbNag.Launches -eq 1 }
+Write-SafeCase 'end to end: probe: a licence reminder ends a first launch that wrote into the directory: no retry, the row INCOMPLETE with the reminder and why it was not started again, what was written collected' { "$($pbN2.Why)$($pbN2Row.detail)" } $true {
+    $pbN2.Run.verdict -ceq 'INCOMPLETE' -and $pbN2Row.status -ceq 'INCOMPLETE' -and $pbN2Row.detail -clike 'stuck on dialog license-nag *, ended; not retried: the first launch wrote into t1.out; probe: 3 files collected, * bytes' -and
+    @($pbN2.Run.runs[0].retries).Count -eq 0 -and $pbNag.Launches -eq 1 }
+# A probe scenario that does not run because learning failed: nothing to collect, and its row says only why it did not run
+$pbGapOnce = {
+    param([Alias('Ctx')]$RunCtx, $HostArgs, $Label)
+    $launched = & $realOnce -Ctx $RunCtx -HostArgs $HostArgs -Label $Label
+    if ($Label -ceq 'learn') { $launched.Status = 'Timeout' }
+    $launched
+}.GetNewClosure()
+& $setOnce $pbGapOnce
+try { $pbGap = & $pbRunOf $pbCfgF 'pg' (& $pbSpecOf @{}) } finally { & $setOnce $realOnce }
+$pbGapRow = & $pbRowOf $pbGap 't1'
+$pbGapFacts = & $safe { $pbGapRow.facts }
+Write-SafeCase 'end to end: probe: a probe scenario learning did not cover is not run, nothing is collected for it and its row has no probe facts' { "$($pbGap.Why)$($pbGapRow.detail)" } $true {
+    $pbGap.Run.verdict -ceq 'INCOMPLETE' -and $pbGapRow.status -ceq 'INCOMPLETE' -and $pbGapRow.detail -clike 'not run: *' -and $pbGapRow.detail -cnotlike '*probe*' -and
+    ($null -eq $pbGapFacts -or -not $pbGapFacts.Contains('probe')) }
+# The same reminder on the one driver launch of a render judged by a report: its probe directory is an output of that
+# launch too, so files the first launch wrote mean no retry
+$pbCfgJ = & $writeVariant { param($c) & $pbChange $c @($pbJudged) }
+$pbCfgJ.ReaperExe = $pwshExe
+$pbNag.Launches = 0; $pbNag.Seen.Clear(); $pbNag.Pids.Clear(); $pbNag.Spec = & $pbSpecOf @{}
+& $setOnce $pbNagOnce
+try { $pbN3 = & $pbRunOf $pbCfgJ 'pj' $pbNag.Spec } finally { & $setOnce $realOnce }
+$pbN3Row = & $pbRowOf $pbN3 'tr'
+Write-SafeCase 'end to end: probe: a licence reminder ends the driver launch of a render judged by a report after it wrote into the directory: no retry, and the row says why' { "$($pbN3.Why)$($pbN3Row.detail)" } $true {
+    $pbN3.Run.verdict -ceq 'INCOMPLETE' -and $pbN3Row.status -ceq 'INCOMPLETE' -and $pbN3Row.detail -clike '*stuck on dialog license-nag *, ended; not retried: the first launch wrote into tr.out*' -and
+    @($pbN3.Run.runs[0].retries).Count -eq 0 -and $pbNag.Launches -eq 1 -and $pbN3Row.facts['probe']['collected'] -eq 3 }
 
 # ---- listing parameters ----
 # Fixture Gain with parameters of its own: a name used twice, one with a path in it, REAPER's three at the end

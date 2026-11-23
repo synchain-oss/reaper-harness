@@ -23,7 +23,8 @@
 #                               claimed as for keeping). Never throws; returns Status, Detail (a collection problem is
 #                               INCOMPLETE, FAIL stays FAIL) and Facts ($null when it stopped on an unexpected error).
 #   ConvertTo-HarnessProbeRowFacts  those facts as the row has them: dir relative to the result directory, masked
-#   Move-HarnessKeptFile        one file, only to a place under the result directory, never over another (pure on files)
+#   Move-HarnessKeptFile        one file, only to a place under the result directory, never over another (pure on files);
+#                               -Retry: a move that met a sharing violation is tried again (Invoke-HarnessHeldRetry)
 #   Get-HarnessKeptFileFacts    a kept file: path, sha256, frames, channels, sampleRate, format, peakDb, nanCount, infCount
 #   Get-HarnessFxFacts          every FX of a layout as rendered: plugin, binary hash, bypass, state, the hash of its
 #                               block as written into the project, the parameters asked for (value and display text)
@@ -82,14 +83,30 @@ function New-HarnessKeep([Parameter(Mandatory)][string]$ResultDir, [Parameter(Ma
     [pscustomobject]@{ ResultDir = $ResultDir; Stamp = $Stamp; Rel = "renders/$Stamp"; Dir = $dir; Manifest = (Join-Path $dir 'manifest.jsonl'); Run = $Run; Checked = $false; Refused = ''; Lines = 0 }
 }
 
+# A scanner or the plugin's own process may hold a file a moment longer. Only a sharing violation (an IOException,
+# also inside the exception PowerShell wraps around it) is worth another try: at most three, 200 ms apart. Any other
+# error is thrown at once.
+function Test-HarnessSharingViolation([Exception]$Failure) {
+    for ($inner = $Failure; $null -ne $inner; $inner = $inner.InnerException) { if ($inner -is [IO.IOException] -and ($inner.HResult -band 0xFFFF) -in 32, 33) { return $true } }
+    $false
+}
+
+function Invoke-HarnessHeldRetry([Parameter(Mandatory)][scriptblock]$Action) {
+    for ($attempt = 0; ; $attempt++) {
+        try { return & $Action }
+        catch { if ($attempt -ge 3 -or -not (Test-HarnessSharingViolation $_.Exception)) { throw } }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
 # A real path that cannot be read (links that lead round in a circle, nested too deep) proves nothing: refused too.
-function Move-HarnessKeptFile([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To, [Parameter(Mandatory)][string]$ResultDir) {
+function Move-HarnessKeptFile([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To, [Parameter(Mandatory)][string]$ResultDir, [switch]$Retry) {
     $leaf = Split-Path -Leaf $To
     try { $inside = (Test-HarnessUnder $To $ResultDir) -and (Test-HarnessUnder (Resolve-HarnessRealPath $To) (Resolve-HarnessRealPath $ResultDir)) }
     catch { return "$leaf cannot be shown to be under the result directory: $($_.Exception.Message -replace '\s+', ' ')" }
     if (-not $inside) { return "$leaf would not be under the result directory" }
     if (Test-Path -LiteralPath $To) { return "$leaf is there already and is never overwritten" }
-    try { $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $To); [IO.File]::Move($From, $To, $false) }
+    try { $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $To); if ($Retry) { Invoke-HarnessHeldRetry { [IO.File]::Move($From, $To, $false) } } else { [IO.File]::Move($From, $To, $false) } }
     catch { return "$leaf could not be moved there: $($_.Exception.Message -replace '\s+', ' ')" }
     $null
 }
@@ -268,16 +285,6 @@ function ConvertTo-HarnessKeptFacts([Parameter(Mandatory)]$Entry, [Parameter(Man
     $copy
 }
 
-# A scanner or the plugin's own process may hold a file a moment longer: a move that failed is tried again, at most
-# three times, 200 ms apart. Returns the reason it was not moved, or $null.
-function Move-HarnessProbeFile([string]$From, [string]$To, [string]$ResultDir) {
-    for ($attempt = 0; ; $attempt++) {
-        $why = Move-HarnessKeptFile -From $From -To $To -ResultDir $ResultDir
-        if (-not $why -or $attempt -ge 3 -or -not $why.Contains(' could not be moved there: ')) { return $why }
-        Start-Sleep -Milliseconds 200
-    }
-}
-
 function Save-HarnessProbeFiles {
     param([Parameter(Mandatory)]$Keep, [Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario, [int]$Round = 1, [Parameter(Mandatory)][string]$Status, [string]$Detail = '')
     $s = $Scenario
@@ -299,10 +306,12 @@ function Save-HarnessProbeFiles {
         if ($made) {
             # The REAPER of the scenario's own render: the last process started after the run was made (a retry's, if any)
             if ($Ctx.Started.Count -gt $runs[$s.id].From) { $probeFacts.pid = $Ctx.Started[$Ctx.Started.Count - 1].Pid }
-            # The plugin may have changed its own input copy; a retry would then have run on other bytes
+            # The plugin may have changed its own input copy; a retry would then have run on other bytes. A copy that
+            # cannot be read is noted, and collection goes on
             foreach ($v in @($plan.Vars | Where-Object { $_.Kind -ceq 'file' })) {
-                $same = $v.Checked -and (Test-Path -LiteralPath $v.Path -PathType Leaf) -and ((Get-HarnessSha256 $v.Path) -ceq $v.Checked.Sha256)
-                if (-not $same) { $notes.Add("the probe input $($v.Name) changed during the launch"); $bad = $true }
+                try { $now = (Test-Path -LiteralPath $v.Path -PathType Leaf) ? (Invoke-HarnessHeldRetry { Get-HarnessSha256 $v.Path }) : $null }
+                catch { $notes.Add("the probe input $($v.Name) could not be read back: $($_.Exception.Message -replace '\s+', ' ')"); $bad = $true; continue }
+                if (-not $v.Checked -or $now -cne $v.Checked.Sha256) { $notes.Add("the probe input $($v.Name) changed during the launch"); $bad = $true }
             }
         }
         $d = $plan.Dir
@@ -313,7 +322,8 @@ function Save-HarnessProbeFiles {
             $stop = if (-not $made) { 'the directory was not made' }
             elseif ($Ctx.StillRunning) { 'nothing collected: a REAPER of this round could not be ended and may still write there' }
             elseif ($null -eq $attr) { 'nothing collected: the directory is not there any more' }
-            # Only an ancestor of the work directory may be a link; the directory itself is never followed
+            # Only an ancestor of the work directory may be a link; the directory itself is never followed. The real path
+            # backs the attributes up: a directory swapped for a link after they were read resolves elsewhere
             elseif (($attr -band [IO.FileAttributes]::ReparsePoint) -or -not ($attr -band [IO.FileAttributes]::Directory) -or
                 (Resolve-HarnessRealPath $d.Path) -ine [IO.Path]::Join((Resolve-HarnessRealPath $Ctx.Work), $leaf)) { 'nothing collected: the directory was replaced by a link or junction' }
             else { $null }
@@ -332,13 +342,11 @@ function Save-HarnessProbeFiles {
                 $unread = [Collections.Generic.List[string]]::new()
                 foreach ($m in @($sel.Move | Where-Object { -not $refused })) {
                     $dest = Join-Path $Keep.Dir "$outRel/$($m.Name)"
-                    $why = Move-HarnessProbeFile -From (Join-Path $d.Path $m.Name) -To $dest -ResultDir $Keep.ResultDir
+                    $why = Move-HarnessKeptFile -From (Join-Path $d.Path $m.Name) -To $dest -ResultDir $Keep.ResultDir -Retry
                     if ($why) { $notMoved.Add($why); $left++; continue }
                     $one = [ordered]@{ name = $m.Name; bytes = $null; sha256 = $null; temporary = $m.Temporary }
-                    for ($attempt = 0; ; $attempt++) {
-                        try { $one.bytes = [IO.FileInfo]::new($dest).Length; $one.sha256 = Get-HarnessSha256 $dest; break }
-                        catch { if ($attempt -ge 3) { $one.bytes = $null; $unread.Add("$($m.Name) could not be read: $($_.Exception.Message -replace '\s+', ' ')"); break }; Start-Sleep -Milliseconds 200 }
-                    }
+                    try { $one.sha256 = Invoke-HarnessHeldRetry { Get-HarnessSha256 $dest }; $one.bytes = [IO.FileInfo]::new($dest).Length }
+                    catch { $one.sha256 = $null; $unread.Add("$($m.Name) could not be read: $($_.Exception.Message -replace '\s+', ' ')") }
                     $got.Add($one)
                 }
                 $probeFacts.dir = $got.Count ? $outRel : $null

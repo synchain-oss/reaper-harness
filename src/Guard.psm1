@@ -498,7 +498,7 @@ $script:DeniedNames = 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'APPDA
     'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMW6432', 'ALLUSERSPROFILE', 'PUBLIC',
     'PSMODULEPATH', 'COMPUTERNAME', 'NUMBER_OF_PROCESSORS', 'OS', 'DRIVERDATA', 'ONEDRIVE', 'SSLKEYLOGFILE'
 $script:DeniedPrefixes = 'REAPER_', 'WEBVIEW2_', 'COR_', 'CORECLR_', 'COMPLUS_', 'DOTNET_', 'PROCESSOR_', 'POWERSHELL_', 'PSEXEC_', 'VST_', 'VST3_', 'CLAP_', 'JUCE_', 'PYTHON', 'LUA_', 'QT_',
-    'SSL_', 'OPENSSL_', 'CURL_', 'NODE_', 'JAVA', 'JDK_', 'PERL', 'RUBY', 'GIT_', 'CHROME', 'MSEDGE', 'REQUESTS_', 'HTTP', 'HTTPS_', 'NO_PROXY', 'ALL_PROXY'
+    'SSL_', 'OPENSSL_', 'CURL_', 'NODE_', 'JAVA', 'JDK_', 'PERL', 'RUBY', 'GIT_', 'CHROME', 'MSEDGE', 'REQUESTS_', 'HTTP', 'NO_PROXY', 'ALL_PROXY'
 
 # $What names who would set it in the refusal: a report (the default), a probe variable, or the harness (the launch check).
 function Test-HarnessReportEnvName([string]$Variable, [string]$What = 'a report') {
