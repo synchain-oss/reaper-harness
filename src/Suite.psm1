@@ -36,6 +36,7 @@ Import-Module (Join-Path $PSScriptRoot 'States.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Transport.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Sources.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Renders.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Probe.psm1') -ErrorAction Stop
 
 $script:LabelPattern = '^[0-9A-Za-z._-]{1,40}$'
 
@@ -368,6 +369,9 @@ function Invoke-HarnessSuite {
     # A source file of a picked scenario that is not there, not usable or at another rate: usage error
     $sourceFiles = [ordered]@{}
     if (-not $List) { $sourceFiles = Read-HarnessSourceFiles -Config $conf -Scenarios (@($picked.Positive) + @($picked.Negative)) }
+    # A probe file of a picked scenario that is not there, leaves the directory or is over 1 MiB: usage error (negative cases have no probe)
+    $probeFiles = @{}
+    if (-not $List) { $probeFiles = Read-HarnessProbeFiles -Config $conf -Scenarios @($picked.Positive) }
     $tool = Get-HarnessToolVersion
     $pre = Get-HarnessPreflight -ReaperExe $ReaperExe -PluginDir $PluginDir -Config $conf -SkipMarkers $SkipMarker -ExtensionPreflight $ext.Preflight -PluginIds $listIds
     $Shas = [ordered]@{}
@@ -430,6 +434,7 @@ function Invoke-HarnessSuite {
             $before = Get-HarnessDefaultCfgSnapshot
             $ctx = New-HarnessContext -ReaperExe $ReaperExe -WorkDir $work -Driver $driver -Config $conf -Installed $installed -Jsfx $jsfx -States $states -Locks $locks -SkipMarkers $SkipMarker `
                 -LuaExtensions $ext.Lua -Kinds $ext.Kinds -ToolJsfx $toolJsfx
+            $ctx.ProbeFiles = $probeFiles
             if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
             if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
             if ($SelfTestHooks['Stopper']) { $ctx.Stopper = $SelfTestHooks['Stopper'] }
@@ -488,9 +493,19 @@ function Invoke-HarnessSuite {
                     $row = [ordered]@{ id = $s.id; kind = $s.kind; status = $o.Status; seconds = $o.Seconds; detail = (Hide-HarnessPaths $o.Detail) }
                     if ($o.PSObject.Properties['Facts']) { $row.facts = Hide-HarnessFacts $o.Facts }
                     $shown = $o
+                    # Once every launch of the scenario has ended, whatever its outcome (a scenario that did not run made no directory)
+                    $probeDone = $null
+                    if (-not $gap -and $s.kind -ceq 'render' -and $s.PSObject.Properties['probe'] -and $s.probe) {
+                        $probeDone = Save-HarnessProbeFiles -Keep $keeper -Ctx $ctx -Scenario $s -Round $k -Status $o.Status -Detail $o.Detail
+                        $shown = $probeDone
+                        $row.status = $probeDone.Status; $row.detail = Hide-HarnessPaths $probeDone.Detail
+                        if (-not ($row.Contains('facts') -and $row.facts -is [System.Collections.IDictionary])) { $row.facts = [ordered]@{} }
+                        $row.facts['probe'] = ConvertTo-HarnessProbeRowFacts $probeDone.Facts $keeper.Rel
+                    }
                     if ($s.kind -ceq 'render' -and $s.keep) {
                         # Whatever the verdict: its render and stems move out of the work directory, a line goes into the manifest
-                        $kept = Save-HarnessKeptRender -Keep $keeper -Ctx $ctx -Scenario $s -Round $k -Status $o.Status -Detail $o.Detail -Comparison (Get-HarnessOutcomeFact $o 'comparison') -Tail (Get-HarnessOutcomeFact $o 'tail')
+                        $kept = Save-HarnessKeptRender -Keep $keeper -Ctx $ctx -Scenario $s -Round $k -Status $shown.Status -Detail $shown.Detail -Comparison (Get-HarnessOutcomeFact $o 'comparison') -Tail (Get-HarnessOutcomeFact $o 'tail') `
+                            -Probe ($probeDone ? $probeDone.Facts : $null)
                         $shown = $kept
                         $row.status = $kept.Status; $row.detail = Hide-HarnessPaths $kept.Detail
                         if ($kept.Record) {
@@ -518,6 +533,8 @@ function Invoke-HarnessSuite {
                 if (-not $KeepWork -and @($rows | Where-Object { $_.status -ne 'PASS' }).Count -eq 0 -and $mods.Status -eq 'PASS') {
                     # All green: delete this round's files one by one (never recursively); otherwise keep them for inspection
                     foreach ($f in $ctx.Files) { if (Test-Path -LiteralPath $f -PathType Leaf) { Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue } }
+                    # Every probe directory is empty by now: anything left in one made its row INCOMPLETE
+                    foreach ($probeDir in $ctx.Dirs) { $null = Remove-HarnessEmptyDirectory -Path $probeDir }
                 }
             } catch {
                 # No conclusion for this round, and what has to be checked at the end of every round still is: the default

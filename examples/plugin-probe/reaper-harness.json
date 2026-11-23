@@ -1,0 +1,33 @@
+{
+  "$schema": "../../schema/config.schema.json",
+  "schema": 1,
+  "name": "plugin-probe",
+  "notes": "Example: a test build of a plugin (a placeholder, My Probe Test Build.vst3) that reads three environment variables: EXAMPLE_PROBE_SCRIPT (a file it reads), EXAMPLE_PROBE_OUT (a directory it writes into) and EXAMPLE_PROBE_JSON (its report). Two recordings of your own, sources/take1.wav and sources/take2.wav next to this file, and a script for each, probe/take1.json and probe/take2.json, with a shifted version of each (none of them shipped): another recording is another layout, and a variant can change the script, not the recording. take1 and take2 are rendered at 1x and online, the plugin not told that it renders offline, and only the scenario's own render gets the probe variables: the harness copies the script for that launch, makes a new empty directory, and afterwards moves what the plugin wrote there to renders/<stamp>/run<k>/<id>.out/. It never reads those files: PASS says that the render passed its audio criteria (here: not silent) and that at least min files (default 1) were collected; whether the plugin's own script ran correctly is for you to read in them. counts judges the plugin's report over a render compared with dry, without the probe. A 4-minute recording at 1x needs limits.renderTimeoutSec above 240. See docs/CONFIG.md.",
+  "plugins": {
+    "tb": {
+      "bundle": "My Probe Test Build.vst3",
+      "probe": { "EXAMPLE_PROBE_SCRIPT": { "file": "probe/take1.json" }, "EXAMPLE_PROBE_OUT": { "dir": true } },
+      "report": { "env": "EXAMPLE_PROBE_JSON", "fields": ["blocks"], "pid": "pid" }
+    }
+  },
+  "layouts": {
+    "take1": { "tracks": [ { "name": "Take", "source": true, "file": "sources/take1.wav", "fx": [ { "plugin": "tb" } ] } ] },
+    "take2": { "tracks": [ { "name": "Take", "source": true, "file": "sources/take2.wav", "fx": [ { "plugin": "tb" } ] } ] }
+  },
+  "limits": { "renderTimeoutSec": 600 },
+  "scenarios": [
+    { "id": "take1", "kind": "render", "layout": "take1", "compare": "none", "notSilent": true, "host": { "informOfflineState": false }, "matrix": { "mode": ["1x", "online"] },
+      "probe": true,
+      "variants": [
+        { "id": "as-written" },
+        { "id": "shifted", "probe": { "EXAMPLE_PROBE_SCRIPT": { "file": "probe/take1-shifted.json" } } }
+      ] },
+    { "id": "take2", "kind": "render", "layout": "take2", "compare": "none", "notSilent": true, "host": { "informOfflineState": false }, "matrix": { "mode": ["1x", "online"] },
+      "probe": { "EXAMPLE_PROBE_SCRIPT": { "file": "probe/take2.json" } },
+      "variants": [
+        { "id": "as-written" },
+        { "id": "shifted", "probe": { "EXAMPLE_PROBE_SCRIPT": { "file": "probe/take2-shifted.json" } } }
+      ] },
+    { "id": "counts", "kind": "render", "layout": "take1", "compare": "dry", "host": { "runFxWhenStopped": false }, "report": { "tb": { "blocks": { "delta": { "min": 1 } } } } }
+  ]
+}

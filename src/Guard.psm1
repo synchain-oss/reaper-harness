@@ -492,16 +492,20 @@ function Test-HarnessScriptLint {
 
 # Variables a report may not set: what Windows, the .NET and PowerShell runtimes, REAPER and what it loads (ReaScript's
 # Python and Lua, Qt in a plugin), WebView2 and the harness itself read. Names, and prefixes (PYTHON takes PYTHONHOME and
-# PYTHONPATH along); compared without regard to case, as Windows does.
+# PYTHONPATH along); compared without regard to case, as Windows does. The TLS, proxy and language-runtime families load a
+# file or take options in whatever a plugin links (a key log, a CA bundle, a proxy, a module path).
 $script:DeniedNames = 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'USERNAME', 'USERDOMAIN', 'HOMEDRIVE', 'HOMEPATH', 'HOMESHARE',
     'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMW6432', 'ALLUSERSPROFILE', 'PUBLIC',
-    'PSMODULEPATH', 'COMPUTERNAME', 'NUMBER_OF_PROCESSORS', 'OS', 'DRIVERDATA', 'ONEDRIVE'
-$script:DeniedPrefixes = 'REAPER_', 'WEBVIEW2_', 'COR_', 'CORECLR_', 'COMPLUS_', 'DOTNET_', 'PROCESSOR_', 'POWERSHELL_', 'PSEXEC_', 'VST_', 'VST3_', 'CLAP_', 'JUCE_', 'PYTHON', 'LUA_', 'QT_'
+    'PSMODULEPATH', 'COMPUTERNAME', 'NUMBER_OF_PROCESSORS', 'OS', 'DRIVERDATA', 'ONEDRIVE', 'SSLKEYLOGFILE'
+$script:DeniedPrefixes = 'REAPER_', 'WEBVIEW2_', 'COR_', 'CORECLR_', 'COMPLUS_', 'DOTNET_', 'PROCESSOR_', 'POWERSHELL_', 'PSEXEC_', 'VST_', 'VST3_', 'CLAP_', 'JUCE_', 'PYTHON', 'LUA_', 'QT_',
+    'SSL_', 'OPENSSL_', 'CURL_', 'NODE_', 'JAVA', 'JDK_', 'PERL', 'RUBY', 'GIT_', 'CHROME', 'MSEDGE', 'REQUESTS_', 'HTTP', 'HTTPS_', 'NO_PROXY', 'ALL_PROXY'
 
-function Test-HarnessReportEnvName([string]$Variable) {
-    if ($Variable -cnotmatch '^[A-Z][A-Z0-9_]{2,63}$') { return "'$Variable' must match ^[A-Z][A-Z0-9_]{2,63}$" }
-    if ($Variable -in $script:DeniedNames) { return "'$Variable' is a variable Windows or a runtime reads; a report may not set it" }
-    foreach ($p in $script:DeniedPrefixes) { if ($Variable.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { return "'$Variable' starts with $p, which REAPER, what it loads, WebView2, a runtime or the harness reads; a report may not set it" } }
+# $What names who would set it in the refusal: a report (the default), a probe variable, or the harness (the launch check).
+function Test-HarnessReportEnvName([string]$Variable, [string]$What = 'a report') {
+    if ($Variable -cnotmatch '\A[A-Z][A-Z0-9_]{2,63}\z') { return "'$Variable' must match ^[A-Z][A-Z0-9_]{2,63}$" }
+    if ($Variable -in $script:DeniedNames) { return "'$Variable' is a variable Windows or a runtime reads; $What may not set it" }
+    foreach ($p in $script:DeniedPrefixes) { if ($Variable.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { return "'$Variable' starts with $p, which REAPER, what it loads, WebView2, a runtime or the harness reads; $What may not set it" } }
+    if ($Variable.EndsWith('_PROXY', [StringComparison]::OrdinalIgnoreCase)) { return "'$Variable' ends with _PROXY, which network libraries read; $What may not set it" }
     $null
 }
 

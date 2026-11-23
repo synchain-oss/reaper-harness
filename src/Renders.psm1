@@ -15,7 +15,14 @@
 #                               A repeat that reports its residual keeps its first render too (run<k>/<id>-first.wav
 #                               and -first-stem-<track>.wav) when the two differ, or always with keepFirst.
 #                               Returns Status and Detail of the row (INCOMPLETE added when something could not be
-#                               kept or a kept file could not be read, FAIL stays FAIL) and the Record.
+#                               kept or a kept file could not be read, FAIL stays FAIL) and the Record. Probe: the
+#                               scenario's collected files (Save-HarnessProbeFiles), the line's probe.
+#   Save-HarnessProbeFiles      after a render scenario with probe returned (every launch of it has ended), with or
+#                               without keep: the files its plugin wrote into the probe directory move to
+#                               run<k>/<id>.out/<name> (Get-HarnessProbeSelection decides which; the run directory is
+#                               claimed as for keeping). Never throws; returns Status, Detail (a collection problem is
+#                               INCOMPLETE, FAIL stays FAIL) and Facts ($null when it stopped on an unexpected error).
+#   ConvertTo-HarnessProbeRowFacts  those facts as the row has them: dir relative to the result directory, masked
 #   Move-HarnessKeptFile        one file, only to a place under the result directory, never over another (pure on files)
 #   Get-HarnessKeptFileFacts    a kept file: path, sha256, frames, channels, sampleRate, format, peakDb, nanCount, infCount
 #   Get-HarnessFxFacts          every FX of a layout as rendered: plugin, binary hash, bypass, state, the hash of its
@@ -33,6 +40,7 @@ Import-Module (Join-Path $PSScriptRoot 'Rpp.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Plugins.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Sources.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Probe.psm1') -ErrorAction Stop
 
 $script:ToolVersion = '0.1.0'
 $script:Hex40 = '^[0-9a-f]{40}$'
@@ -154,6 +162,13 @@ function Get-HarnessKeepRefusal([Parameter(Mandatory)]$Keep) {
     catch { (Test-Path -LiteralPath $Keep.Manifest) ? "$($Keep.Rel)/manifest.jsonl is there already (a run started in the same second)" : "$($Keep.Rel) could not be made: $($_.Exception.Message -replace '\s+', ' ')" }
 }
 
+# Keeping and collecting check and claim the run directory once for the whole run: the refusal, '' when it may be used.
+function Get-HarnessKeepClaim([Parameter(Mandatory)]$Keep) {
+    # The refusal is set before the claim counts as done: a claim that threw is tried again, never taken as made
+    if (-not $Keep.Checked) { $Keep.Refused = Get-HarnessKeepRefusal $Keep; $Keep.Checked = $true }
+    $Keep.Refused
+}
+
 function Get-HarnessWorse([string]$A, [string]$B) { foreach ($x in 'FAIL', 'INCOMPLETE') { if ($x -cin $A, $B) { return $x } }; 'PASS' }
 
 # Whether the first render of a repeat is kept as well (pure): only when the residual is reported (Comparison: the
@@ -166,14 +181,13 @@ function Test-HarnessKeepFirst($Scenario, $Comparison) {
     $false
 }
 
-# Comparison and Tail: the row's comparison and tail facts ($null when it has none), written into the line.
+# Comparison, Tail and Probe: the row's comparison, tail and probe facts ($null when it has none), written into the line.
 function Save-HarnessKeptRender {
     param([Parameter(Mandatory)]$Keep, [Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario, [int]$Round = 1, [Parameter(Mandatory)][string]$Status, [string]$Detail = '',
-          $Comparison = $null, $Tail = $null)
+          $Comparison = $null, $Tail = $null, $Probe = $null)
     $s = $Scenario
     try {
-        # The refusal is set before the claim counts as done: a claim that threw is tried again, never taken as made
-        if (-not $Keep.Checked) { $Keep.Refused = Get-HarnessKeepRefusal $Keep; $Keep.Checked = $true }
+        $null = Get-HarnessKeepClaim $Keep
         $problems = [Collections.Generic.List[string]]::new() # what was not kept
         $unread = [Collections.Generic.List[string]]::new() # what was kept but could not be described
         if ($Keep.Refused) { $problems.Add($Keep.Refused) }
@@ -223,7 +237,7 @@ function Save-HarnessKeptRender {
                 tailSeconds = ($s.PSObject.Properties['tailSeconds'] ? [double]$s.tailSeconds : 0.0); tailFrames = ($s.PSObject.Properties['tailFrames'] ? [long]$s.tailFrames : [long]0)
                 endPeakDb = (($Tail -is [Collections.IDictionary]) ? $Tail['endPeakDb'] : $null)
                 host = [ordered]@{ anticipativeFx = [bool]$s.host.AnticipativeFx; runFxWhenStopped = [bool]$s.host.RunFxWhenStopped; informOfflineState = [bool]$s.host.InformOfflineState } }
-            comparison = $cmp; sources = (Get-HarnessSourceFacts $Ctx $scenarioLayout); fx = $fxFacts
+            comparison = $cmp; probe = $Probe; sources = (Get-HarnessSourceFacts $Ctx $scenarioLayout); fx = $fxFacts
         }
         foreach ($k in $Keep.Run.get_Keys()) { $record[$k] = $Keep.Run[$k] }
         $record = Hide-HarnessFacts $record # every string of the line, keys too: details carry exception texts, names come from plugins
@@ -250,8 +264,110 @@ function ConvertTo-HarnessKeptFacts([Parameter(Mandatory)]$Entry, [Parameter(Man
     $copy = ConvertFrom-HarnessJson (ConvertTo-HarnessJsonText -Value $Entry)
     $first = ($copy['comparison'] -is [Collections.IDictionary]) ? $copy['comparison']['first'] : $null
     foreach ($f in @($copy['output']) + @($copy['stems']) + @($first) + @($first ? $first['stems'] : @())) { if ($f -and $f['path']) { $f['path'] = "$Rel/$($f['path'])" } }
+    if ($copy.Contains('probe') -and $copy['probe'] -is [Collections.IDictionary] -and $copy['probe']['dir']) { $copy['probe']['dir'] = "$Rel/$($copy['probe']['dir'])" }
     $copy
 }
 
+# A scanner or the plugin's own process may hold a file a moment longer: a move that failed is tried again, at most
+# three times, 200 ms apart. Returns the reason it was not moved, or $null.
+function Move-HarnessProbeFile([string]$From, [string]$To, [string]$ResultDir) {
+    for ($attempt = 0; ; $attempt++) {
+        $why = Move-HarnessKeptFile -From $From -To $To -ResultDir $ResultDir
+        if (-not $why -or $attempt -ge 3 -or -not $why.Contains(' could not be moved there: ')) { return $why }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+function Save-HarnessProbeFiles {
+    param([Parameter(Mandatory)]$Keep, [Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario, [int]$Round = 1, [Parameter(Mandatory)][string]$Status, [string]$Detail = '')
+    $s = $Scenario
+    try {
+        $plan = Get-HarnessProbePlan -ConfigDir $Ctx.Config.ConfigDir -Scenario $s -Work $Ctx.Work -Checked $Ctx['ProbeFiles']
+        if ($null -eq $plan) { return [pscustomobject]@{ Status = $Status; Detail = $Detail; Facts = $null } }
+        $runs = $Ctx['ProbeRuns']
+        $made = ($runs -is [Collections.IDictionary]) -and $runs.Contains($s.id)
+        $probeFacts = [ordered]@{
+            variables = @(foreach ($v in $plan.Vars) {
+                    $isFile = $v.Kind -ceq 'file'
+                    [ordered]@{ name = $v.Name; plugin = $v.Plugin; kind = $v.Kind; path = ($isFile ? $v.Key : $null); sha256 = (($isFile -and $v.Checked) ? $v.Checked.Sha256 : $null)
+                        bytes = (($isFile -and $v.Checked) ? $v.Checked.Bytes : $null); min = ($isFile ? $null : $v.Min) }
+                })
+            pid = $null; dir = $null; files = @(); collected = 0; bytes = [long]0; temporary = 0; left = 0
+        }
+        $notes = [Collections.Generic.List[string]]::new() # each a '; probe: ...' part of the detail
+        $bad = $false
+        if ($made) {
+            # The REAPER of the scenario's own render: the last process started after the run was made (a retry's, if any)
+            if ($Ctx.Started.Count -gt $runs[$s.id].From) { $probeFacts.pid = $Ctx.Started[$Ctx.Started.Count - 1].Pid }
+            # The plugin may have changed its own input copy; a retry would then have run on other bytes
+            foreach ($v in @($plan.Vars | Where-Object { $_.Kind -ceq 'file' })) {
+                $same = $v.Checked -and (Test-Path -LiteralPath $v.Path -PathType Leaf) -and ((Get-HarnessSha256 $v.Path) -ceq $v.Checked.Sha256)
+                if (-not $same) { $notes.Add("the probe input $($v.Name) changed during the launch"); $bad = $true }
+            }
+        }
+        $d = $plan.Dir
+        if ($d) {
+            $probeFacts.left = $null
+            $leaf = Split-Path -Leaf $d.Path
+            $attr = try { [IO.File]::GetAttributes($d.Path) } catch { $null }
+            $stop = if (-not $made) { 'the directory was not made' }
+            elseif ($Ctx.StillRunning) { 'nothing collected: a REAPER of this round could not be ended and may still write there' }
+            elseif ($null -eq $attr) { 'nothing collected: the directory is not there any more' }
+            # Only an ancestor of the work directory may be a link; the directory itself is never followed
+            elseif (($attr -band [IO.FileAttributes]::ReparsePoint) -or -not ($attr -band [IO.FileAttributes]::Directory) -or
+                (Resolve-HarnessRealPath $d.Path) -ine [IO.Path]::Join((Resolve-HarnessRealPath $Ctx.Work), $leaf)) { 'nothing collected: the directory was replaced by a link or junction' }
+            else { $null }
+            $listed = $stop ? $null : (Get-HarnessProbeEntries -Path $d.Path)
+            if ($listed -and $listed.Over) { $stop = 'nothing collected: more than 10000 entries' }
+            if ($stop) { $notes.Add($stop); $bad = $true }
+            else {
+                $sel = Get-HarnessProbeSelection -Entries $listed.Entries -Min $d.Min
+                $notMoved = [Collections.Generic.List[string]]::new()
+                foreach ($p in $sel.Problems) { $notMoved.Add($p) }
+                $left = $sel.Left
+                $refused = $sel.Move.Count ? (Get-HarnessKeepClaim $Keep) : ''
+                if ($refused) { $notMoved.Add($refused); $left += $sel.Move.Count }
+                $outRel = "run$Round/$($s.id).out"
+                $got = [Collections.Generic.List[object]]::new()
+                $unread = [Collections.Generic.List[string]]::new()
+                foreach ($m in @($sel.Move | Where-Object { -not $refused })) {
+                    $dest = Join-Path $Keep.Dir "$outRel/$($m.Name)"
+                    $why = Move-HarnessProbeFile -From (Join-Path $d.Path $m.Name) -To $dest -ResultDir $Keep.ResultDir
+                    if ($why) { $notMoved.Add($why); $left++; continue }
+                    $one = [ordered]@{ name = $m.Name; bytes = $null; sha256 = $null; temporary = $m.Temporary }
+                    for ($attempt = 0; ; $attempt++) {
+                        try { $one.bytes = [IO.FileInfo]::new($dest).Length; $one.sha256 = Get-HarnessSha256 $dest; break }
+                        catch { if ($attempt -ge 3) { $one.bytes = $null; $unread.Add("$($m.Name) could not be read: $($_.Exception.Message -replace '\s+', ' ')"); break }; Start-Sleep -Milliseconds 200 }
+                    }
+                    $got.Add($one)
+                }
+                $probeFacts.dir = $got.Count ? $outRel : $null
+                $probeFacts.files = $got.ToArray()
+                $probeFacts.collected = $got.Count
+                $probeFacts.bytes = [long](@($got | ForEach-Object { [long]($_.bytes ?? 0) }) | Measure-Object -Sum).Sum
+                $probeFacts.temporary = @($got | Where-Object { $_.temporary }).Count
+                $probeFacts.left = $left
+                $line = "$(Get-HarnessCount $got.Count 'file') collected, $($probeFacts.bytes) bytes" + ($probeFacts.temporary ? ", $($probeFacts.temporary) temporary" : '')
+                if ($notMoved.Count) { $line += "; not collected: $($notMoved -join '; ')"; $bad = $true }
+                $notes.Add($line)
+                foreach ($u in $unread) { $notes.Add("collected, but $u"); $bad = $true }
+            }
+        }
+        if ($bad) { $Status = Get-HarnessWorse $Status 'INCOMPLETE' }
+        foreach ($n in $notes) { $Detail += "; probe: $n" }
+        [pscustomobject]@{ Status = $Status; Detail = $Detail; Facts = $probeFacts }
+    } catch {
+        [pscustomobject]@{ Status = (Get-HarnessWorse $Status 'INCOMPLETE'); Detail = "$Detail; probe: collection stopped on an unexpected error: $($_.Exception.Message -replace '\s+', ' ')"; Facts = $null }
+    }
+}
+
+# The row's copy of the probe facts: dir relative to the result directory, like facts.kept, every string masked.
+function ConvertTo-HarnessProbeRowFacts($Probe, [string]$Rel) {
+    if ($null -eq $Probe) { return $null }
+    $copy = ConvertFrom-HarnessJson (ConvertTo-HarnessJsonText -Value $Probe)
+    if ($copy['dir']) { $copy['dir'] = "$Rel/$($copy['dir'])" }
+    Hide-HarnessFacts $copy
+}
+
 Export-ModuleMember -Function Get-HarnessToolVersion, Get-HarnessGitCommit, New-HarnessKeep, Move-HarnessKeptFile, Get-HarnessKeptFileFacts, Get-HarnessFxFacts, Get-HarnessSourceFacts,
-    Save-HarnessKeptRender, ConvertTo-HarnessKeptFacts
+    Save-HarnessKeptRender, ConvertTo-HarnessKeptFacts, Get-HarnessKeepClaim, Save-HarnessProbeFiles, ConvertTo-HarnessProbeRowFacts

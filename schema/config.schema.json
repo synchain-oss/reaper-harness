@@ -288,6 +288,40 @@
       "additionalProperties": false,
       "description": "the plugin writes counts of its own to a small JSON file"
     },
+    "probeValue": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "pattern": "^[^\\u0000-\\u001f]{1,260}$",
+              "description": "a path relative to the configuration file, inside its directory"
+            }
+          },
+          "required": ["file"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dir": {
+              "type": "boolean",
+              "description": "true: a new empty directory for each render"
+            },
+            "min": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32,
+              "description": "the fewest files the plugin must write there, default 1"
+            }
+          },
+          "required": ["dir"],
+          "additionalProperties": false
+        }
+      ],
+      "description": "a path the harness makes: the copy of a file of the configuration, or a new empty directory"
+    },
     "reportBound": {
       "anyOf": [
         {
@@ -396,6 +430,17 @@
         },
         "report": {
           "$ref": "#/$defs/report"
+        },
+        "probe": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/probeValue"
+          },
+          "minProperties": 1,
+          "description": "environment variables the plugin reads, each set to a path the harness makes, for the renders that ask for them (scenarios[].probe); names as report.env"
         }
       },
       "additionalProperties": false
@@ -655,6 +700,17 @@
               "uniqueItems": true
             }
           ]
+        },
+        "probe": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/probeValue"
+          },
+          "minProperties": 1,
+          "description": "replaces values of the scenario's probe"
         }
       },
       "required": ["id"],
@@ -1141,6 +1197,24 @@
               },
               "report": {
                 "$ref": "#/$defs/reportExpect"
+              },
+              "probe": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "object",
+                    "propertyNames": {
+                      "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+                    },
+                    "additionalProperties": {
+                      "$ref": "#/$defs/probeValue"
+                    },
+                    "minProperties": 1
+                  }
+                ],
+                "description": "set the probe variables of the plugins of the layout for this render and collect what they write; an object replaces some values"
               },
               "host": {
                 "$ref": "#/$defs/host"
