@@ -6,6 +6,13 @@ stays backward compatible or raises that number, and the entry of that version s
 
 ## Unreleased
 
+- `windows.holdMs` on a transport state (0 … 60000, default 0) keeps each floating window open for ten turns of the
+  message loop and at least that many ms of message-loop time (a turn counts at most 100 ms) before it is closed, so
+  that an editor that needs seconds to start, a web view for one, has them. A window that closes itself ends its hold.
+  The state's line adds ` held=<shortest>/<holdMs>ms` and its facts `win_held`: a shorter hold is FAIL, none reported
+  INCOMPLETE. `count` × `holdMs` over 600000 in one state is refused before REAPER starts, and the step's time limit
+  grows by three times the holds. Whether the editor started is judged by the state's report criteria, as before. A
+  state without `holdMs` is as before. The configuration stays `schema: 1`.
 - `probe` on a VST3 plugin declares environment variables of a test build whose values are paths the harness makes
   for one render: `{ "file": "<path>" }` gets a copy of a file of the configuration directory (at most 1 MiB, hashed
   before REAPER starts and copied for each launch), `{ "dir": true }` a new empty directory in the work directory.
