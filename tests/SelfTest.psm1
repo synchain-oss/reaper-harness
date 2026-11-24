@@ -4265,7 +4265,7 @@ function Get-WiringCases([string]$RepoRoot) {
         'sent only with a hold, rounded'                    = $driverLf -cmatch '\n *local o, c, h = windows\(st\.windows\)\n *put\(p \.\. "win_open", o\)\n *put\(p \.\. "win_closed", c\)\n *if st\.windows\.hold then put\(p \.\. "win_held", int\(h\)\) end\n' -and
             $driverLf -cmatch '\n *local function int\(x\) return math\.floor\(x \+ 0\.5\) end\n' -and @([regex]::Matches($driverLf, 'function int\b')).Count -eq 1
     }
-    $holdMissing = @($holdPins.Keys | Where-Object { -not $holdPins[$_] })
+    $holdMissing = @($holdPins.get_Keys() | Where-Object { -not $holdPins[$_] })
     & $add "driver: a window is held while it is shown, at least ten turns and until hold ms of the message loop have counted (a turn at most 100 ms); the shortest hold of the windows that opened, 0 when none did, is sent rounded and only for a state with a hold; without a hold the editor gets ten turns as before (found the hold: $($holdAt.Success); not as pinned: $($holdMissing -join ' | '))" $true (
         $holdAt.Success -and $holdMissing.Count -eq 0)
     # Every project with plugins and every read-back carries the preference: a scenario cannot lose it on the way (the
