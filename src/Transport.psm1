@@ -8,6 +8,7 @@
 #       "different"; a channel the feed plays must not have a peak of 0 (a silent feed would let every "silent"
 #       expectation pass without evidence). Problems are usage errors: REAPER is never started. Fills in File, Sha256
 #       (first 12 hex digits) and FileChannels of the feed.
+#   Get-HarnessTransportHoldMs   how long each window of a state is held open, 0 for windows without HoldMs (pure)
 #   Get-HarnessTransportJob      the job of the driver's transport step (pure)
 #   Get-HarnessTransportTimeout  the time the driver's transport step may take (pure)
 #   Read-HarnessTransportRow     the numbers the driver reported for one state (pure)
@@ -61,7 +62,7 @@ function Read-HarnessFeeds {
 
 # How long each window of a state is held open in ms; 0: closed after ten turns of the message loop. HoldMs came after
 # windows: the windows of an older caller or an extension may not have it.
-function Get-TransportHoldMs($Windows) { ($Windows -and $Windows.PSObject.Properties['HoldMs']) ? [int]$Windows.HoldMs : 0 }
+function Get-HarnessTransportHoldMs($Windows) { ($Windows -and $Windows.PSObject.Properties['HoldMs']) ? [int]$Windows.HoldMs : 0 }
 
 # Tools: tool JSFX name -> the name to add it by. The tested track is found by name in the layout; tracks are written
 # in layout order, so its index in the project is its index there.
@@ -78,7 +79,7 @@ function Get-HarnessTransportJob {
                 # only for a window held open: without it the driver closes each window after ten turns, as it always did
                 if ($st.Windows) {
                     $one.windows = @{ fx = $st.Windows.Fx + 1; count = $st.Windows.Count }
-                    $hold = Get-TransportHoldMs $st.Windows
+                    $hold = Get-HarnessTransportHoldMs $st.Windows
                     if ($hold -gt 0) { $one.windows.hold = $hold }
                 }
                 $one
@@ -106,7 +107,7 @@ function Get-HarnessTransportTimeout {
     $seconds = 0.0; $cycles = 0
     foreach ($st in $Scenario.states) {
         $seconds += ($st.Samples + (($null -ne $Scenario.settleSamples) ? $Scenario.settleSamples : 5 * $Scenario.sr)) / $Scenario.sr
-        if ($st.Windows) { $cycles += $st.Windows.Count; $seconds += $st.Windows.Count * (Get-TransportHoldMs $st.Windows) / 1000 }
+        if ($st.Windows) { $cycles += $st.Windows.Count; $seconds += $st.Windows.Count * (Get-HarnessTransportHoldMs $st.Windows) / 1000 }
     }
     $LuaTimeoutSec + 3 * $seconds + 20 * $cycles + (20 + ($Reports ? 60 : 0)) * @($Scenario.states).Count
 }
@@ -175,7 +176,7 @@ function Test-HarnessTransportState {
     $w = $State.PSObject.Properties['Windows'] ? $State.Windows : $null
     $criteria = $State.PSObject.Properties['Report'] ? $State.Report : $null
     # Without holdMs nothing about holding is judged or shown: a win_held the driver sent anyway is not looked at
-    $hold = Get-TransportHoldMs $w
+    $hold = Get-HarnessTransportHoldMs $w
     $shortest = $r.PSObject.Properties['win_held'] ? $r.win_held : $null
     if ($w) {
         $line += " windows=$($r.win_open)/$($r.win_closed) of $($w.Count)"
@@ -235,4 +236,4 @@ function Test-HarnessTransportState {
     [pscustomobject]@{ Status = 'PASS'; Line = $line; Problems = @() }
 }
 
-Export-ModuleMember -Function Read-HarnessFeeds, Get-HarnessTransportJob, Get-HarnessTransportTimeout, Read-HarnessTransportRow, Test-HarnessTransportSetup, Test-HarnessTransportState
+Export-ModuleMember -Function Read-HarnessFeeds, Get-HarnessTransportHoldMs, Get-HarnessTransportJob, Get-HarnessTransportTimeout, Read-HarnessTransportRow, Test-HarnessTransportSetup, Test-HarnessTransportState

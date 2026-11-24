@@ -4326,6 +4326,9 @@ function Get-WiringCases([string]$RepoRoot) {
     $transportCalls = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessTransportScenario'
     & $add 'wiring: the transport scenario gives the Lua step the time Get-HarnessTransportTimeout works out' $true (
         'Get-HarnessTransportTimeout' -in $transportCalls.Name -and ([IO.File]::ReadAllText((Join-Path $RepoRoot 'src/Scenarios.psm1'))) -cmatch 'Step transport -Job \$Job -TimeoutSec \(Get-HarnessTransportTimeout ')
+    & $add 'wiring: the transport scenario reads the shortest hold only for windows held open, through Get-HarnessTransportHoldMs (windows without HoldMs: 0)' $true (
+        'Get-HarnessTransportHoldMs' -in $transportCalls.Name -and ([IO.File]::ReadAllText((Join-Path $RepoRoot 'src/Scenarios.psm1'))) -cmatch '-Held:\(\(Get-HarnessTransportHoldMs \$st\.Windows\) -gt 0\)' -and
+        (Get-HarnessTransportHoldMs ([pscustomobject]@{ Count = 1 })) -eq 0 -and (Get-HarnessTransportHoldMs $null) -eq 0 -and (Get-HarnessTransportHoldMs ([pscustomobject]@{ HoldMs = 5000 })) -eq 5000)
     & $add 'driver: every state reports the blocks and frames the feed played in its window' $true (
         $transportStep -cmatch 'f0 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and $transportStep -cmatch 'f1 = snap\(CLOCK\), snap\(TESTED\), snap\(FEED\)' -and
         $transportStep -cmatch 'put\(p \.\. "fed", int\(f1\[0\] - f0\[0\]\)\)' -and $transportStep -cmatch 'put\(p \.\. "fed_samples", int\(f1\[1\] - f0\[1\]\)\)')
