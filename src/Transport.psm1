@@ -174,9 +174,9 @@ function Test-HarnessTransportState {
     # A state of an older caller or an extension may have neither of the keys this module added later
     $w = $State.PSObject.Properties['Windows'] ? $State.Windows : $null
     $criteria = $State.PSObject.Properties['Report'] ? $State.Report : $null
-    # Without holdMs nothing about holding is read: a win_held the driver sent anyway is not looked at
+    # Without holdMs nothing about holding is judged or shown: a win_held the driver sent anyway is not looked at
     $hold = Get-TransportHoldMs $w
-    $shortest = ($hold -gt 0 -and $r.PSObject.Properties['win_held']) ? $r.win_held : $null
+    $shortest = $r.PSObject.Properties['win_held'] ? $r.win_held : $null
     if ($w) {
         $line += " windows=$($r.win_open)/$($r.win_closed) of $($w.Count)"
         if ($hold -gt 0) { $line += " held=$shortest/${hold}ms" }

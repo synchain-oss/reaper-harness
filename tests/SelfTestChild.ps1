@@ -1628,8 +1628,10 @@ Write-Case "end to end: INCOMPLETE and FAIL rounds with a reporting plugin leave
 $rb = & $reportRun @{ VstFullStateReads = '49989' }
 Write-Case "end to end: a preference that does not read back makes the transport row FAIL ($($rb.Row.detail))" $true ($rb.Run.verdict -ceq 'FAIL' -and $rb.Row.status -ceq 'FAIL' -and $rb.Row.detail -clike '*Inform plug-ins of offline rendering state reads on, expected off*')
 # A window held open: the driver's shortest hold is judged against holdMs, and only that state's facts have it
-Write-Case "end to end: a state without holdMs has no win_held in its facts and no held= in its line ($($rp.Row.detail))" $false (& $holds {
-        $armedState.status -ceq 'PASS' -and -not $armedState.Contains('win_held') -and $rp.Row.detail -cnotlike '*held=*' })
+$ha = & $reportRun @{ HoldAlways = $true }
+$alwaysState = & $stateOf $ha.Row
+Write-Case "end to end: a state without holdMs has no win_held in its facts and no held= in its line, even when the driver sent one ($($ha.Row.detail))" $false (& $holds {
+        $ha.Run.verdict -ceq 'PASS' -and $alwaysState.status -ceq 'PASS' -and -not $alwaysState.Contains('win_held') -and $ha.Row.detail -cnotlike '*held=*' })
 $holdCfg = & $writeVariant { param($c) & $reportChange $c; $c.scenarios[0].states[1].windows.holdMs = 2000 }
 $holdCfg.ReaperExe = $pwshExe; $holdCfg.ResultDir = $e2e.ResultDir
 $hp = & $reportRun @{} $holdCfg
