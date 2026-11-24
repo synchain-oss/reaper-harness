@@ -691,7 +691,8 @@ the states say, when any file appeared in the record directory. Facts: `track`, 
 `runFxAfterStopMs`, `settleSamples`, `feed` (`source`, `sha256`, `channels`) and per state its settings, `status`,
 `problems` and the numbers, among them `fed` and `fed_samples`: the blocks and frames the feed played in the window,
 `win_open` and `win_closed` with `windows`, `win_held` with `holdMs`, and `report` with a report: per plugin and field
-its `start`, `end` and `delta`.
+its `start`, `end` and `delta`. A plugin of the layout that declares a [report](#reports) is read around every state,
+so a state without `expect.report` has those too.
 
 Windows: the plugin must be on the tested track exactly once. While the state's window runs, the driver opens the
 plugin's floating window (`TrackFX_Show`, 3), waits until `TrackFX_GetFloatingWindow` returns it, gives the editor ten
@@ -726,6 +727,15 @@ test build with a web view editor that counts in `editorReady` how often its edi
 
 Without `holdMs`, or with 0, every window closes after ten turns as before: the line has no ` held=` and the facts
 have no `win_held`.
+
+Measured on REAPER 7.82 (x64, Dummy Audio 48 kHz / 512 samples, the private configuration directory) with a plugin's
+test build whose editor is a web view ([validation record](validation/2026-11-24-window-hold.md)): one window held
+10 s read ` held=10037/10000ms` and its ready counter grew by 1, its fallback counter by 0; after a warm-up state, three
+windows held 5 s each read ` held=5018/5000ms` and grew the ready counter by 3. The same window with no `holdMs`, closed
+after ten turns, left both counters at 0 while the counters of editor opens and closes grew by 1: it was closed before
+the editor had finished starting. A hold ran 6 to 37 ms past its time, the chain and the device ran the same number of
+blocks in every state that held a window (1060 and 1060 in the one held for 10 s), and a state that held a window for
+10 s took about 10 s longer as a row than the same state without a hold.
 
 ```json
 { "id": "monitor-states", "kind": "transport", "layout": "vocal", "feed": { "channels": "different" },
