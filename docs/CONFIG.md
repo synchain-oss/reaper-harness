@@ -623,7 +623,7 @@ A state:
 | `arm` | required, `true` / `false`: the track's record arm (recording is disabled on the track, see below) |
 | `monitor` | required: input monitoring `off`, `on` or `auto` (REAPER's tape style: only while not playing) |
 | `samples` | the observation window in device samples, 64 … 115200000 and at least 4 blocks; default 2 seconds |
-| `windows` | `{ "plugin": "<id>", "count": 1 … 1000, "maxBlockDiff": 0 … 1000000 }`: open and close that plugin's floating window `count` times in the window (below) |
+| `windows` | `{ "plugin": "<id>", "count": 1 … 1000, "holdMs": 0 … 60000, "maxBlockDiff": 0 … 1000000 }`: open and close that plugin's floating window `count` times in the window, each held open for `holdMs` when it is given (below) |
 | `expect` | what must hold in the window; a state without it and without `windows` is only recorded. At least one state of a scenario has one of them |
 
 `expect`:
@@ -672,24 +672,26 @@ The detail has one part per state, joined by ` | `:
 stopped-armed-on: blocks=94/94 silent=0 signal=94 left=94 right=94 same=0 transport=stop monitoring=1
 ```
 
-`blocks=B/C`: the chain ran in B blocks while the device ran C; `silent` and `signal`: blocks without and with
-signal; `left`, `right`: blocks with signal on that side; `same`: blocks with signal whose left and right are equal;
+`blocks=B/C`: the chain ran in B blocks while the device ran C; `silent` and `signal`: blocks without and with signal;
+`left`, `right`: blocks with signal on that side; `same`: blocks with signal whose left and right are equal;
 `transport` and `monitoring` as read back at the end of the window; with `windows`, ` windows=O/C of N`: how often the
-window opened and closed; with report criteria, ` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state
-that fails adds `; failed: ...`. A state
-whose numbers describe another state than the one asked for is INCOMPLETE (`; no evidence: ...`): the device ran
-less than the window, or the transport, the arm or the monitoring mode did not read back as asked. So is an armed
-state of a scenario with a feed in whose window the feed played no block: its chain would be silent for the wrong
-reason. So is a state of which the driver got no clean reading (`<name>: not observed`): the tool JSFX write their
-counts one at a time on the audio thread, so the driver takes them only when a generation value around them shows no
-write under way, and after a bounded number of tries it reports nothing rather than half-written numbers. The row is
-INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is not first in
-the chain, the record path could not be set, the feed could not open its file, the feed never ran although a state
-arms the track, or not every state was observed; it is FAIL, whatever
-the states say, when any file appeared in the record directory. Facts: `track`, `runFxWhenStopped`,
-`runFxAfterStopMs`, `settleSamples`, `feed` (`source`, `sha256`, `channels`) and per state its settings, `status`,
-`problems` and the numbers, among them `fed` and `fed_samples`: the blocks and frames the feed played in the window,
-`win_open` and `win_closed` with `windows`, and `report` with a report: per plugin and field its `start`, `end` and `delta`.
+window opened and closed, and with `holdMs` then ` held=H/<holdMs>ms`: the shortest time a window was held open; with
+report criteria, ` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state that fails adds
+`; failed: ...`. A state whose numbers describe another state than the one asked for is INCOMPLETE
+(`; no evidence: ...`): the device ran less than the window, or the transport, the arm or the monitoring mode did not
+read back as asked. So is an armed state of a scenario with a feed in whose window the feed played no block: its chain
+would be silent for the wrong reason. So is a state of which the driver got no clean reading (`<name>: not observed`):
+the tool JSFX write their counts one at a time on the audio thread, so the driver takes them only when a generation
+value around them shows no write under way, and after a bounded number of tries it reports nothing rather than
+half-written numbers. The row is INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is
+not first in the chain, the record path could not be set, the feed could not open its file, the feed never ran
+although a state arms the track, or not every state was observed; it is FAIL, whatever the states say, when any file
+appeared in the record directory. Facts: `track`, `runFxWhenStopped`, `runFxAfterStopMs`, `settleSamples`, `feed`
+(`source`, `sha256`, `channels`) and per state its settings, `status`, `problems` and the numbers, among them `fed`
+and `fed_samples`: the blocks and frames the feed played in the window, `win_open` and `win_closed` with `windows`,
+`win_held` with `holdMs`, and `report` with a report: per plugin and field its `start`, `end` and `delta`. A plugin of
+the layout that declares a [report](#reports) is read around every state, so a state without `expect.report` has those
+too.
 
 Windows: the plugin must be on the tested track exactly once. While the state's window runs, the driver opens the
 plugin's floating window (`TrackFX_Show`, 3), waits until `TrackFX_GetFloatingWindow` returns it, gives the editor ten
@@ -701,6 +703,38 @@ window (default 4; not judged when the state expects `called: false`). A toleran
 clock's are read one after the other: a difference of 1 to 2 blocks was seen on REAPER 7.82 with no window at all, and
 none was added by 20 windows of a plugin with a web view editor. Opening an editor runs the plugin's own GUI code,
 see [SAFETY.md](SAFETY.md#plugin-reports-and-windows).
+
+Holding a window open: an editor that needs seconds to start (a web view, for one) has not finished in ten turns of
+the message loop. With `holdMs` the driver keeps each window open for ten turns and at least `holdMs` of message-loop
+time before it closes it. That is wall-clock time, but a turn counts at most 100 ms, as for reading
+[reports](#reports): the editor runs on REAPER's main thread, so a second that thread stalls is no second the editor
+had. A window that is gone before its time is up ends its hold there. The state's ` held=` is the shortest hold of the
+windows that opened, in ms rounded to the nearest one (a hold that ran to its end never reads less than `holdMs`), and
+0 when none opened. FAIL: it is less than `holdMs` (a window that closed itself, or none that opened). INCOMPLETE: the
+driver reported no hold time. `count` × `holdMs` may be at most 600000, ten minutes of holding in one state; more is
+refused before REAPER starts. The time the step may take grows by three times the holds. The tool judges nothing about
+the editor itself: whether it started is for the state's `expect.report`, from a field the plugin reports. The report
+is read after the settle time and again after the last window has closed, so a field meant to show what the editor
+did must still hold its value once the editor is gone: a counter the processor keeps, not one of the editor. For a
+test build with a web view editor that counts in `editorReady` how often its editor finished starting:
+
+```json
+{ "name": "editor-starts", "transport": "play", "arm": false, "monitor": "off",
+  "windows": { "plugin": "rec", "count": 3, "holdMs": 5000 },
+  "expect": { "report": { "rec": { "editorReady": { "delta": 3 } } } } }
+```
+
+Without `holdMs`, or with 0, every window closes after ten turns as before: the line has no ` held=` and the facts
+have no `win_held`.
+
+Measured on REAPER 7.82 (x64, Dummy Audio 48 kHz / 512 samples, the private configuration directory) with a plugin's
+test build whose editor is a web view ([validation record](validation/2026-11-24-window-hold.md)): one window held
+10 s read ` held=10037/10000ms` and its ready counter grew by 1, its fallback counter by 0; after a warm-up state, three
+windows held 5 s each read ` held=5018/5000ms` and grew the ready counter by 3. The same window with no `holdMs`, closed
+after ten turns, left both counters at 0 while the counters of editor opens and closes grew by 1: it was closed before
+the editor had finished starting. A hold ran 6 to 37 ms past its time, the chain and the device ran the same number of
+blocks in every state that held a window (1060 and 1060 in the one held for 10 s), and a state that held a window for
+10 s took about 10 s longer as a row than the same state without a hold.
 
 ```json
 { "id": "monitor-states", "kind": "transport", "layout": "vocal", "feed": { "channels": "different" },

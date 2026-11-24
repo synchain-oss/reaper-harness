@@ -868,6 +868,12 @@
               "maximum": 1000,
               "description": "open and close its floating window this many times during the window"
             },
+            "holdMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 60000,
+              "description": "keep each window open at least this long before it is closed, in ms of message-loop time; default 0: ten turns of the message loop. count x holdMs is at most 600000"
+            },
             "maxBlockDiff": {
               "type": "integer",
               "minimum": 0,
