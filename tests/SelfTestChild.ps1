@@ -1582,12 +1582,12 @@ $reportCfg = & $writeVariant $reportChange
 $reportCfg.ReaperExe = $pwshExe; $reportCfg.ResultDir = $e2e.ResultDir
 $envSeen = [Collections.Generic.List[string]]::new()
 $reportRun = {
-    param([hashtable]$SpecPlus = @{})
+    param([hashtable]$SpecPlus = @{}, [hashtable]$RunCfg = $reportCfg)
     $spec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; EnvName = 'FIXTURE_REPORT_JSON'; EnvSeen = $envSeen }
     foreach ($k in $SpecPlus.get_Keys()) { $spec[$k] = $SpecPlus[$k] }
     $envSeen.Clear()
     Set-FakeReaper $spec
-    try { $run = Invoke-HarnessSuite @reportCfg -NoNegative -SelfTestHooks $hooks }
+    try { $run = Invoke-HarnessSuite @RunCfg -NoNegative -SelfTestHooks $hooks }
     finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
     [pscustomobject]@{ Run = $run; Row = @($run.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]; Env = @($envSeen) }
 }
@@ -1627,6 +1627,26 @@ Write-Case "end to end: INCOMPLETE and FAIL rounds with a reporting plugin leave
     $leftAfter.Count -eq $reportBad.Count -and @($leftAfter | Where-Object { $_ -cnotlike '*=0' }).Count -eq 0)
 $rb = & $reportRun @{ VstFullStateReads = '49989' }
 Write-Case "end to end: a preference that does not read back makes the transport row FAIL ($($rb.Row.detail))" $true ($rb.Run.verdict -ceq 'FAIL' -and $rb.Row.status -ceq 'FAIL' -and $rb.Row.detail -clike '*Inform plug-ins of offline rendering state reads on, expected off*')
+# A window held open: the driver's shortest hold is judged against holdMs, and only that state's facts have it
+Write-Case "end to end: a state without holdMs has no win_held in its facts and no held= in its line ($($rp.Row.detail))" $false (& $holds {
+        $armedState.status -ceq 'PASS' -and -not $armedState.Contains('win_held') -and $rp.Row.detail -cnotlike '*held=*' })
+$holdCfg = & $writeVariant { param($c) & $reportChange $c; $c.scenarios[0].states[1].windows.holdMs = 2000 }
+$holdCfg.ReaperExe = $pwshExe; $holdCfg.ResultDir = $e2e.ResultDir
+$hp = & $reportRun @{} $holdCfg
+$heldState = & $stateOf $hp.Row
+Write-Case "end to end: a window held open 2000 ms: PASS, the line says how long, and the state's facts hold win_held ($($hp.Row.detail))" $false (& $holds {
+        $hp.Run.verdict -ceq 'PASS' -and $hp.Row.status -ceq 'PASS' -and $heldState.status -ceq 'PASS' -and $heldState.win_held -eq 2003 -and
+        $hp.Row.detail -clike '*stopped-armed-on: * windows=3/3 of 3 held=2003/2000ms report gain.opens=22 (+10) gain.blocks=22 (+10)*' })
+$holdBad = @(
+    @{ L = 'a window held 1000 ms short'; X = @{ HoldShort = $true }; S = 'FAIL'; W = '*stopped-armed-on: * windows=3/3 of 3 held=1000/2000ms report gain.opens=22 (+10) gain.blocks=22 (+10); failed: the window of gain was held 1000 of 2000 ms*' }
+    @{ L = 'no hold time from the driver'; X = @{ HoldMissing = $true }; S = 'INCOMPLETE'; W = '*stopped-armed-on: * windows=3/3 of 3 held=/2000ms report gain.opens=22 (+10) gain.blocks=22 (+10); no evidence: the driver reported no hold time*' }
+)
+foreach ($c in $holdBad) {
+    $got = & $reportRun $c.X $holdCfg
+    $gotState = & $stateOf $got.Row
+    Write-Case "end to end: $($c.L) makes the state and the row $($c.S), for that alone ($($got.Row.detail))" $true (& $holds {
+            $got.Run.verdict -ceq $c.S -and $got.Row.status -ceq $c.S -and $gotState.status -ceq $c.S -and @($gotState.problems).Count -eq 1 -and $got.Row.detail -clike $c.W })
+}
 # A render judged by what the plugin reports: the driver renders between two readings, the audio is compared as ever
 $reportRenderChange = {
     param($c)
