@@ -672,27 +672,26 @@ The detail has one part per state, joined by ` | `:
 stopped-armed-on: blocks=94/94 silent=0 signal=94 left=94 right=94 same=0 transport=stop monitoring=1
 ```
 
-`blocks=B/C`: the chain ran in B blocks while the device ran C; `silent` and `signal`: blocks without and with
-signal; `left`, `right`: blocks with signal on that side; `same`: blocks with signal whose left and right are equal;
+`blocks=B/C`: the chain ran in B blocks while the device ran C; `silent` and `signal`: blocks without and with signal;
+`left`, `right`: blocks with signal on that side; `same`: blocks with signal whose left and right are equal;
 `transport` and `monitoring` as read back at the end of the window; with `windows`, ` windows=O/C of N`: how often the
 window opened and closed, and with `holdMs` then ` held=H/<holdMs>ms`: the shortest time a window was held open; with
-report criteria, ` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state
-that fails adds `; failed: ...`. A state
-whose numbers describe another state than the one asked for is INCOMPLETE (`; no evidence: ...`): the device ran
-less than the window, or the transport, the arm or the monitoring mode did not read back as asked. So is an armed
-state of a scenario with a feed in whose window the feed played no block: its chain would be silent for the wrong
-reason. So is a state of which the driver got no clean reading (`<name>: not observed`): the tool JSFX write their
-counts one at a time on the audio thread, so the driver takes them only when a generation value around them shows no
-write under way, and after a bounded number of tries it reports nothing rather than half-written numbers. The row is
-INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is not first in
-the chain, the record path could not be set, the feed could not open its file, the feed never ran although a state
-arms the track, or not every state was observed; it is FAIL, whatever
-the states say, when any file appeared in the record directory. Facts: `track`, `runFxWhenStopped`,
-`runFxAfterStopMs`, `settleSamples`, `feed` (`source`, `sha256`, `channels`) and per state its settings, `status`,
-`problems` and the numbers, among them `fed` and `fed_samples`: the blocks and frames the feed played in the window,
-`win_open` and `win_closed` with `windows`, `win_held` with `holdMs`, and `report` with a report: per plugin and field
-its `start`, `end` and `delta`. A plugin of the layout that declares a [report](#reports) is read around every state,
-so a state without `expect.report` has those too.
+report criteria, ` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state that fails adds
+`; failed: ...`. A state whose numbers describe another state than the one asked for is INCOMPLETE
+(`; no evidence: ...`): the device ran less than the window, or the transport, the arm or the monitoring mode did not
+read back as asked. So is an armed state of a scenario with a feed in whose window the feed played no block: its chain
+would be silent for the wrong reason. So is a state of which the driver got no clean reading (`<name>: not observed`):
+the tool JSFX write their counts one at a time on the audio thread, so the driver takes them only when a generation
+value around them shows no write under way, and after a bounded number of tries it reports nothing rather than
+half-written numbers. The row is INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is
+not first in the chain, the record path could not be set, the feed could not open its file, the feed never ran
+although a state arms the track, or not every state was observed; it is FAIL, whatever the states say, when any file
+appeared in the record directory. Facts: `track`, `runFxWhenStopped`, `runFxAfterStopMs`, `settleSamples`, `feed`
+(`source`, `sha256`, `channels`) and per state its settings, `status`, `problems` and the numbers, among them `fed`
+and `fed_samples`: the blocks and frames the feed played in the window, `win_open` and `win_closed` with `windows`,
+`win_held` with `holdMs`, and `report` with a report: per plugin and field its `start`, `end` and `delta`. A plugin of
+the layout that declares a [report](#reports) is read around every state, so a state without `expect.report` has those
+too.
 
 Windows: the plugin must be on the tested track exactly once. While the state's window runs, the driver opens the
 plugin's floating window (`TrackFX_Show`, 3), waits until `TrackFX_GetFloatingWindow` returns it, gives the editor ten
