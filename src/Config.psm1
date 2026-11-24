@@ -151,6 +151,7 @@ function New-HarnessSpec {
             windows   = (SObj ([ordered]@{
                         plugin       = (SStr $script:IdPattern -Doc 'a plugin on the tested track (once)')
                         count        = (SInt 1 1000 -Doc 'open and close its floating window this many times during the window')
+                        holdMs       = (SInt 0 60000 -Doc 'keep each window open at least this long before it is closed, in ms of message-loop time; default 0: ten turns of the message loop. count x holdMs is at most 600000')
                         maxBlockDiff = (SInt 0 1000000 -Doc 'the most the tested chain''s blocks may differ from the device''s in the window, default 4')
                     }) @('plugin', 'count'))
             expect    = (SRef transportExpect)
@@ -974,7 +975,8 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
 
 # The states of a transport scenario: names unique, at least one with an expectation (a scenario that judges nothing
 # would be an empty PASS), no expectation that contradicts itself, every window at least 4 blocks long. Windows: a plugin
-# that is on the tested track (TestedTrack of the layout UsedIn) exactly once; Fx is its index in that track's FX.
+# that is on the tested track (TestedTrack of the layout UsedIn) exactly once; Fx is its index in that track's FX. At
+# most ten minutes of holding windows open in one state: a digit too many would keep REAPER busy for hours.
 function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int]$DeviceBlock, $Problems, $PluginTable = @{}, $UsedIn = $null, [string]$TestedTrack = '') {
     $seen = @{}
     $judged = 0
@@ -993,7 +995,9 @@ function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int
             $judged++
             $at = @(for ($k = 0; $k -lt $trackFx.Count; $k++) { if ($trackFx[$k].Plugin -ceq $w['plugin']) { $k } })
             if ($UsedIn -and $at.Count -ne 1) { $Problems.Add("$p.windows.plugin: '$($w['plugin'])' is on the tested track $($at.Count) times; its window needs exactly one") }
-            $win = [pscustomobject]@{ Plugin = [string]$w['plugin']; Count = [int]$w['count']; MaxBlockDiff = [int](Get-Or $w 'maxBlockDiff' 4); Fx = ($at.Count ? $at[0] : -1) }
+            $win = [pscustomobject]@{ Plugin = [string]$w['plugin']; Count = [int]$w['count']; HoldMs = [int](Get-Or $w 'holdMs' 0); MaxBlockDiff = [int](Get-Or $w 'maxBlockDiff' 4); Fx = ($at.Count ? $at[0] : -1) }
+            $holding = $win.Count * $win.HoldMs
+            if ($holding -gt 600000) { $Problems.Add("$p.windows: $($win.Count) windows held $($win.HoldMs) ms each is $holding ms of holding, more than 600000 in one state") }
         }
         $e = Get-Or $r 'expect' $null
         $x = $null

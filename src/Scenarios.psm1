@@ -865,7 +865,8 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
     $perState = [Collections.Generic.List[object]]::new()
     $judged = for ($i = 0; $i -lt $s.states.Count; $i++) {
         $st = $s.states[$i]
-        $row = Read-HarnessTransportRow $f ($i + 1)
+        # Only a state that holds its windows open has its shortest hold read, and so in its facts
+        $row = Read-HarnessTransportRow $f ($i + 1) -Held:([bool]($st.Windows -and $st.Windows.HoldMs -gt 0))
         # Readings 2i+1 and 2i+2 of the reports were taken right before and after the state's window
         $readings = $plan.Count ? @{ Start = $taken[2 * $i]; End = $taken[2 * $i + 1] } : $null
         $j = Test-HarnessTransportState -State $st -Row $row -HasFeed:($null -ne $s.feed) -Readings $readings

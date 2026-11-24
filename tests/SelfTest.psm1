@@ -3898,7 +3898,7 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         foreach ($k in $Set.get_Keys()) { $v[$k] = $Set[$k] }
         [pscustomobject]$v
     }
-    $win = [pscustomobject]@{ Plugin = 'rec'; Count = 20; MaxBlockDiff = 4; Fx = 1 }
+    $win = [pscustomobject]@{ Plugin = 'rec'; Count = 20; HoldMs = 0; MaxBlockDiff = 4; Fx = 1 }
     $okWin = Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf)
     & $add "windows: 20 of 20 opened and closed, the chain ran with the device: PASS ($($okWin.Line))" $false ($okWin.Status -ceq 'PASS' -and $okWin.Line -clike '* windows=20/20 of 20')
     & $add 'windows: a chain 4 blocks behind the device is within the tolerance' $false ((Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf @{ blocks = 6 })).Status -ceq 'PASS')
@@ -3916,6 +3916,38 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     }
     $noCount = Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf @{ win_open = $null })
     & $add 'windows: no window counts from the driver is no evidence' $true ($noCount.Status -ceq 'INCOMPLETE' -and $noCount.Line -clike '*no evidence: the driver reported no window counts')
+    # A window held open (holdMs): the shortest hold the driver reports is judged against it
+    $winHeld = [pscustomobject]@{ Plugin = 'rec'; Count = 20; HoldMs = 5000; MaxBlockDiff = 4; Fx = 1 }
+    $heldOk = Test-HarnessTransportState -State (& $st $winHeld) -Row (& $rowOf @{ win_held = 5003 })
+    $heldJust = Test-HarnessTransportState -State (& $st $winHeld) -Row (& $rowOf @{ win_held = 5000 })
+    & $add "windows held: a hold of at least holdMs passes, and the line says how long right after the window counts ($($heldOk.Line))" $false (
+        $heldOk.Status -ceq 'PASS' -and $heldOk.Line -clike '* windows=20/20 of 20 held=5003/5000ms' -and $heldJust.Status -ceq 'PASS')
+    $heldShort = Test-HarnessTransportState -State (& $st $winHeld) -Row (& $rowOf @{ win_held = 4999 })
+    & $add "windows held: a hold 1 ms short fails, for that alone ($($heldShort.Line))" $true (
+        $heldShort.Status -ceq 'FAIL' -and @($heldShort.Problems).Count -eq 1 -and $heldShort.Problems[0] -ceq 'the window of rec was held 4999 of 5000 ms')
+    $heldNone = Test-HarnessTransportState -State (& $st $winHeld) -Row (& $rowOf @{ win_held = $null })
+    $heldUnread = Test-HarnessTransportState -State (& $st $winHeld) -Row (& $rowOf)
+    & $add "windows held: no hold time from the driver is no evidence ($($heldNone.Line))" $true (
+        @($heldNone, $heldUnread | Where-Object { $_.Status -ceq 'INCOMPLETE' -and @($_.Problems).Count -eq 1 -and $_.Line -clike '* windows=20/20 of 20 held=/5000ms; no evidence: the driver reported no hold time' }).Count -eq 2)
+    $sent = @((Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf @{ win_held = 1 })), (Test-HarnessTransportState -State (& $st $win) -Row (& $rowOf @{ win_held = $null })))
+    & $add "windows held: without holdMs a win_held the driver sent is not looked at, and the line has no held= ($($sent[0].Line))" $false (
+        @($sent | Where-Object { $_.Status -ceq 'PASS' -and $_.Line -cnotlike '*held=*' }).Count -eq 2)
+    $winOlder = [pscustomobject]@{ Plugin = 'rec'; Count = 20; MaxBlockDiff = 4; Fx = 1 }
+    & $add 'windows held: the windows of an older caller or an extension, without HoldMs, are judged, timed and given to the driver as without a hold, and nothing throws' $false (& $holds {
+            $olderJudged = Test-HarnessTransportState -State (& $st $winOlder) -Row (& $rowOf @{ win_held = 1 })
+            $olderTimed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $winOlder }) }
+            $zeroTimed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $win }) }
+            $olderJob = Get-HarnessTransportJob -Scenario ([pscustomobject]@{ track = 'Voice'; sr = 48000; settleSamples = $null; feed = $null; states = @(& $st $winOlder) }) -Layout ([pscustomobject]@{ Tracks = @([pscustomobject]@{ Name = 'Voice' }) }) `
+                -Tools @{ 'harness-block-probe' = 'JS:p'; 'harness-feed' = 'JS:f' } -RecordDir 'R'
+            $olderJudged.Status -ceq 'PASS' -and $olderJudged.Line -cnotlike '*held=*' -and (Get-HarnessTransportTimeout -Scenario $olderTimed -LuaTimeoutSec 60) -eq (Get-HarnessTransportTimeout -Scenario $zeroTimed -LuaTimeoutSec 60) -and
+            (@($olderJob.states[0].windows.get_Keys() | Sort-Object) -join ',') -ceq 'count,fx' })
+    # The shortest hold as the driver writes it: read for a state that holds its windows, and only then
+    $heldFacts = @{ st1_win_open = '20'; st1_win_closed = '20'; st1_win_held = '5003.0' }
+    foreach ($k in 'clock', 'clock_samples', 'blocks', 'samples', 'silent', 'signal', 'left', 'right', 'equal', 'fed', 'fed_samples', 'playstate', 'arm', 'monitor', 'monitoring') { $heldFacts["st1_$k"] = '3' }
+    $heldRow = Read-HarnessTransportRow $heldFacts 1 -Held
+    $plainRow = Read-HarnessTransportRow $heldFacts 1
+    & $add 'windows held: the shortest hold is read from st<n>_win_held for a state that holds its windows' $false (& $holds { $heldRow.win_held -eq 5003 -and $heldRow.win_open -eq 20 })
+    & $add 'windows held: for a state without holdMs a win_held the driver sent is not read, so its facts have none' $false (& $holds { $null -ne $plainRow -and $null -eq $plainRow.PSObject.Properties['win_held'] -and $plainRow.win_open -eq 20 })
     $readings = { param($Start, $End) @{ Start = $Start; End = $End } }
     $repOk = Test-HarnessTransportState -State (& $st $win $crit) -Row (& $rowOf) -Readings (& $readings (& $val 100 3) (& $val 150 23))
     & $add "state report: criteria met with the windows: PASS, the line says what the plugin reported ($($repOk.Line))" $false ($repOk.Status -ceq 'PASS' -and $repOk.Line -clike '* windows=20/20 of 20 report rec.opens=23 (+20) rec.blocks=150 (+50)')
@@ -3957,6 +3989,10 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $win }, [pscustomobject]@{ Samples = 9600; Windows = $null }) }
     & $add 'transport timeout: 20 s more for every window opened and closed, 60 s a state with reports' $false (
         [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 501.5) -lt 1e-9 -and [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60 -Reports) - 621.5) -lt 1e-9)
+    $heldTimed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = [pscustomobject]@{ Plugin = 'rec'; Count = 2; HoldMs = 5000; MaxBlockDiff = 4; Fx = 1 } }) }
+    $unwindowed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $null }) }
+    & $add 'transport timeout: 2 windows held 5000 ms each add 2 x (20 + 3 x 5) s' $false (
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $heldTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $unwindowed -LuaTimeoutSec 60) - 70) -lt 1e-9)
     # What a configuration makes of reports and windows
     $cfgText = @'
 { "schema": 1, "name": "t",
@@ -3964,7 +4000,7 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
   "layouts": { "one": { "tracks": [ { "name": "Voice", "source": true, "fx": [ { "plugin": "mon" }, { "plugin": "rec" } ] } ] } },
   "scenarios": [
     { "id": "t1", "kind": "transport", "layout": "one", "states": [
-      { "name": "p", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "rec", "count": 20 }, "expect": { "report": { "rec": { "editorOpens": { "delta": 20 }, "blocksRealtime": { "delta": { "min": 1 } } } } } },
+      { "name": "p", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "rec", "count": 20, "holdMs": 5000 }, "expect": { "report": { "rec": { "editorOpens": { "delta": 20 }, "blocksRealtime": { "delta": { "min": 1 } } } } } },
       { "name": "q", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "mon", "count": 3, "maxBlockDiff": 9 } } ] },
     { "id": "r1", "kind": "render", "layout": "one", "host": { "runFxWhenStopped": false, "informOfflineState": false }, "report": { "rec": { "blocksRealtime": { "value": 0 } } } } ] }
 '@
@@ -3973,6 +4009,10 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     & $add "configuration: windows by the plugin's place on the tested track, tolerance 4 unless given; criteria per plugin and field; a state with windows only is judged ($(@($cfgRes.Problems) -join ' | '))" $false (& $holds {
             @($cfgRes.Problems).Count -eq 0 -and $t1.states[0].Windows.Fx -eq 1 -and $t1.states[0].Windows.MaxBlockDiff -eq 4 -and $t1.states[1].Windows.Fx -eq 0 -and $t1.states[1].Windows.MaxBlockDiff -eq 9 -and
             $cfgRes.Config.Plugins['rec'].Report.PeriodMs -eq 250 })
+    & $add 'configuration: holdMs is kept, and 0 unless given' $false (& $holds { $t1.states[0].Windows.HoldMs -eq 5000 -and $t1.states[1].Windows.HoldMs -eq 0 })
+    $tenMinutes = $cfgText.Replace('"count": 20, "holdMs": 5000', '"count": 10, "holdMs": 60000')
+    $tenRes = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $tenMinutes)
+    & $add "configuration: 10 windows held 60000 ms each, exactly ten minutes of holding, are accepted ($(@($tenRes.Problems) -join ' | '))" $false ($tenMinutes -cne $cfgText -and @($tenRes.Problems).Count -eq 0)
     & $add 'configuration: the criteria of a state are kept per plugin and field' $false (& $holds {
             $t1.states[0].Report['rec']['editorOpens'].Delta.Exact -eq 20 -and $t1.states[0].Report['rec']['blocksRealtime'].Delta.Min -eq 1 -and $null -eq $t1.states[0].Report['rec']['blocksRealtime'].Value })
     & $add 'configuration: the criteria of a render are kept per plugin and field' $false (& $holds { $cfgRes.Config.Scenarios[1].report['rec']['blocksRealtime'].Value.Exact -eq 0 })
@@ -3986,6 +4026,8 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     if ($t1) {
         $job = Get-HarnessTransportJob -Scenario $t1 -Layout $cfgRes.Config.Layouts['one'] -Tools @{ 'harness-block-probe' = 'JS:p'; 'harness-feed' = 'JS:f' } -RecordDir 'R'
         & $add 'transport job: the window''s FX counts the block probe in front of the chain' $false ($job.states[0].windows.fx -eq 2 -and $job.states[0].windows.count -eq 20 -and $job.states[1].windows.fx -eq 1)
+        & $add 'transport job: a window held open gives the driver its hold in ms' $false (& $holds { $job.states[0].windows.hold -eq 5000 })
+        & $add 'transport job: a state without holdMs gives the driver exactly fx and count under windows, as before' $false ((@($job.states[1].windows.get_Keys() | Sort-Object) -join ',') -ceq 'count,fx')
     }
     $cfgBad = @(
         @{ L = 'a report variable REAPER reads'; F = '"REC_PROBE_JSON"'; T = '"REAPER_X"'; W = "config.plugins.rec.report.env: 'REAPER_X' starts with REAPER_*" }
@@ -4001,6 +4043,7 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         @{ L = 'a repeat that reports its residual and judges plugin reports'; F = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }'; T = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }, "compare": "repeat", "maxDiffDb": "report"'; W = 'config.scenarios[[]1[]].report: a repeat that reports its residual cannot judge plugin reports as well*' }
         @{ L = 'a repeat with a stem that reports its residual and plugin reports judged'; F = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }'; T = '"report": { "rec": { "blocksRealtime": { "value": 0 } } }, "compare": "repeat", "stems": [ { "track": "Voice", "maxDiffDb": "report" } ]'; W = 'config.scenarios[[]1[]].report: a repeat that reports its residual cannot judge plugin reports as well*' }
         @{ L = 'a window of a plugin twice on the tested track'; F = '{ "plugin": "mon" },'; T = '{ "plugin": "mon" }, { "plugin": "mon" },'; W = "*.windows.plugin: 'mon' is on the tested track 2 times; its window needs exactly one" }
+        @{ L = 'windows held more than ten minutes in one state'; F = '"count": 20, "holdMs": 5000'; T = '"count": 20, "holdMs": 30001'; W = 'config.scenarios[[]0[]].states[[]0[]].windows: 20 windows held 30001 ms each is 600020 ms of holding, more than 600000 in one state' }
     )
     foreach ($c in $cfgBad) {
         if (-not $cfgText.Contains($c.F)) { & $add "configuration: $($c.L) (the sample to change is gone)" $true $false; continue }
@@ -4014,7 +4057,11 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     # The schema refuses the empty objects the validator refuses, so that an editor does not pass what a run will not
     $schemaText = [IO.File]::ReadAllText((Join-Path $RepoRoot 'schema/config.schema.json'))
     $agree = { param([string]$Json, [bool]$Accepted) $schemaOk = try { Test-Json -Json $Json -Schema $schemaText -ErrorAction Stop } catch { $false }; $schemaOk -eq $Accepted }
-    & $add 'schema: Test-Json accepts the configuration with reports and windows, like the validator' $false (& $agree $cfgText $true)
+    & $add 'schema: Test-Json accepts the configuration with reports and windows (one held open), like the validator' $false ((& $agree $cfgText $true) -and (& $agree $tenMinutes $true))
+    $overHold = $cfgText.Replace('"holdMs": 5000', '"holdMs": 60001')
+    $overRes = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $overHold)
+    & $add "schema: holdMs 60001 is refused by Test-Json, like the validator ($(@($overRes.Problems) -join ' | '))" $true (
+        $overHold -cne $cfgText -and @($overRes.Problems).Count -eq 1 -and $overRes.Problems[0] -ceq 'config.scenarios[0].states[0].windows.holdMs: must be between 0 and 60000' -and (& $agree $overHold $false))
     $empties = @(
         @{ L = 'an empty range'; F = '{ "min": 1 }'; T = '{ }' }
         @{ L = 'an empty criterion'; F = '"editorOpens": { "delta": 20 }'; T = '"editorOpens": { }' }

@@ -392,7 +392,8 @@ end
 -- _blocks, _samples, _silent, _signal, _left, _right, _equal (the tested chain), _fed and _fed_samples (blocks and
 -- frames the feed played), _playstate, _arm, _monitor and _monitoring (read back at the end of the window). A state
 -- without a clean reading has no _clock up to _fed_samples, which makes it a state that was not observed. A state with
--- windows (fx, count) opens and closes that FX's floating window count times in its window: _win_open, _win_closed.
+-- windows (fx, count) opens and closes that FX's floating window count times in its window: _win_open, _win_closed;
+-- with windows.hold (ms) each stays open that long, and _win_held is the shortest hold of the windows that opened.
 -- With job.reports, reading 2n-1 of every plugin report is taken after the settle time and 2n after the window.
 function steps.transport()
     openAndWait(job.project)
@@ -497,15 +498,31 @@ function steps.transport()
     end
     -- Opens and closes the floating window of FX w.fx of the tested track w.count times; each step is checked with
     -- TrackFX_GetFloatingWindow, and the editor gets ten turns of the message loop in between (a web view, for one,
-    -- builds itself asynchronously).
+    -- builds itself asynchronously). With w.hold (ms) a window stays open for ten turns and at least that much time of
+    -- the message loop: wall-clock time, but a turn counts at most 100 ms as in readReports (a stalled main thread
+    -- stalls the editor too). A window gone on its own ends its hold at once. The third result is the shortest hold of
+    -- the windows that opened, in ms (0 when none did).
     local function windows(w)
-        local opened, closed = 0, 0
+        local opened, closed, held = 0, 0, nil
         local function shown() return reaper.TrackFX_GetFloatingWindow(tested, w.fx) ~= nil end
         for _ = 1, w.count do
             reaper.TrackFX_Show(tested, w.fx, 3)
             if until10(shown) then
                 opened = opened + 1
-                for _ = 1, 10 do coroutine.yield() noRecord() end
+                if w.hold then
+                    local turns, loop, last = 0, 0, reaper.time_precise()
+                    while (turns < 10 or loop * 1000 < w.hold) and shown() do
+                        coroutine.yield()
+                        noRecord()
+                        turns = turns + 1
+                        local now = reaper.time_precise()
+                        loop = loop + math.min(now - last, 0.1)
+                        last = now
+                    end
+                    held = math.min(held or math.huge, loop * 1000)
+                else
+                    for _ = 1, 10 do coroutine.yield() noRecord() end
+                end
                 reaper.TrackFX_Show(tested, w.fx, 2)
                 if until10(function() return not shown() end) then closed = closed + 1 end
             end
@@ -513,7 +530,7 @@ function steps.transport()
             noRecord()
         end
         reaper.TrackFX_Show(tested, w.fx, 2)
-        return opened, closed
+        return opened, closed, held or 0
     end
     local settle = job.settle or int(((tonumber(after) or 4000) + 500) * job.sr / 1000)
     put("settle", settle)
@@ -528,9 +545,10 @@ function steps.transport()
         local c0, t0, f0 = snap(CLOCK), snap(TESTED), snap(FEED)
         local w0 = reaper.gmem_read(CLOCK + 1)
         if st.windows then
-            local o, c = windows(st.windows)
+            local o, c, h = windows(st.windows)
             put(p .. "win_open", o)
             put(p .. "win_closed", c)
+            if st.windows.hold then put(p .. "win_held", int(h)) end
         end
         local ran = reaper.gmem_read(CLOCK + 1) - w0
         if ran < st.samples then waitSamples(st.samples - ran) end

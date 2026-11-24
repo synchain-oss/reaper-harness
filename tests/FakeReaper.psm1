@@ -568,6 +568,8 @@ function Write-FakeReports($job, $report, [int]$Reading) {
 # a feed and the file is there), which plays in every armed state. A window of n samples is n / block blocks, rounded
 # up, on the clock as well. Spec.FeedIdle = a state name: the feed plays nothing in that state; '*': it never runs.
 # Spec.Unread = a state name: no clean reading of that state's counts, so it reports none of them, like the driver.
+# A window held open (windows.hold) is held 3 ms longer; Spec.HoldShort: 1000 ms shorter (at least 0); Spec.HoldMissing:
+# no hold time is reported.
 function Invoke-FakeTransport($job, $report) {
     $sr = [int](Get-FakeIniValue 'dummy_srate')
     $block = [int](Get-FakeIniValue 'dummy_blocksize')
@@ -616,6 +618,10 @@ function Invoke-FakeTransport($job, $report) {
         foreach ($e in $values.GetEnumerator()) { $report.Add("st${n}_$($e.Key)=$($e.Value)") }
         # Windows open and close every time, but Spec.WindowsFail times fewer
         if ($st.Contains('windows')) { foreach ($w in 'win_open', 'win_closed') { $report.Add("st${n}_$w=$([int]$st['windows']['count'] - [int]($script:Spec['WindowsFail'] ?? 0))") } }
+        if ($st.Contains('windows') -and $st['windows'].Contains('hold') -and -not $script:Spec['HoldMissing']) {
+            $hold = [int]$st['windows']['hold']
+            $report.Add("st${n}_win_held=$($script:Spec['HoldShort'] ? [Math]::Max(0, $hold - 1000) : $hold + 3)")
+        }
         Write-FakeReports $job $report (2 * $n - 1)
         Write-FakeReports $job $report (2 * $n)
     }
