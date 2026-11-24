@@ -4016,7 +4016,7 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     & $add 'configuration: the criteria of a state are kept per plugin and field' $false (& $holds {
             $t1.states[0].Report['rec']['editorOpens'].Delta.Exact -eq 20 -and $t1.states[0].Report['rec']['blocksRealtime'].Delta.Min -eq 1 -and $null -eq $t1.states[0].Report['rec']['blocksRealtime'].Value })
     & $add 'configuration: the criteria of a render are kept per plugin and field' $false (& $holds { $cfgRes.Config.Scenarios[1].report['rec']['blocksRealtime'].Value.Exact -eq 0 })
-    & $add 'configuration: the offline-state preference is on unless a scenario turns it off' $false ($t1.host.InformOfflineState -eq $true -and $cfgRes.Config.Scenarios[1].host.InformOfflineState -eq $false)
+    & $add 'configuration: the offline-state preference is on unless a scenario turns it off' $false (& $holds { $t1.host.InformOfflineState -eq $true -and $cfgRes.Config.Scenarios[1].host.InformOfflineState -eq $false })
     $noPeriod = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $cfgText.Replace(', "periodMs": 250', ''))
     & $add 'configuration: a report writes every 500 ms unless it says otherwise' $false (@($noPeriod.Problems).Count -eq 0 -and $noPeriod.Config.Plugins['rec'].Report.PeriodMs -eq 500)
     $upTo = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $cfgText.Replace('{ "min": 1 }', '{ "max": 7 }'))
