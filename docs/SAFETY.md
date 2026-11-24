@@ -177,12 +177,12 @@ editor. What keeps that contained:
   (INCOMPLETE), never a PASS.
 
 Opening an editor runs the plugin's own GUI code, in REAPER's process, under your account. Holding the window open
-(`holdMs`) lets that code run for longer; nothing else changes. The tool does not know what
-it writes: a plugin with a web view, for one, keeps a cache in its user data. To keep a run off that data, start the
-tool with `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` pointed at a scratch profile, and `WEBVIEW2_USER_DATA_FOLDER` at
-a directory of it. That is yours to do: the tool never sets them, and then its before-and-after check of the default
-REAPER resource directory looks at the scratch profile, not at the real one, so run the check on the real one yourself. The configuration directory comes from
-`-CfgDir` either way.
+(`holdMs`) lets that code run for longer; nothing else changes. The tool does not know what it writes: a plugin with a
+web view, for one, keeps a cache in its user data. To keep a run off that data, start the tool with `USERPROFILE`,
+`APPDATA` and `LOCALAPPDATA` pointed at a scratch profile, and `WEBVIEW2_USER_DATA_FOLDER` at a directory of it. That
+is yours to do: the tool never sets them, and then its before-and-after check of the default REAPER resource directory
+looks at the scratch profile, not at the real one, so run the check on the real one yourself. The configuration
+directory comes from `-CfgDir` either way.
 
 ## Probe variables and collected files
 
