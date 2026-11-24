@@ -4248,6 +4248,26 @@ function Get-WiringCases([string]$RepoRoot) {
         $readBody -cmatch 'coroutine\.yield\(\)\r?\n\s*if check then check\(\) end\r?\n' -and @([regex]::Matches($readBody, 'coroutine\.yield\(\)')).Count -eq 1)
     & $add 'driver: a window opens and closes as often as asked, the editor gets ten turns of the message loop, and every wait for it checks the record bit' $true (
         $driverText -cmatch 'for _ = 1, w\.count do' -and $driverText -cmatch 'for _ = 1, 10 do coroutine\.yield\(\) noRecord\(\) end' -and $driverText -cmatch 'noRecord\(\)\s+if reaper\.time_precise\(\) > limit then return false end')
+    # A hold (windows.hold) decides PASS or FAIL and only real REAPER runs it, so its rules are pinned in the text: it
+    # starts once the window is seen and lasts while the window is shown, at least ten turns and until hold ms of the
+    # message loop have counted, a turn at most 100 ms; the shortest hold of the windows that opened (0 when none did) is
+    # sent rounded to the nearest ms, and only for a state with a hold; without a hold the editor gets ten turns as before
+    $driverLf = $driverText.Replace("`r`n", "`n")
+    $winBody = [regex]::Match($driverLf, '(?s)\n( *)local function windows\(w\)\n.*?\n\1end\n').Value
+    $holdAt = [regex]::Match($winBody, '(?s)\n *if until10\(shown\) then\n *opened = opened \+ 1\n( *)if w\.hold then\n(.*?)\n\1else\n(.*?)\n\1end\n *reaper\.TrackFX_Show\(tested, w\.fx, 2\)\n')
+    $holdText = $holdAt.Groups[2].Value
+    $holdPins = [ordered]@{
+        'it lasts while shown, ten turns and hold ms'      = $holdText -cmatch '^ *local turns, loop, last = 0, 0, reaper\.time_precise\(\)\n *while \(turns < 10 or loop \* 1000 < w\.hold\) and shown\(\) do\n'
+        'a turn checks the record bit and counts <= 100 ms' = $holdText -cmatch ' do\n *coroutine\.yield\(\)\n *noRecord\(\)\n *turns = turns \+ 1\n *local now = reaper\.time_precise\(\)\n *loop = loop \+ math\.min\(now - last, 0\.1\)\n *last = now\n *end\n' -and @([regex]::Matches($holdText, 'coroutine\.yield\(\)')).Count -eq 1
+        'the shortest hold is kept'                         = $holdText -cmatch '\n *end\n *held = math\.min\(held or math\.huge, loop \* 1000\)$'
+        'ten turns without a hold'                          = $holdAt.Groups[3].Value -cmatch '^ *for _ = 1, 10 do coroutine\.yield\(\) noRecord\(\) end$'
+        '0 when none opened'                                = $winBody -cmatch '\n *local opened, closed, held = 0, 0, nil\n' -and $winBody -cmatch '\n *return opened, closed, held or 0\n'
+        'sent only with a hold, rounded'                    = $driverLf -cmatch '\n *local o, c, h = windows\(st\.windows\)\n *put\(p \.\. "win_open", o\)\n *put\(p \.\. "win_closed", c\)\n *if st\.windows\.hold then put\(p \.\. "win_held", int\(h\)\) end\n' -and
+            $driverLf -cmatch '\n *local function int\(x\) return math\.floor\(x \+ 0\.5\) end\n' -and @([regex]::Matches($driverLf, 'function int\b')).Count -eq 1
+    }
+    $holdMissing = @($holdPins.Keys | Where-Object { -not $holdPins[$_] })
+    & $add "driver: a window is held while it is shown, at least ten turns and until hold ms of the message loop have counted (a turn at most 100 ms); the shortest hold of the windows that opened, 0 when none did, is sent rounded and only for a state with a hold; without a hold the editor gets ten turns as before (found the hold: $($holdAt.Success); not as pinned: $($holdMissing -join ' | '))" $true (
+        $holdAt.Success -and $holdMissing.Count -eq 0)
     # Every project with plugins and every read-back carries the preference: a scenario cannot lose it on the way (the
     # dry reference has no plugin to tell)
     $scenarioTree = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Scenarios.psm1'), [ref]$null, [ref]$null)
