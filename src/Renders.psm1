@@ -402,16 +402,18 @@ function Save-HarnessShots {
             ($null -eq $attr) ? $null : [bool](($attr -band [IO.FileAttributes]::ReparsePoint) -or -not ($attr -band [IO.FileAttributes]::Directory) -or
                 (Resolve-HarnessRealPath $shotPlan.Dir) -ine [IO.Path]::Join((Resolve-HarnessRealPath $Ctx.Work), $leaf))
         }
+        # The shots the states list, or for a launch that failed as a whole what the service answered: every image whose
+        # answer reads and whose header matches it (read below, only once the directory may be read)
+        $judged = @((($Seen -is [Collections.IDictionary]) -and $Seen.Contains('states')) ? @($Seen['states'] | Where-Object { $_ -is [Collections.IDictionary] -and $_.Contains('shots') }) : @())
+        $moving = @(foreach ($st in $judged) { foreach ($e in @($st['shots'])) { if ($e['taken']) { $e } } })
+        # A shot taken and not moved says why in its own entry too
+        $unkept = { param([string]$Reason) foreach ($e in $moving) { if (-not $e['path'] -and -not $e['problem']) { $e['problem'] = "could not be kept: $Reason" } } }
         # Before anything is read or moved: a service that did not stop may still write there, a link leads elsewhere
         $early = if (@($Ctx['CaptureLeft']) -icontains $shotPlan.Dir) { 'the capture service did not stop in time' }
         elseif (& $swapped) { 'the shot directory was replaced by a link or junction' }
-        if ($early) { return [pscustomobject]@{ Status = (Get-HarnessWorse $Status 'INCOMPLETE'); Detail = "$Detail; shots: nothing collected: $early"; Seen = $Seen } }
+        if ($early) { & $unkept $early; return [pscustomobject]@{ Status = (Get-HarnessWorse $Status 'INCOMPLETE'); Detail = "$Detail; shots: nothing collected: $early"; Seen = $Seen } }
         $byName = @{}
         foreach ($x in $shotPlan.Shots) { $byName[$x.Name] = $x }
-        # The shots the states list, or for a launch that failed as a whole what the service answered: every image whose
-        # answer reads and whose header matches it
-        $judged = @((($Seen -is [Collections.IDictionary]) -and $Seen.Contains('states')) ? @($Seen['states'] | Where-Object { $_ -is [Collections.IDictionary] -and $_.Contains('shots') }) : @())
-        $moving = @(foreach ($st in $judged) { foreach ($e in @($st['shots'])) { if ($e['taken']) { $e } } })
         if (-not $judged.Count) {
             $moving = @(foreach ($x in $shotPlan.Shots) {
                     $reply = Read-HarnessShotAnswer -Path $x.Done -Kind done
@@ -435,7 +437,8 @@ function Save-HarnessShots {
         else { $null }
         $notKept = [Collections.Generic.List[string]]::new()
         $refused = ($moving.Count -and -not $stop) ? (Get-HarnessKeepClaim $Keep) : ''
-        if ($refused) { $notKept.Add($refused) }
+        if ($refused) { $notKept.Add($refused); & $unkept $refused }
+        if ($stop) { & $unkept ($stop -creplace '^nothing collected: ', '') }
         foreach ($e in @($moving | Where-Object { -not $stop -and -not $refused })) {
             $x = $byName[$e['name']]
             $dest = Join-Path $Keep.Dir "run$Round/$($s.id).shots/$($x.Name)"

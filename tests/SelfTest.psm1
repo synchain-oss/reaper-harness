@@ -4416,6 +4416,13 @@ function Get-CaptureCases([string]$Tmp, [string]$RepoRoot) {
     $r3 = & $saved $m3 'c3'
     & $add "shot collection: with a REAPER of the round still running nothing is moved ($(& $toldBy $r3))" $true (& $holds {
         $r3.Status -ceq 'INCOMPLETE' -and $r3.Detail -ceq 'ok; shots: nothing collected: a REAPER of this round could not be ended' -and (Test-Path -LiteralPath $m3.Plan.Shots[0].Png) })
+    # A shot taken and not moved says why in its own entry as well, whatever kept it from being moved; a shot not taken
+    # keeps its own reason
+    $why2 = try { $r2.Seen.states[0].shots[0].problem } catch { $null }
+    $why3 = try { $r3.Seen.states[0].shots[0].problem } catch { $null }
+    & $add "shot collection: a shot taken and not moved says why in its entry: a claimed run directory, a REAPER still running ($why2 | $why3)" $true (& $holds {
+        $why2 -ceq 'could not be kept: renders/c1/manifest.jsonl is there already (a run started in the same second)' -and $why3 -ceq 'could not be kept: a REAPER of this round could not be ended' -and
+        $r3.Seen.states[0].shots[0].taken -and $null -eq $r3.Seen.states[0].shots[0].path -and $r3.Seen.states[0].shots[1].problem -ceq 'no answer within 10 s' })
     $m4 = & $made 'save4'
     $taken4 = Join-Path $saveRes 'renders/c4/run1/sv.shots/s-0.png'
     $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $taken4)
@@ -4440,6 +4447,10 @@ function Get-CaptureCases([string]$Tmp, [string]$RepoRoot) {
     & $add "shot collection: a shot directory replaced by a junction gives nothing, and the files behind it stay ($(& $toldBy $r6))" $true (& $holds {
         $junctionMade -and $r6.Status -ceq 'INCOMPLETE' -and $r6.Detail -ceq 'ok; shots: nothing collected: the shot directory was replaced by a link or junction' -and (Test-Path -LiteralPath (Join-Path $elsewhere 's-0.png')) -and
         -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c6/run1')) })
+    $why6 = try { $r6.Seen.states[0].shots[0].problem } catch { $null }
+    & $add "shot collection: a shot taken in a directory replaced by a junction says why in its entry ($why6)" $true (& $holds {
+        $junctionMade -and $why6 -ceq 'could not be kept: the shot directory was replaced by a link or junction' -and $null -eq $r6.Seen.states[0].shots[0].path -and
+        $r6.Seen.states[0].shots[1].problem -ceq 'no answer within 10 s' })
     if ($junctionMade) { [IO.Directory]::Delete($m6.Plan.Dir) }
     # A launch that failed as a whole (no facts): every image whose answer checks out is moved and listed all the same
     $m7 = & $made 'save7'
