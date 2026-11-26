@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:Src = Join-Path $PSScriptRoot '../src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Report', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Probe', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Report', 'Config', 'Rpp', 'Plugins', 'Transport', 'Capture', 'Sources', 'Probe', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $script:Src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $PSScriptRoot 'TempDir.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'FakeReaper.psm1') -ErrorAction Stop
 
@@ -3948,6 +3948,64 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     $plainRow = Read-HarnessTransportRow $heldFacts 1
     & $add 'windows held: the shortest hold is read from st<n>_win_held for a state that holds its windows' $false (& $holds { $heldRow.win_held -eq 5003 -and $heldRow.win_open -eq 20 })
     & $add 'windows held: for a state without holdMs a win_held the driver sent is not read, so its facts have none' $false (& $holds { $null -ne $plainRow -and $null -eq $plainRow.PSObject.Properties['win_held'] -and $plainRow.win_open -eq 20 })
+    # Shots of a held window (windows.capture): a state is judged by whether each was taken, never by what is in it
+    $winShots = [pscustomobject]@{ Plugin = 'rec'; Count = 20; HoldMs = 5000; MaxBlockDiff = 4; Fx = 1; Capture = [int[]]@(0, 300, 5000) }
+    $shotsOf = {
+        param([hashtable]$NotTaken = @{})
+        , @(foreach ($ms in 0, 300, 5000) {
+                $listed = [ordered]@{ at = $ms; held = $ms + 2; wallMs = $ms + 5; name = "s-$ms.png"; taken = $true; problem = $null; path = $null; bytes = $null; sha256 = $null; width = 640; height = 427; view = $null; dpi = 96 }
+                if ($NotTaken.Contains($ms)) { $listed.taken = $false; $listed.problem = $NotTaken[$ms]; $listed.width = $null; $listed.height = $null; $listed.dpi = $null }
+                $listed
+            })
+    }
+    $shotsAll = Test-HarnessTransportState -State (& $st $winShots) -Row (& $rowOf @{ win_held = 5003 }) -Shots (& $shotsOf)
+    & $add "shots: three shots taken: PASS, the line says how many right after the hold ($($shotsAll.Line))" $false (
+        $shotsAll.Status -ceq 'PASS' -and @($shotsAll.Problems).Count -eq 0 -and $shotsAll.Line -clike '* windows=20/20 of 20 held=5003/5000ms shots=3/3')
+    $shotLate = Test-HarnessTransportState -State (& $st $winShots) -Row (& $rowOf @{ win_held = 5003 }) -Shots (& $shotsOf @{ 5000 = 'no answer within 10 s' })
+    & $add "shots: a shot not taken makes a passing state INCOMPLETE, with its reason as the only problem ($($shotLate.Line))" $true (
+        $shotLate.Status -ceq 'INCOMPLETE' -and @($shotLate.Problems).Count -eq 1 -and $shotLate.Problems[0] -ceq 'shot s-5000.png not taken: no answer within 10 s' -and
+        $shotLate.Line.EndsWith(' held=5003/5000ms shots=2/3; not taken: s-5000.png (no answer within 10 s)', [StringComparison]::Ordinal))
+    $never = 'it was never asked for: the window did not open, or the request could not be written'
+    $shotFail = Test-HarnessTransportState -State (& $st $winShots) -Row (& $rowOf @{ win_open = 0; win_closed = 0; win_held = 0 }) -Shots (& $shotsOf @{ 0 = $never; 300 = $never; 5000 = $never })
+    & $add "shots: a failing state with shots not taken stays FAIL and lists both ($($shotFail.Line))" $true (
+        $shotFail.Status -ceq 'FAIL' -and $shotFail.Problems -ccontains 'the window of rec opened 0 of 20 times' -and $shotFail.Problems -ccontains "shot s-300.png not taken: $never" -and
+        $shotFail.Line -clike "* shots=0/3; failed: *; not taken: s-0.png ($never), s-300.png ($never), s-5000.png ($never)")
+    $shotGap = Test-HarnessTransportState -State (& $st $winShots) -Row (& $rowOf @{ win_held = $null }) -Shots (& $shotsOf @{ 300 = 'the window was gone before the shot was taken' })
+    & $add "shots: a state without evidence stays INCOMPLETE and lists the shot not taken after the gap ($($shotGap.Line))" $true (
+        $shotGap.Status -ceq 'INCOMPLETE' -and @($shotGap.Problems).Count -eq 2 -and $shotGap.Problems[1] -ceq 'shot s-300.png not taken: the window was gone before the shot was taken' -and
+        $shotGap.Line.EndsWith('; no evidence: the driver reported no hold time; not taken: s-300.png (the window was gone before the shot was taken)', [StringComparison]::Ordinal))
+    $noAsk = Test-HarnessTransportState -State (& $st $winHeld) -Row (& $rowOf @{ win_held = 5003 })
+    $shotRow = Read-HarnessTransportRow ($heldFacts + @{ st1_shot1 = 'done'; st1_shot1_held = '2'; st1_shot1_wall = '5' }) 1 -Held
+    & $add "shots: a state without capture has nothing about shots in its line or its row, whatever the driver sent ($($noAsk.Line))" $false (& $holds {
+            $noAsk.Status -ceq 'PASS' -and $noAsk.Line -cnotlike '*shot*' -and $null -ne $shotRow -and @($shotRow.PSObject.Properties | Where-Object { $_.Name -clike '*shot*' }).Count -eq 0 })
+    $unlisted = @((Test-HarnessTransportState -State (& $st $winShots) -Row (& $rowOf @{ win_held = 5003 })), (Test-HarnessTransportState -State (& $st $winShots) -Row (& $rowOf @{ win_held = 5003 }) -Shots @((& $shotsOf)[0])))
+    $unlistedFail = Test-HarnessTransportState -State (& $st $winShots) -Row (& $rowOf @{ win_open = 19; win_held = 5003 })
+    & $add "shots: asked for and not listed, or fewer listed than asked, is INCOMPLETE; a FAIL stays FAIL ($($unlisted[0].Line))" $true (
+        @($unlisted | Where-Object { $_.Status -ceq 'INCOMPLETE' -and @($_.Problems).Count -eq 1 -and $_.Problems[0] -ceq 'shots were asked for and not reported' -and $_.Line -clike '*; not taken: shots were asked for and not reported' }).Count -eq 2 -and
+        $unlistedFail.Status -ceq 'FAIL' -and $unlistedFail.Problems -ccontains 'shots were asked for and not reported')
+    $nothing = 'the driver reported nothing about it'
+    $unseenShots = Test-HarnessTransportState -State (& $st $winShots) -Row $null -Shots (& $shotsOf @{ 0 = $nothing; 300 = $nothing; 5000 = $nothing })
+    & $add "shots: a state not observed lists its shots as not taken ($($unseenShots.Line))" $true (
+        $unseenShots.Status -ceq 'INCOMPLETE' -and @($unseenShots.Problems).Count -eq 4 -and $unseenShots.Line -ceq "s: not observed; not taken: s-0.png ($nothing), s-300.png ($nothing), s-5000.png ($nothing)")
+    & $add 'shots: held windows of an older caller or an extension, without Capture, are judged and given to the driver without shots, and nothing throws' $false (& $holds {
+            $olderHeld = Test-HarnessTransportState -State (& $st $winHeld) -Row (& $rowOf @{ win_held = 5003 }) -Shots $null
+            $olderPlan = Get-HarnessCapturePlan -Scenario ([pscustomobject]@{ id = 'old'; states = @(& $st $winHeld) }) -Work $Tmp
+            $olderHeldJob = Get-HarnessTransportJob -Scenario ([pscustomobject]@{ track = 'Voice'; sr = 48000; settleSamples = $null; feed = $null; states = @(& $st $winHeld) }) -Layout ([pscustomobject]@{ Tracks = @([pscustomobject]@{ Name = 'Voice' }) }) `
+                -Tools @{ 'harness-block-probe' = 'JS:p'; 'harness-feed' = 'JS:f' } -RecordDir 'R' -Capture $olderPlan
+            $olderHeld.Status -ceq 'PASS' -and $olderHeld.Line -cnotlike '*shots=*' -and $null -eq $olderPlan -and @(Get-HarnessTransportCapture $winHeld).Count -eq 0 -and @(Get-HarnessTransportCapture $null).Count -eq 0 -and
+            (@($olderHeldJob.states[0].windows.get_Keys() | Sort-Object) -join ',') -ceq 'count,fx,hold' })
+    # The driver is never sent an offset past the hold, nor shots for a window without one: a hand-built state's others
+    # are then not taken
+    $pastHold = & $st ([pscustomobject]@{ Plugin = 'rec'; Count = 1; HoldMs = 1000; MaxBlockDiff = 4; Fx = 1; Capture = [int[]]@(500, 2000) })
+    $noHoldShots = & $st ([pscustomobject]@{ Plugin = 'rec'; Count = 1; HoldMs = 0; MaxBlockDiff = 4; Fx = 1; Capture = [int[]]@(0) })
+    $noHoldShots.Name = 't'
+    $handScenario = [pscustomobject]@{ id = 'hand'; track = 'Voice'; sr = 48000; settleSamples = $null; feed = $null; states = @($pastHold, $noHoldShots) }
+    $handPlan = Get-HarnessCapturePlan -Scenario $handScenario -Work $Tmp
+    $handJob = Get-HarnessTransportJob -Scenario $handScenario -Layout ([pscustomobject]@{ Tracks = @([pscustomobject]@{ Name = 'Voice' }) }) -Tools @{ 'harness-block-probe' = 'JS:p'; 'harness-feed' = 'JS:f' } -RecordDir 'R' -Capture $handPlan
+    $handJudged = Test-HarnessTransportState -State $pastHold -Row (& $rowOf @{ win_open = 1; win_closed = 1; win_held = 1003 }) -Shots (Get-HarnessShotFacts -Plan $handPlan -Facts @{ st1_shot1 = 'gone' } -StateNo 1)
+    & $add "shots: the driver is sent only the offsets up to the hold, and none for a window without a hold; a hand-built state's shot past its hold is not taken ($($handJudged.Line))" $true (& $holds {
+            @($handJob.states[0].windows.capture).Count -eq 1 -and $handJob.states[0].windows.capture[0].at -eq 500 -and (@($handJob.states[1].windows.get_Keys() | Sort-Object) -join ',') -ceq 'count,fx' -and
+            $handJudged.Status -ceq 'INCOMPLETE' -and $handJudged.Problems -ccontains "shot s-2000.png not taken: $nothing" -and $handJudged.Problems -ccontains 'shot s-500.png not taken: the window was gone before the shot was taken' })
     $readings = { param($Start, $End) @{ Start = $Start; End = $End } }
     $repOk = Test-HarnessTransportState -State (& $st $win $crit) -Row (& $rowOf) -Readings (& $readings (& $val 100 3) (& $val 150 23))
     & $add "state report: criteria met with the windows: PASS, the line says what the plugin reported ($($repOk.Line))" $false ($repOk.Status -ceq 'PASS' -and $repOk.Line -clike '* windows=20/20 of 20 report rec.opens=23 (+20) rec.blocks=150 (+50)')
@@ -3987,12 +4045,16 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         (Get-HarnessRenderGap $wavFile @() 10) -clike 'the render gap.wav cannot be read: WAV: *' -and $null -eq (Get-HarnessRenderGap $wavFile @($stemFile) 0))
     # The time the step gets, and what the driver is told
     $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $win }, [pscustomobject]@{ Samples = 9600; Windows = $null }) }
-    & $add 'transport timeout: 20 s more for every window opened and closed, 60 s a state with reports' $false (
-        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 501.5) -lt 1e-9 -and [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60 -Reports) - 621.5) -lt 1e-9)
+    & $add 'transport timeout: 20 s more for every window opened and closed, 60 s a state with reports' $false (& $holds {
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 501.5) -lt 1e-9 -and [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60 -Reports) - 621.5) -lt 1e-9 })
     $heldTimed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = [pscustomobject]@{ Plugin = 'rec'; Count = 2; HoldMs = 5000; MaxBlockDiff = 4; Fx = 1 } }) }
     $unwindowed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $null }) }
-    & $add 'transport timeout: 2 windows held 5000 ms each add 2 x (20 + 3 x 5) s' $false (
-        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $heldTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $unwindowed -LuaTimeoutSec 60) - 70) -lt 1e-9)
+    & $add 'transport timeout: 2 windows held 5000 ms each add 2 x (20 + 3 x 5) s' $false (& $holds {
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $heldTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $unwindowed -LuaTimeoutSec 60) - 70) -lt 1e-9 })
+    $shotTimed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = [pscustomobject]@{ Plugin = 'rec'; Count = 2; HoldMs = 5000; MaxBlockDiff = 4; Fx = 1; Capture = [int[]]@(0, 300, 5000) } }) }
+    & $add 'transport timeout: three shots add 10 s each, on top of 2 x (20 + 3 x 5) s for the two windows held 5000 ms; held windows without Capture add none' $false (& $holds {
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $shotTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $unwindowed -LuaTimeoutSec 60) - 100) -lt 1e-9 -and
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $shotTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $heldTimed -LuaTimeoutSec 60) - 30) -lt 1e-9 })
     # What a configuration makes of reports and windows
     $cfgText = @'
 { "schema": 1, "name": "t",
@@ -4000,7 +4062,7 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
   "layouts": { "one": { "tracks": [ { "name": "Voice", "source": true, "fx": [ { "plugin": "mon" }, { "plugin": "rec" } ] } ] } },
   "scenarios": [
     { "id": "t1", "kind": "transport", "layout": "one", "states": [
-      { "name": "p", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "rec", "count": 20, "holdMs": 5000 }, "expect": { "report": { "rec": { "editorOpens": { "delta": 20 }, "blocksRealtime": { "delta": { "min": 1 } } } } } },
+      { "name": "p", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "rec", "count": 20, "holdMs": 5000, "capture": [0, 300, 5000] }, "expect": { "report": { "rec": { "editorOpens": { "delta": 20 }, "blocksRealtime": { "delta": { "min": 1 } } } } } },
       { "name": "q", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "mon", "count": 3, "maxBlockDiff": 9 } } ] },
     { "id": "r1", "kind": "render", "layout": "one", "host": { "runFxWhenStopped": false, "informOfflineState": false }, "report": { "rec": { "blocksRealtime": { "value": 0 } } } } ] }
 '@
@@ -4028,6 +4090,58 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         & $add 'transport job: the window''s FX counts the block probe in front of the chain' $false ($job.states[0].windows.fx -eq 2 -and $job.states[0].windows.count -eq 20 -and $job.states[1].windows.fx -eq 1)
         & $add 'transport job: a window held open gives the driver its hold in ms' $false (& $holds { $job.states[0].windows.hold -eq 5000 })
         & $add 'transport job: a state without holdMs gives the driver exactly fx and count under windows, as before' $false ((@($job.states[1].windows.get_Keys() | Sort-Object) -join ',') -ceq 'count,fx')
+    }
+    # Shots (windows.capture): kept as integers in order, and only a held window with shots sends the driver their files
+    $capWork = Join-Path $Tmp 'capture-work'
+    $jobTools = @{ 'harness-block-probe' = 'JS:p'; 'harness-feed' = 'JS:f' }
+    if ($t1) {
+        $capJob = Get-HarnessTransportJob -Scenario $t1 -Layout $cfgRes.Config.Layouts['one'] -Tools $jobTools -RecordDir 'R' -Capture (Get-HarnessCapturePlan -Scenario $t1 -Work $capWork)
+        $noShotsT = (Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $cfgText.Replace(', "capture": [0, 300, 5000]', ''))).Config.Scenarios[0]
+        $heldJob = Get-HarnessTransportJob -Scenario $noShotsT -Layout $cfgRes.Config.Layouts['one'] -Tools $jobTools -RecordDir 'R' -Capture (Get-HarnessCapturePlan -Scenario $noShotsT -Work $capWork)
+        $shotDir = [IO.Path]::GetFullPath((Join-Path $capWork 't1.shots'))
+        $pWin = $capJob.states[0].windows
+        & $add 'configuration: capture is kept as integers in order; without it, an empty list' $false (& $holds {
+                $t1.states[0].Windows.Capture -is [int[]] -and ($t1.states[0].Windows.Capture -join ',') -ceq '0,300,5000' -and $t1.states[1].Windows.Capture -is [int[]] -and $t1.states[1].Windows.Capture.Count -eq 0 })
+        & $add 'transport job: a held window with shots gives the driver exactly capture, count, fx and hold, each shot exactly at, done, err and req in <work>\<id>.shots; the others keep their keys' $false (& $holds {
+                (@($pWin.get_Keys() | Sort-Object) -join ',') -ceq 'capture,count,fx,hold' -and @($pWin.capture).Count -eq 3 -and
+                @($pWin.capture | Where-Object { (@($_.get_Keys() | Sort-Object) -join ',') -cne 'at,done,err,req' }).Count -eq 0 -and (@($pWin.capture | ForEach-Object { $_.at }) -join ',') -ceq '0,300,5000' -and
+                $pWin.capture[1].req -ceq (Join-Path $shotDir 'p-300.req') -and $pWin.capture[1].done -ceq (Join-Path $shotDir 'p-300.done') -and $pWin.capture[1].err -ceq (Join-Path $shotDir 'p-300.err') -and
+                (@($capJob.states[1].windows.get_Keys() | Sort-Object) -join ',') -ceq 'count,fx' -and (@($heldJob.states[0].windows.get_Keys() | Sort-Object) -join ',') -ceq 'count,fx,hold' })
+        $oneShot = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $cfgText.Replace('[0, 300, 5000]', '[300]'))
+        $oneShotT = $oneShot.Config ? $oneShot.Config.Scenarios[0] : $null
+        $oneShotJob = $oneShotT ? (Get-HarnessTransportJob -Scenario $oneShotT -Layout $cfgRes.Config.Layouts['one'] -Tools $jobTools -RecordDir 'R' -Capture (Get-HarnessCapturePlan -Scenario $oneShotT -Work $capWork)) : $null
+        & $add 'configuration: a single shot stays a list, in the configuration and in what the driver is sent' $false (& $holds {
+                @($oneShot.Problems).Count -eq 0 -and $oneShotT.states[0].Windows.Capture -is [int[]] -and $oneShotT.states[0].Windows.Capture.Count -eq 1 -and
+                $oneShotJob.states[0].windows.capture -is [array] -and $oneShotJob.states[0].windows.capture.Count -eq 1 -and (ConvertTo-HarnessLuaTable $oneShotJob.states[0].windows) -cmatch '\["capture"\]=\{\{\["at"\]=300,\["done"\]="' })
+    }
+    $eight = '[0, 1, 2, 3, 4, 5, 6, 7]'
+    $qEnd = '"count": 3, "maxBlockDiff": 9 } }'
+    $heldState = { param([string]$name, [string]$List) ", { ""name"": ""$name"", ""transport"": ""play"", ""arm"": false, ""monitor"": ""off"", ""windows"": { ""plugin"": ""rec"", ""count"": 1, ""holdMs"": 5000, ""capture"": $List } }" }
+    $thirtyTwo = $cfgText.Replace('[0, 300, 5000]', $eight).Replace($qEnd, $qEnd + (& $heldState 'x1' $eight) + (& $heldState 'x2' $eight) + (& $heldState 'x3' $eight))
+    $negShots = $cfgText.TrimEnd().TrimEnd('}') + ', "negative": [ { "id": "n1", "kind": "transport", "layout": "one", "expect": "FAIL", "expectDetail": "x", "states": [ { "name": "p", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "rec", "count": 1, "holdMs": 5000, "capture": [0] } } ] } ] }'
+    $holdNeeded = 'config.scenarios[0].states[0].windows.capture: shots are taken while the window is held open: it needs holdMs above 0'
+    $capBad = @(
+        @{ L = 'shots without holdMs'; J = $cfgText.Replace('"holdMs": 5000, "capture"', '"capture"'); W = $holdNeeded }
+        @{ L = 'shots with holdMs 0'; J = $cfgText.Replace('"holdMs": 5000, "capture"', '"holdMs": 0, "capture"'); W = $holdNeeded }
+        @{ L = 'offsets that fall'; J = $cfgText.Replace('[0, 300, 5000]', '[2000, 300]'); W = 'config.scenarios[0].states[0].windows.capture: the offsets must rise: 300 comes after 2000' }
+        @{ L = 'an offset after the hold'; J = $cfgText.Replace('[0, 300, 5000]', '[0, 300, 5001]'); W = 'config.scenarios[0].states[0].windows.capture: 5001 ms is after the hold of 5000 ms' }
+        @{ L = '33 shots in a scenario'; J = $thirtyTwo.Replace($qEnd, $qEnd + (& $heldState 'x4' '[0]')); W = 'config.scenarios[0].states: 33 shots in one scenario, more than 32' }
+        @{ L = 'shots in a negative case'; J = $negShots; W = 'config.negative[0].states[0].windows.capture: no shots in a negative case' }
+    )
+    foreach ($c in $capBad) {
+        $res = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $c.J)
+        & $add "configuration: $($c.L) is refused, for that alone ($(@($res.Problems) -join ' | '))" $true ($c.J -cne $cfgText -and @($res.Problems).Count -eq 1 -and $res.Problems[0] -ceq $c.W)
+    }
+    $capFine = @(
+        @{ L = 'a shot at 0'; J = $cfgText.Replace('[0, 300, 5000]', '[0]') }
+        @{ L = 'a shot at the end of the hold'; J = $cfgText.Replace('[0, 300, 5000]', '[5000]') }
+        @{ L = '8 shots in a state'; J = $cfgText.Replace('[0, 300, 5000]', $eight) }
+        @{ L = 'exactly 32 shots in a scenario'; J = $thirtyTwo }
+        @{ L = 'shots in the first of 20 windows'; J = $cfgText }
+    )
+    foreach ($c in $capFine) {
+        $res = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $c.J)
+        & $add "configuration: $($c.L) is accepted ($(@($res.Problems) -join ' | '))" $false ($c.J.Contains('"capture"') -and @($res.Problems).Count -eq 0)
     }
     $cfgBad = @(
         @{ L = 'a report variable REAPER reads'; F = '"REC_PROBE_JSON"'; T = '"REAPER_X"'; W = "config.plugins.rec.report.env: 'REAPER_X' starts with REAPER_*" }
@@ -4062,6 +4176,20 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
     $overRes = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $overHold)
     & $add "schema: holdMs 60001 is refused by Test-Json, like the validator ($(@($overRes.Problems) -join ' | '))" $true (
         $overHold -cne $cfgText -and @($overRes.Problems).Count -eq 1 -and $overRes.Problems[0] -ceq 'config.scenarios[0].states[0].windows.holdMs: must be between 0 and 60000' -and (& $agree $overHold $false))
+    & $add 'schema: Test-Json accepts shots, 8 in a state and 32 in a scenario, like the validator' $false ((& $agree $cfgText $true) -and (& $agree $thirtyTwo $true) -and $cfgText.Contains('"capture": [0, 300, 5000]'))
+    $capStruct = @(
+        @{ L = '9 offsets'; T = '[0, 1, 2, 3, 4, 5, 6, 7, 8]' }
+        @{ L = 'an offset of 60001'; T = '[0, 60001]' }
+        @{ L = 'an offset as text'; T = '["300"]' }
+        @{ L = 'no offsets'; T = '[]' }
+        @{ L = 'an offset twice'; T = '[300, 300]' }
+    )
+    foreach ($c in $capStruct) {
+        $structJson = $cfgText.Replace('[0, 300, 5000]', $c.T)
+        $res = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $structJson)
+        & $add "schema: Test-Json refuses $($c.L) in capture, like the validator ($(@($res.Problems) -join ' | '))" $true (
+            $structJson -cne $cfgText -and @($res.Problems).Count -eq 1 -and $res.Problems[0] -clike 'config.scenarios[[]0[]].states[[]0[]].windows.capture*' -and (& $agree $structJson $false))
+    }
     $empties = @(
         @{ L = 'an empty range'; F = '{ "min": 1 }'; T = '{ }' }
         @{ L = 'an empty criterion'; F = '"editorOpens": { "delta": 20 }'; T = '"editorOpens": { }' }
@@ -4072,6 +4200,319 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         $res = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson $emptyJson)
         & $add "schema: Test-Json rejects $($c.L), like the validator ($(@($res.Problems) -join ' | '))" $true ($emptyJson -cne $cfgText -and @($res.Problems).Count -eq 1 -and (& $agree $emptyJson $false))
     }
+    $cases
+}
+
+# ---------------------------------------------------------------- shots of a held window
+function Get-CaptureCases([string]$Tmp, [string]$RepoRoot) {
+    $cases = New-CaseList
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $holds = { param([scriptblock]$Condition) try { [bool](& $Condition) } catch { $false } }
+    $capRoot = Join-Path $Tmp 'capture cases'
+    $null = New-Item -ItemType Directory -Path $capRoot
+    $winOf = { param([int[]]$Offsets, [int]$hold = 5000) [pscustomobject]@{ Plugin = 'rec'; Count = 1; HoldMs = $hold; MaxBlockDiff = 4; Fx = 1; Capture = $Offsets } }
+    $stateNamed = { param([string]$name, $Windows) [pscustomobject]@{ Name = $name; Transport = 'play'; Arm = $false; Monitor = 'off'; Samples = 4800; Windows = $Windows; Report = [ordered]@{}; Expect = $null } }
+    $pngHead = {
+        param([string]$Path, [int]$Width, [int]$Height)
+        $b = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, 0x49, 0x48, 0x44, 0x52) + [byte[]]::new(17)
+        foreach ($pair in @(@(16, $Width), @(20, $Height))) { for ($i = 0; $i -lt 4; $i++) { $b[$pair[0] + $i] = [byte](($pair[1] -shr (24 - 8 * $i)) -band 0xFF) } }
+        [IO.File]::WriteAllBytes($Path, $b)
+    }
+    $goodDone = "width=640`nheight=427`nview=0,27,640,400`ndpi=96`n"
+
+    # The plan: the one builder of the shot files
+    $planned = [pscustomobject]@{ id = 'shots'; states = @((& $stateNamed 'a-1' (& $winOf @(300))), (& $stateNamed 'plain' $null), (& $stateNamed 'a' (& $winOf @(1300, 2000)))) }
+    $shotPlan = Get-HarnessCapturePlan -Scenario $planned -Work $capRoot
+    $shotDir = [IO.Path]::GetFullPath((Join-Path $capRoot 'shots.shots'))
+    & $add "shot plan: one entry a shot in state, then offset order, named <state>-<ms>.png, numbered from 1, its files full paths in <work>\<id>.shots ($(@($shotPlan.Shots | ForEach-Object { $_.Name }) -join ', '))" $false (& $holds {
+            $shotPlan.Dir -ceq $shotDir -and (@($shotPlan.Shots | ForEach-Object { "$($_.State)/$($_.StateNo)/$($_.K)/$($_.At)/$($_.Name)" }) -join ',') -ceq 'a-1/1/1/300/a-1-300.png,a/3/1/1300/a-1300.png,a/3/2/2000/a-2000.png' -and
+            $shotPlan.Shots[1].Png -ceq (Join-Path $shotDir 'a-1300.png') -and $shotPlan.Shots[1].Req -ceq (Join-Path $shotDir 'a-1300.req') -and $shotPlan.Shots[1].Done -ceq (Join-Path $shotDir 'a-1300.done') -and
+            $shotPlan.Shots[1].Err -ceq (Join-Path $shotDir 'a-1300.err') })
+    & $add 'shot plan: none for a scenario without shots, nor for one without states' $true (& $holds {
+            $null -eq (Get-HarnessCapturePlan -Scenario ([pscustomobject]@{ id = 'x'; states = @((& $stateNamed 'p' $null), (& $stateNamed 'q' (& $winOf @()))) }) -Work $capRoot) -and
+            $null -eq (Get-HarnessCapturePlan -Scenario ([pscustomobject]@{ id = 'x' }) -Work $capRoot) })
+
+    # The answers, read strictly; an err's own text is never shown
+    $ansDir = Join-Path $capRoot 'answers'
+    $null = New-Item -ItemType Directory -Path $ansDir
+    $answerOf = {
+        param([string]$leaf, $Content, [string]$kind = 'done')
+        $f = Join-Path $ansDir $leaf
+        if ($Content -is [byte[]]) { [IO.File]::WriteAllBytes($f, $Content) } else { [IO.File]::WriteAllText($f, [string]$Content) }
+        Read-HarnessShotAnswer -Path $f -Kind $kind
+    }
+    $good = & $answerOf 'good.done' $goodDone
+    $noView = & $answerOf 'noview.done' "width=640`nheight=427`nview=none`ndpi=144`n"
+    $justFits = & $answerOf 'fits.done' ($goodDone + ("`n" * (1024 - $goodDone.Length)))
+    & $add 'shot answer: a done file gives the size, the view in image coordinates and the DPI; view=none is no view; 1024 bytes are read' $false (& $holds {
+            $good.Width -eq 640 -and $good.Height -eq 427 -and $good.Dpi -eq 96 -and $good.View.x -eq 0 -and $good.View.y -eq 27 -and $good.View.w -eq 640 -and $good.View.h -eq 400 -and
+            $null -eq $noView.View -and $noView.Dpi -eq 144 -and $justFits.Width -eq 640 })
+    $doneBad = @(
+        @{ L = 'a key missing'; C = "width=640`nheight=427`nview=none`n" }
+        @{ L = 'a key too many'; C = $goodDone + "extra=1`n" }
+        @{ L = 'a key twice'; C = "width=640`n" + $goodDone }
+        @{ L = 'width 0'; C = $goodDone.Replace('width=640', 'width=0') }
+        @{ L = 'width 4097'; C = $goodDone.Replace('width=640', 'width=4097') }
+        @{ L = 'a DPI that is no number'; C = $goodDone.Replace('dpi=96', 'dpi=x') }
+        @{ L = 'a view of three numbers'; C = $goodDone.Replace('view=0,27,640,400', 'view=1,2,3') }
+        @{ L = '1025 bytes'; C = $goodDone + ("`n" * (1025 - $goodDone.Length)) }
+        @{ L = 'a byte that is not ASCII'; C = [byte[]]([Text.Encoding]::ASCII.GetBytes($goodDone.Replace('view=0,27,640,400', 'view=none')) + [byte[]](0xE9, 0x0A)) }
+    )
+    foreach ($c in $doneBad) { & $add "shot answer: a done file with $($c.L) is not read" $true ($null -eq (& $answerOf 'bad.done' $c.C)) }
+    $errWant = [ordered]@{
+        nowindow = 'no plugin window of this REAPER was visible'; empty = 'the window had no client area'; toolarge = 'its client area is larger than 4096 x 4096'; printfailed = 'PrintWindow failed'
+        exists = 'its file was there already and is never overwritten'
+        'windows 2' = '2 plugin windows of this REAPER were visible: which one is meant cannot be told'; 'failed IOException' = 'the capture failed (IOException)'
+    }
+    $errGot = @(foreach ($k in $errWant.get_Keys()) { if ((& $answerOf 'one.err' "reason=$k`n" 'err') -cne $errWant[$k]) { $k } })
+    & $add "shot answer: every reason of the table gives its own text ($($errGot -join ', '))" $false ($errGot.Count -eq 0)
+    # link is no reason: the service writes nothing through a link, so an err that says link is no answer of its own
+    $errOdd = @(@(foreach ($r in 'failed a/b', 'boom', 'windows 1', 'windows 1000', 'NOWINDOW', 'link') { & $answerOf 'odd.err' "reason=$r`n" 'err' }) | Where-Object { $null -ne $_ })
+    & $add "shot answer: a reason not in the table is not read, so its text is never shown ($($errOdd -join ' | '))" $true ($errOdd.Count -eq 0 -and $null -eq (& $answerOf 'two.err' "reason=nowindow`nother=1`n" 'err'))
+
+    # A state's shots as its facts list them, from the driver's word and the files
+    $factDir = Join-Path $capRoot 'f.shots'
+    $null = New-Item -ItemType Directory -Path $factDir
+    $factScen = [pscustomobject]@{ id = 'f'; states = @(& $stateNamed 's' (& $winOf @(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) 60000)) }
+    $factPlan = Get-HarnessCapturePlan -Scenario $factScen -Work $capRoot
+    $fp = { param([int]$k) $factPlan.Shots[$k - 1] }
+    & $pngHead (& $fp 1).Png 640 427; [IO.File]::WriteAllText((& $fp 1).Done, $goodDone)
+    & $pngHead (& $fp 2).Png 640 427
+    & $pngHead (& $fp 3).Png 641 427; [IO.File]::WriteAllText((& $fp 3).Done, $goodDone)
+    [IO.File]::WriteAllBytes((& $fp 4).Png, [byte[]]@()); [IO.File]::WriteAllText((& $fp 4).Done, $goodDone)
+    [IO.File]::WriteAllText((& $fp 5).Err, "reason=nowindow`n")
+    $driverSaid = @{ st1_shot1 = 'done'; st1_shot1_held = '302.4'; st1_shot1_wall = '310'; st1_shot2 = 'done'; st1_shot3 = 'done'; st1_shot4 = 'done'; st1_shot5 = 'err'; st1_shot6 = 'late'; st1_shot7 = 'gone'; st1_shot8 = 'none'; st1_shot10 = 'weird' }
+    $facts = Get-HarnessShotFacts -Plan $factPlan -Facts $driverSaid -StateNo 1
+    $first = $facts[0]
+    & $add "shot facts: a done answer with a matching image is taken, with its size, view, DPI, the hold time and the wall-clock time; path, bytes and hash wait for the move ($($first.problem))" $false (& $holds {
+            $first.taken -and $first.width -eq 640 -and $first.height -eq 427 -and $first.view.y -eq 27 -and $first.dpi -eq 96 -and $first.held -eq 302 -and $first.wallMs -eq 310 -and $first.at -eq 1 -and
+            $first.name -ceq 's-1.png' -and $null -eq $first.path -and $null -eq $first.bytes -and $null -eq $first.sha256 -and $null -eq $first.problem -and
+            (@($first.get_Keys()) -join ',') -ceq 'at,held,wallMs,name,taken,problem,path,bytes,sha256,width,height,view,dpi' })
+    $factWant = @(
+        @{ K = 2; W = 'the driver saw an answer, but there is no answer file' }; @{ K = 3; W = 'the image does not match its answer' }; @{ K = 4; W = 'the image does not match its answer' }
+        @{ K = 5; W = 'no plugin window of this REAPER was visible' }; @{ K = 6; W = 'no answer within 10 s' }; @{ K = 7; W = 'the window was gone before the shot was taken' }
+        @{ K = 8; W = 'it was never asked for: the window did not open, or the request could not be written' }; @{ K = 9; W = 'the driver reported nothing about it' }
+        @{ K = 10; W = 'the driver reported an unknown state for it' }
+    )
+    foreach ($c in $factWant) {
+        $one = $facts[$c.K - 1]
+        & $add "shot facts: shot $($c.K) ($($driverSaid["st1_shot$($c.K)"] ?? 'nothing')) is not taken: $($c.W) ($($one.problem))" $true (& $holds {
+                -not $one.taken -and $one.problem -ceq $c.W -and $null -eq $one.width -and $null -eq $one.dpi -and $one.problem -cnotlike '*weird*' })
+    }
+    $notStopped = Get-HarnessShotFacts -Plan $factPlan -Facts $driverSaid -StateNo 1 -Stopped $false
+    & $add 'shot facts: a capture service that did not stop in time leaves every shot of the launch not taken' $true (@($notStopped | Where-Object { -not $_.taken -and $_.problem -ceq 'the capture service did not stop in time' }).Count -eq 10)
+    $singleScen = [pscustomobject]@{ id = 'g'; states = @(& $stateNamed 's' (& $winOf @(300))) }
+    $single = Get-HarnessShotFacts -Plan (Get-HarnessCapturePlan -Scenario $singleScen -Work $capRoot) -Facts @{ st1_shot1 = 'late' } -StateNo 1
+    & $add 'shot facts: a state with one shot lists an array of one' $false (& $holds { $single -is [array] -and $single.Count -eq 1 -and (ConvertTo-HarnessJsonText ([ordered]@{ shots = $single })) -cmatch '^\{"shots":\[\{"at":300,' })
+
+    # The rules the service and the watchdog share, and the service itself
+    $hostModule = (Get-Command Invoke-HarnessHost).Module
+    $watchRule = & $hostModule { $script:PluginWindow }
+    $shotRule = & $hostModule { $script:PluginOnlyWindow }
+    $shotRegex = [regex]::new($shotRule, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    $shotYes = @('VST3: x', 'VST3i: x', 'VST: x', 'VSTi: x', 'CLAP: x', 'CLAPi: x', 'JS: x' | Where-Object { -not $shotRegex.IsMatch($_) })
+    $shotNo = @('FX: Track 1', 'vst3: x', 'VST3:x', 'Fake VST3: x', 'FX: Master Track' | Where-Object { $shotRegex.IsMatch($_) })
+    & $add "shot rule: the watchdog's window rule is unchanged; a shot is of a plugin's window only, never of a chain's (missed: $($shotYes -join ', '); wrongly: $($shotNo -join ', '))" $true (
+        $watchRule -ceq '^(?:VST3i?|VSTi?|CLAPi?|JS|FX): ' -and $shotYes.Count -eq 0 -and $shotNo.Count -eq 0)
+    $built = try { Initialize-HarnessCapture; Initialize-HarnessCapture; 'HarnessCapture' -as [type] } catch { $_.Exception.Message }
+    & $add "capture service: it compiles here with the default references, and a second time is nothing ($built)" $false ($built -is [type])
+    & $add 'capture service: its largest side is the one the answers are read with' $false (& $holds { [HarnessCapture]::MaxSide -eq (& (Get-Command Get-HarnessCapturePlan).Module { $script:ShotMaxSide }) -and [HarnessCapture]::MaxSide -eq 4096 })
+
+    # Every launch's shot files: full paths inside the work directory, each once, all in one directory
+    $launchWork = Join-Path $capRoot 'launch work'
+    $in = { param([string]$leaf, [string]$Sub = 'w.shots') Join-Path $launchWork "$Sub\$leaf" }
+    $entry = { param([string]$base, [string]$Sub = 'w.shots') [pscustomobject]@{ Req = (& $in "$base.req" $Sub); Png = (& $in "$base.png" $Sub); Done = (& $in "$base.done" $Sub); Err = (& $in "$base.err" $Sub) } }
+    $with = { param([string]$part, [string]$Value) $e = & $entry 'a'; $e.$part = $Value; $e }
+    & $add 'launch shots: shot files inside the work directory pass, and so does a launch without shots' $false (
+        $null -eq (Test-HarnessLaunchCaptures @((& $entry 'a'), (& $entry 'b')) $launchWork) -and $null -eq (Test-HarnessLaunchCaptures @() $launchWork))
+    $outsideWant = 'a shot file is not a path inside the work directory'
+    $launchBad = @(
+        @{ L = 'an image outside the work directory'; E = @(& $with 'Png' (Join-Path $Tmp 'outside.png')); W = $outsideWant }
+        @{ L = 'a relative path'; E = @(& $with 'Done' 'w.shots\a.done'); W = $outsideWant }
+        @{ L = 'the work directory itself'; E = @(& $with 'Err' $launchWork); W = $outsideWant }
+        @{ L = 'a path that climbs out'; E = @(& $with 'Req' (Join-Path $launchWork '..\x.req')); W = $outsideWant }
+        @{ L = 'an entry without its error file'; E = @([pscustomobject]@{ Req = (& $in 'a.req'); Png = (& $in 'a.png'); Done = (& $in 'a.done') }); W = 'a shot lacks one of its files' }
+        @{ L = 'an empty image path'; E = @(& $with 'Png' ''); W = 'a shot lacks one of its files' }
+        @{ L = 'an answer file that is the request'; E = @(& $with 'Done' (& $in 'a.req')); W = 'two shot files have the same path' }
+        @{ L = 'two shots with the same image, differing in case'; E = @((& $entry 'a'), [pscustomobject]@{ Req = (& $in 'b.req'); Png = (& $in 'A.PNG'); Done = (& $in 'b.done'); Err = (& $in 'b.err') }); W = 'two shot files have the same path' }
+        @{ L = 'shots in two directories'; E = @((& $entry 'a'), (& $entry 'b' 'v.shots')); W = 'the shot files are not all in one directory' }
+    )
+    foreach ($c in $launchBad) {
+        $why = Test-HarnessLaunchCaptures $c.E $launchWork
+        & $add "launch shots: $($c.L) is refused ($why)" $true ($why -ceq $c.W)
+    }
+
+    # The transport scenario with a hand-built context, the driver step stubbed: the shot directory, the work files, the
+    # job and the launch come from the plan; a row that ends before its states are judged has no facts
+    $scenarioModule = (Get-Command Test-HarnessLaunchCaptures).Module
+    $sceneCfg = Test-HarnessConfigData -Raw (ConvertFrom-HarnessJson @'
+{ "schema": 1, "name": "c", "plugins": { "rec": { "bundle": "R.vst3" } },
+  "layouts": { "one": { "tracks": [ { "name": "Voice", "source": true, "fx": [ { "plugin": "rec" } ] } ] } },
+  "scenarios": [ { "id": "t1", "kind": "transport", "layout": "one", "states": [
+    { "name": "p", "transport": "play", "arm": false, "monitor": "off", "windows": { "plugin": "rec", "count": 1, "holdMs": 1000, "capture": [0, 500] } } ] } ] }
+'@)
+    $sceneOf = { param([string]$work) @{ Work = $work; ToolJsfx = @{ 'harness-block-probe' = @{ AddName = 'JS:p'; Ident = 'p' }; 'harness-feed' = @{ AddName = 'JS:f'; Ident = 'f' } }; Config = $sceneCfg.Config
+            Files = [Collections.Generic.List[string]]::new(); Dirs = [Collections.Generic.List[string]]::new(); Limits = @{ luaTimeoutSec = 60 }; StillRunning = $null } }
+    $luaSeen = @{}
+    $luaStub = { param($ctx, $name, $step, $job, $timeoutSec, $reportEnv, $copies, $captures, $Outputs) $luaSeen.Captures = @($captures); $luaSeen.Outputs = @($Outputs); $luaSeen.Job = $job
+        [pscustomobject]@{ Run = [pscustomobject]@{ Pid = 7 }; Result = @{}; Why = 'stopped by the case' } }.GetNewClosure()
+    $runStub = { param($ctx, $name) [pscustomobject]@{ Project = (Join-Path $ctx.Work "$name.rpp") } }
+    $runScene = { param($ctx) Invoke-WithModuleStub 'Test-HarnessLaunchCaptures' 'New-HarnessRun' $runStub { Invoke-WithModuleStub 'Test-HarnessLaunchCaptures' 'Invoke-HarnessLuaStep' $luaStub { & $scenarioModule { param($c, $s) Invoke-HarnessTransportScenario $c $s } $ctx $sceneCfg.Config.Scenarios[0] } } }
+    $sceneWork = Join-Path $capRoot 'scene'
+    $null = New-Item -ItemType Directory -Path $sceneWork
+    $sceneCtx = & $sceneOf $sceneWork
+    $scene = & $runScene $sceneCtx
+    $sceneDir = [IO.Path]::GetFullPath((Join-Path $sceneWork 't1.shots'))
+    $sceneFiles = @($sceneCtx.Files | Where-Object { $_ -clike "$sceneDir\*" } | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object)
+    & $add "transport scenario: the shot directory is made empty and listed; requests and answers are work files, the images not; the launch gets the plan and the directory; a row that ends early has no facts ($($scene.Status): $($scene.Detail); $($sceneFiles -join ', '))" $false (& $holds {
+            $scene.Status -ceq 'INCOMPLETE' -and $scene.Detail -ceq 'stopped by the case' -and $null -eq $scene.PSObject.Properties['Facts'] -and $sceneCtx.Dirs.Contains($sceneDir) -and
+            @(Get-ChildItem -LiteralPath $sceneDir -Force).Count -eq 0 -and ($sceneFiles -join ',') -ceq 'p-0.done,p-0.err,p-0.req,p-500.done,p-500.err,p-500.req' -and
+            (@($luaSeen.Captures | ForEach-Object { Split-Path -Leaf $_.Png }) -join ',') -ceq 'p-0.png,p-500.png' -and ($luaSeen.Outputs -join ',') -ceq $sceneDir -and
+            @($luaSeen.Job.states[0].windows.capture).Count -eq 2 })
+    $sceneAgain = & $runScene $sceneCtx
+    & $add "transport scenario: a shot directory that is there already is not used again ($($sceneAgain.Detail))" $true ($sceneAgain.Status -ceq 'INCOMPLETE' -and $sceneAgain.Detail -ceq 'the shot directory t1.shots is there already')
+    $longCtx = & $sceneOf (Join-Path $sceneWork ('w' * 240))
+    $sceneLong = & $runScene $longCtx
+    & $add "transport scenario: shot files with paths longer than 259 characters start nothing ($($sceneLong.Detail))" $true (
+        $sceneLong.Status -ceq 'INCOMPLETE' -and $sceneLong.Detail -ceq 'the shot files would have paths longer than 259 characters, too long for REAPER to write them' -and $longCtx.Dirs.Count -eq 0)
+
+    # Collection (Save-HarnessShots) with a hand-made Keep and Ctx: the images of the shots taken move out of the work
+    # directory, nothing else does
+    $saveRes = Join-Path $capRoot 'results'
+    $null = New-Item -ItemType Directory -Path $saveRes
+    $saveScen = [pscustomobject]@{ id = 'sv'; kind = 'transport'; states = @(& $stateNamed 's' (& $winOf @(0, 300))) }
+    $made = {
+        param([string]$WorkName)
+        $w = Join-Path $capRoot $WorkName
+        $null = New-Item -ItemType Directory -Path $w
+        $c = @{ Work = $w; Dirs = [Collections.Generic.List[string]]::new(); Files = [Collections.Generic.List[string]]::new(); StillRunning = $null }
+        $p = Get-HarnessCapturePlan -Scenario $saveScen -Work $w
+        $null = New-Item -ItemType Directory -Path $p.Dir
+        $c.Dirs.Add($p.Dir)
+        & $pngHead $p.Shots[0].Png 640 427; [IO.File]::WriteAllText($p.Shots[0].Done, $goodDone)
+        & $pngHead $p.Shots[1].Png 640 427; [IO.File]::WriteAllText($p.Shots[1].Err, "reason=nowindow`n")
+        $judgedShots = Get-HarnessShotFacts -Plan $p -Facts @{ st1_shot1 = 'done'; st1_shot1_held = '2'; st1_shot2 = 'late' } -StateNo 1
+        @{ Ctx = $c; Plan = $p; Seen = [ordered]@{ track = 'Voice'; states = @([ordered]@{ name = 's'; status = 'PASS'; shots = $judgedShots }) } }
+    }
+    $saved = { param($m, [string]$stamp, [string]$verdict = 'PASS', $given = 'given') Save-HarnessShots -Keep (New-HarnessKeep -ResultDir $saveRes -Stamp $stamp) -Ctx $m.Ctx -Scenario $saveScen -Round 1 -Status $verdict -Detail 'ok' -Seen (($given -ceq 'given') ? $m.Seen : $given) }
+    # What a collection said, for a label: nothing is said when it gave nothing
+    $toldBy = { param($r) try { "$($r.Status): $($r.Detail)" } catch { 'nothing' } }
+    $m1 = & $made 'save1'
+    $r1 = & $saved $m1 'c1'
+    $kept1 = Join-Path $saveRes 'renders/c1/run1/sv.shots/s-0.png'
+    $shot1 = try { $r1.Seen.states[0].shots[0] } catch { $null }
+    & $add "shot collection: a shot taken moves to run1/<id>.shots/<name>, with the moved file's path, size and hash; one not taken stays ($(& $toldBy $r1))" $false (& $holds {
+            $r1.Status -ceq 'PASS' -and $r1.Detail -ceq 'ok' -and (Test-Path -LiteralPath $kept1) -and -not (Test-Path -LiteralPath $m1.Plan.Shots[0].Png) -and
+            $shot1.path -ceq 'renders/c1/run1/sv.shots/s-0.png' -and $shot1.sha256 -ceq (Get-HarnessSha256 $kept1) -and $shot1.bytes -eq ([IO.FileInfo]::new($kept1)).Length -and
+            (Test-Path -LiteralPath $m1.Plan.Shots[1].Png) -and -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c1/run1/sv.shots/s-300.png')) -and $null -eq $r1.Seen.states[0].shots[1].path })
+    $m2 = & $made 'save2'
+    $r2 = & $saved $m2 'c1'
+    & $add "shot collection: a run directory another run claimed moves nothing ($(& $toldBy $r2))" $true (& $holds {
+        $r2.Status -ceq 'INCOMPLETE' -and $r2.Detail -ceq 'ok; shots: not kept: renders/c1/manifest.jsonl is there already (a run started in the same second)' -and (Test-Path -LiteralPath $m2.Plan.Shots[0].Png) })
+    $r2f = & $saved $m2 'c1' 'FAIL'
+    & $add "shot collection: a FAIL stays FAIL, with the reason added ($(& $toldBy $r2f))" $true (& $holds { $r2f.Status -ceq 'FAIL' -and $r2f.Detail -clike 'ok; shots: not kept: *' })
+    $m3 = & $made 'save3'
+    $m3.Ctx.StillRunning = [pscustomobject]@{ Pid = 1; Label = 'x'; Lock = $null }
+    $r3 = & $saved $m3 'c3'
+    & $add "shot collection: with a REAPER of the round still running nothing is moved ($(& $toldBy $r3))" $true (& $holds {
+        $r3.Status -ceq 'INCOMPLETE' -and $r3.Detail -ceq 'ok; shots: nothing collected: a REAPER of this round could not be ended' -and (Test-Path -LiteralPath $m3.Plan.Shots[0].Png) })
+    # A shot taken and not moved says why in its own entry as well, whatever kept it from being moved; a shot not taken
+    # keeps its own reason
+    $why2 = try { $r2.Seen.states[0].shots[0].problem } catch { $null }
+    $why3 = try { $r3.Seen.states[0].shots[0].problem } catch { $null }
+    & $add "shot collection: a shot taken and not moved says why in its entry: a claimed run directory, a REAPER still running ($why2 | $why3)" $true (& $holds {
+        $why2 -ceq 'could not be kept: renders/c1/manifest.jsonl is there already (a run started in the same second)' -and $why3 -ceq 'could not be kept: a REAPER of this round could not be ended' -and
+        $r3.Seen.states[0].shots[0].taken -and $null -eq $r3.Seen.states[0].shots[0].path -and $r3.Seen.states[0].shots[1].problem -ceq 'no answer within 10 s' })
+    $m4 = & $made 'save4'
+    $taken4 = Join-Path $saveRes 'renders/c4/run1/sv.shots/s-0.png'
+    $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $taken4)
+    [IO.File]::WriteAllText($taken4, 'there first')
+    $r4 = & $saved $m4 'c4'
+    & $add "shot collection: a place already taken is never overwritten; that shot has no path and the row is INCOMPLETE ($(& $toldBy $r4))" $true (& $holds {
+            $r4.Status -ceq 'INCOMPLETE' -and $r4.Detail -ceq 'ok; shots: not kept: s-0.png is there already and is never overwritten' -and [IO.File]::ReadAllText($taken4) -ceq 'there first' -and
+            $null -eq $r4.Seen.states[0].shots[0].path -and $r4.Seen.states[0].shots[0].problem -ceq 'could not be kept: s-0.png is there already and is never overwritten' -and (Test-Path -LiteralPath $m4.Plan.Shots[0].Png) })
+    $m5 = & $made 'save5'
+    $big = [IO.File]::Open($m5.Plan.Shots[0].Png, [IO.FileMode]::Open); try { $big.SetLength(64MB + 1) } finally { $big.Dispose() }
+    $r5 = & $saved $m5 'c5'
+    & $add "shot collection: an image larger than 64 MiB is not moved ($(& $toldBy $r5))" $true (& $holds { $r5.Status -ceq 'INCOMPLETE' -and $r5.Detail -ceq "ok; shots: not kept: s-0.png is larger than $(64MB) bytes" -and (Test-Path -LiteralPath $m5.Plan.Shots[0].Png) })
+    Remove-Item -LiteralPath $m5.Plan.Shots[0].Png -Force
+    # The shot directory replaced by a junction to another directory with an image and an answer of its own
+    $m6 = & $made 'save6'
+    $elsewhere = Join-Path $capRoot 'elsewhere'
+    $null = New-Item -ItemType Directory -Path $elsewhere
+    Get-ChildItem -LiteralPath $m6.Plan.Dir -Force | Move-Item -Destination $elsewhere
+    Remove-Item -LiteralPath $m6.Plan.Dir -Force
+    $junctionMade = try { $null = New-Item -ItemType Junction -Path $m6.Plan.Dir -Target $elsewhere; $true } catch { $false }
+    $r6 = & $saved $m6 'c6'
+    & $add "shot collection: a shot directory replaced by a junction gives nothing, and the files behind it stay ($(& $toldBy $r6))" $true (& $holds {
+        $junctionMade -and $r6.Status -ceq 'INCOMPLETE' -and $r6.Detail -ceq 'ok; shots: nothing collected: the shot directory was replaced by a link or junction' -and (Test-Path -LiteralPath (Join-Path $elsewhere 's-0.png')) -and
+        -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c6/run1')) })
+    $why6 = try { $r6.Seen.states[0].shots[0].problem } catch { $null }
+    & $add "shot collection: a shot taken in a directory replaced by a junction says why in its entry ($why6)" $true (& $holds {
+        $junctionMade -and $why6 -ceq 'could not be kept: the shot directory was replaced by a link or junction' -and $null -eq $r6.Seen.states[0].shots[0].path -and
+        $r6.Seen.states[0].shots[1].problem -ceq 'no answer within 10 s' })
+    if ($junctionMade) { [IO.Directory]::Delete($m6.Plan.Dir) }
+    # A launch that failed as a whole (no facts): every image whose answer checks out is moved and listed all the same
+    $m7 = & $made 'save7'
+    $r7 = & $saved $m7 'c7' 'INCOMPLETE' $null
+    $shot7 = @(@(try { $r7.Seen.shots } catch { $null }) | Where-Object { $_ })
+    & $add "shot collection: a launch without facts still has every image whose answer checks out moved and listed, without the driver's times ($(& $toldBy $r7))" $false (& $holds {
+            $r7.Status -ceq 'INCOMPLETE' -and $r7.Detail -ceq 'ok' -and $shot7.Count -eq 1 -and $shot7[0].state -ceq 's' -and $shot7[0].name -ceq 's-0.png' -and $shot7[0].taken -and $null -eq $shot7[0].held -and
+            $null -eq $shot7[0].wallMs -and $shot7[0].path -ceq 'renders/c7/run1/sv.shots/s-0.png' -and $shot7[0].width -eq 640 -and $shot7[0].view.y -eq 27 -and
+            $shot7[0].sha256 -ceq (Get-HarnessSha256 (Join-Path $saveRes 'renders/c7/run1/sv.shots/s-0.png')) -and (Test-Path -LiteralPath $m7.Plan.Shots[1].Png) })
+    $m8 = & $made 'save8'
+    Remove-Item -LiteralPath $m8.Plan.Shots[0].Done -Force
+    $r8 = & $saved $m8 'c8' 'INCOMPLETE' $null
+    $m8.Ctx.Dirs.Clear()
+    $r8b = & $saved $m8 'c8b' 'PASS'
+    & $add 'shot collection: nothing to say without an image that checks out, for a directory this round did not make, or for a scenario without shots' $true (
+        $null -eq $r8 -and $null -eq $r8b -and $null -eq (Save-HarnessShots -Keep (New-HarnessKeep -ResultDir $saveRes -Stamp 'c9') -Ctx $m8.Ctx -Scenario ([pscustomobject]@{ id = 'n'; states = @() }) -Status 'PASS'))
+    # An image that is a symbolic link stays: moved, the link would go along and the hash be of the file it leads to. A
+    # symbolic link needs a privilege most sessions do not have (runners do)
+    $m10 = & $made 'save10'
+    $outsideImage = Join-Path $capRoot 'outside10.png'
+    & $pngHead $outsideImage 640 427
+    Remove-Item -LiteralPath $m10.Plan.Shots[0].Png -Force
+    $imageLinked = try { $null = New-Item -ItemType SymbolicLink -Path $m10.Plan.Shots[0].Png -Target $outsideImage -ErrorAction Stop; $true } catch { $false }
+    $noImageLink = $imageLinked ? '' : ' (symbolic links cannot be made in this session; not run for real)'
+    $r10 = & $saved $m10 'c10'
+    & $add "shot collection: an image that is a symbolic link is not moved, and the file it leads to is never hashed$noImageLink ($(& $toldBy $r10))" $true ((-not $imageLinked) -or (& $holds {
+                $r10.Status -ceq 'INCOMPLETE' -and $r10.Detail -ceq 'ok; shots: not kept: s-0.png is not a plain file' -and ([IO.File]::GetAttributes($m10.Plan.Shots[0].Png) -band [IO.FileAttributes]::ReparsePoint) -and
+                -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c10/run1/sv.shots/s-0.png')) -and $null -eq $r10.Seen.states[0].shots[0].sha256 -and $null -eq $r10.Seen.states[0].shots[0].path }))
+    if ($imageLinked) { [IO.File]::Delete($m10.Plan.Shots[0].Png) }
+    # A moved image that cannot be read for its hash (held open by another, sharing only its deletion): kept and listed
+    # with its path and no hash, and the row is INCOMPLETE
+    $m11 = & $made 'save11'
+    $imageHeld = [IO.File]::Open($m11.Plan.Shots[0].Png, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Delete)
+    try { $r11 = & $saved $m11 'c11' } finally { $imageHeld.Dispose() }
+    $shot11 = try { $r11.Seen.states[0].shots[0] } catch { $null }
+    & $add "shot collection: a moved image that cannot be read is kept and listed without its hash, and the row is INCOMPLETE ($(& $toldBy $r11))" $true (& $holds {
+            $r11.Status -ceq 'INCOMPLETE' -and $r11.Detail -ceq 'ok; shots: not kept: s-0.png was kept, but it could not be read' -and (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c11/run1/sv.shots/s-0.png')) -and
+            $shot11.path -ceq 'renders/c11/run1/sv.shots/s-0.png' -and $null -eq $shot11.sha256 -and $null -eq $shot11.bytes -and $shot11.problem -clike 'kept, but it could not be read: *' })
+    # Nothing is read from a directory whose capture service did not stop in time (Ctx.CaptureLeft, without regard to
+    # case), not even for a launch without facts: the answer and the image that checks out stay where they are. Every
+    # other collection case has a context without CaptureLeft, like one built by hand
+    $m12 = & $made 'save12'
+    $m12.Ctx.CaptureLeft = [Collections.Generic.List[string]]::new()
+    $m12.Ctx.CaptureLeft.Add($m12.Plan.Dir.ToUpperInvariant())
+    $r12 = & $saved $m12 'c12' 'INCOMPLETE' $null
+    & $add "shot collection: nothing is read from a shot directory whose capture service did not stop in time, not even for a launch without facts ($(& $toldBy $r12))" $true (& $holds {
+            $r12.Status -ceq 'INCOMPLETE' -and $r12.Detail -ceq 'ok; shots: nothing collected: the capture service did not stop in time' -and $null -eq $r12.Seen -and
+            (Test-Path -LiteralPath $m12.Plan.Shots[0].Png) -and (Test-Path -LiteralPath $m12.Plan.Shots[0].Done) -and -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c12')) })
+    # A judged row whose shots were all late, its directory replaced by a junction: nothing to move, and it says why
+    $m13 = & $made 'save13'
+    $m13.Seen.states[0].shots = Get-HarnessShotFacts -Plan $m13.Plan -Facts @{ st1_shot1 = 'late'; st1_shot2 = 'late' } -StateNo 1
+    $elsewhere13 = Join-Path $capRoot 'elsewhere13'
+    $null = New-Item -ItemType Directory -Path $elsewhere13
+    Get-ChildItem -LiteralPath $m13.Plan.Dir -Force | Move-Item -Destination $elsewhere13
+    Remove-Item -LiteralPath $m13.Plan.Dir -Force
+    $junction13 = try { $null = New-Item -ItemType Junction -Path $m13.Plan.Dir -Target $elsewhere13; $true } catch { $false }
+    $r13 = & $saved $m13 'c13'
+    & $add "shot collection: a shot directory replaced by a junction is named when no shot was taken as well ($(& $toldBy $r13))" $true (& $holds {
+            $junction13 -and $r13.Status -ceq 'INCOMPLETE' -and $r13.Detail -ceq 'ok; shots: nothing collected: the shot directory was replaced by a link or junction' -and
+            (Test-Path -LiteralPath (Join-Path $elsewhere13 's-0.png')) -and -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c13')) })
+    if ($junction13) { [IO.Directory]::Delete($m13.Plan.Dir) }
+    $null = $RepoRoot
     $cases
 }
 
@@ -4179,6 +4620,87 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add "wiring: Invoke-HarnessLaunchOnce checks the environment first (before the skip marker, the locks and the host), and gives the host the names to unset ($($envCheck -join ','); $(@($launch | ForEach-Object { $_.Name }) -join ','))" $false (
         $envCheck.Count -eq 1 -and $envCheck[0] -lt (& $at $launch 'Get-HarnessSkipMarkerHit')[0] -and $envCheck[0] -lt (& $at $launch 'Enter-HarnessLocks')[0] -and $envCheck[0] -lt (& $at $launch 'Invoke-HarnessHost')[0] -and
         $unsetGiven.Count -eq 1)
+    # Shots of a held window: the service is made, started and stopped by the host alone, around the process it started
+    $hostFnText = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Host.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-HarnessHost' }, $true).Extent.Text
+    $procAt = $hostFnText.IndexOf('$proc = $Launcher ?')
+    $watchAt = $hostFnText.IndexOf("`n    try {", [Math]::Max(0, $procAt))
+    $newAt = $hostFnText.IndexOf('[HarnessCapture]::new(')
+    $startAt = $hostFnText.IndexOf('$service.Start()')
+    $killAt = $hostFnText.IndexOf('$stillRunning = -not $proc.WaitForExit(5000)')
+    $stopAt = $hostFnText.IndexOf('$captureStopped = $service.Stop(5000)')
+    $doneAt = $hostFnText.IndexOf('CaptureStopped = $captureStopped')
+    $ownFiles = @(@(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Filter '*.psm1') + @(Get-Item (Join-Path $RepoRoot 'run.ps1'), (Join-Path $RepoRoot 'doctor.ps1')))
+    $printers = @($ownFiles | Where-Object { $_.Name -cne 'Capture.psm1' -and [IO.File]::ReadAllText($_.FullName).Contains('PrintWindow(') } | ForEach-Object { $_.Name })
+    $makers = @($ownFiles | Where-Object { $_.Name -cne 'Capture.psm1' -and [IO.File]::ReadAllText($_.FullName) -cmatch '\[HarnessCapture\]::new|\.Start\(\)' } | ForEach-Object { $_.Name })
+    & $add "wiring: the capture service is made and started only by Invoke-HarnessHost, inside its watch after the process start, and stopped in a finally after the kill, before the result; nothing else calls PrintWindow ($($makers -join ', '); $($printers -join ', '))" $true (
+        $procAt -gt 0 -and $procAt -lt $watchAt -and $watchAt -lt $newAt -and $newAt -lt $startAt -and $startAt -lt $killAt -and $killAt -lt $stopAt -and $stopAt -lt $doneAt -and
+        $hostFnText.Substring($killAt, $stopAt - $killAt) -cmatch '\} finally \{' -and @([regex]::Matches($hostFnText, '\[HarnessCapture\]::new\(')).Count -eq 1 -and
+        ($makers -join ',') -ceq 'Host.psm1' -and $printers.Count -eq 0)
+    $serviceArgs = '[HarnessCapture]::new([uint32]$ownPid, [long]($startUtc ? $startUtc.ToFileTimeUtc() : 0), $script:PluginOnlyWindow, [string[]]@($Captures.Req), [string[]]@($Captures.Png),' +
+        ' [string[]]@($Captures.Done), [string[]]@($Captures.Err), [int](($TimeoutSec + 30) * 1000))'
+    & $add "wiring: the host hands the service the PID it started and that process's start time, the shot rule (a plugin's window, never a chain's), the plan's files and the launch's time limit plus 30 s" $true (
+        ($hostFnText -replace '\s+', ' ').Contains($serviceArgs))
+    $captureGiven = @(foreach ($f in $ownFiles) {
+            $tree = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
+            foreach ($c in $tree.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and @($node.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'Captures' }).Count }, $true)) {
+                $fn = $c.Parent
+                while ($fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
+                "$($c.GetCommandName())<-$($fn ? $fn.Name : 'top')"
+            }
+        })
+    $luaStepText = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Scenarios.psm1'), [ref]$null, [ref]$null)).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-HarnessLuaStep' }, $true).Extent.Text
+    & $add "wiring: -Captures is given by exactly one call, the transport scenario's driver step, which hands it to the host as HostArgs.Captures only when there are shots ($($captureGiven -join ', '))" $true (
+        ($captureGiven -join ',') -ceq 'Invoke-HarnessLuaStep<-Invoke-HarnessTransportScenario' -and $luaStepText -cmatch '\n\s*if \(\$Captures\.Count\) \{ \$launchHost\.Captures = \$Captures \}\n' -and
+        @([regex]::Matches($luaStepText, '\$Captures\b')).Count -eq 3 -and $luaStepText -cmatch '-HostArgs \$launchHost\b')
+    $compileAt = @(& $at $launch 'Initialize-HarnessCapture')
+    $shotCheckAt = @(& $at $launch 'Test-HarnessLaunchCaptures')
+    & $add "wiring: every launch checks its shot files and builds the capture service before the skip marker, the locks and the host ($($shotCheckAt -join ','); $($compileAt -join ','))" $true (
+        $shotCheckAt.Count -eq 1 -and $compileAt.Count -eq 1 -and $envCheck[0] -lt $shotCheckAt[0] -and $shotCheckAt[0] -lt $compileAt[0] -and $compileAt[0] -lt (& $at $launch 'Get-HarnessSkipMarkerHit')[0] -and
+        $compileAt[0] -lt (& $at $launch 'Enter-HarnessLocks')[0] -and $compileAt[0] -lt (& $at $launch 'Invoke-HarnessHost')[0])
+    # A capture service that did not stop in time may still write: the launch names its shot directory for collection,
+    # which then reads nothing there; only then, and only once the host has returned. Every round's context has the list
+    $onceFlat = $onceAst.Extent.Text -replace '\s+', ' '
+    $leftAdd = 'if ($shotDir -and $null -ne $Ctx[''CaptureLeft''] -and $Run.PSObject.Properties[''CaptureStopped''] -and $false -eq $Run.CaptureStopped) { $Ctx.CaptureLeft.Add($shotDir) }'
+    # A host that throws counts as a service that did not stop, and the error goes on to the caller
+    $leftThrow = 'try { $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work -Lock $lock @HostArgs @extra } catch { if ($shotDir -and $null -ne $Ctx[''CaptureLeft'']) { $Ctx.CaptureLeft.Add($shotDir) }; throw }'
+    $shotDirSet = '$shotDir = $shotFiles.Count ? [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$shotFiles[0].Png)) : $null'
+    $ctxText = $onceAst.Parent.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'New-HarnessContext' }, $true).Extent.Text
+    $hostAt = $onceFlat.IndexOf('$Run = Invoke-HarnessHost ')
+    & $add "wiring: a launch whose capture service did not stop in time, or whose host threw, names its shot directory in Ctx.CaptureLeft, only then and after the host call, and a host's error goes on; every round's context has that list" $true (
+        $hostAt -gt 0 -and $onceFlat.IndexOf($leftAdd) -gt $hostAt -and @([regex]::Matches($onceFlat, 'CaptureLeft')).Count -eq 4 -and $onceFlat.Contains($leftThrow) -and
+        $onceFlat.IndexOf($shotDirSet) -gt 0 -and $onceFlat.IndexOf($shotDirSet) -lt $hostAt -and @([regex]::Matches($onceFlat, '\$shotDir\b')).Count -eq 5 -and
+        $ctxText -cmatch '\n *CaptureLeft = \[Collections\.Generic\.List\[string\]\]::new\(\) #')
+    $shotCallers = @(& $callers @('Save-HarnessShots', 'Get-HarnessCapturePlan', 'Get-HarnessShotFacts') | Sort-Object)
+    & $add "wiring: shots are planned by the transport scenario and collection only, judged by the scenario, collected by the suite alone, after the probe files ($($shotCallers -join ', '))" $true (
+        ($shotCallers -join ',') -ceq 'Get-HarnessCapturePlan<-Renders.psm1:Save-HarnessShots,Get-HarnessCapturePlan<-Scenarios.psm1:Invoke-HarnessTransportScenario,Get-HarnessShotFacts<-Scenarios.psm1:Invoke-HarnessTransportScenario,Save-HarnessShots<-Suite.psm1:Invoke-HarnessSuite' -and
+        (& $at $suite 'Save-HarnessProbeFiles')[0] -lt (& $at $suite 'Save-HarnessShots')[0])
+    # The C# of the service: the calls it may make, and the rules only a real window shows
+    $cs = & (Get-Command Get-HarnessCapturePlan).Module { $script:ServiceSource }
+    $imported = @([regex]::Matches($cs, '\[DllImport\("(?:user32|kernel32|gdi32)"(?:, CharSet = CharSet\.Unicode)?\)\] static extern \w+ (\w+)\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+    $allowed = @('CloseHandle', 'CreateCompatibleDC', 'CreateDIBSection', 'DeleteDC', 'DeleteObject', 'EnumChildWindows', 'EnumWindows', 'GdiFlush', 'GetClassName', 'GetClientRect', 'GetDpiForWindow', 'GetProcessTimes', 'GetWindowRect',
+        'GetWindowText', 'GetWindowThreadProcessId', 'IsWindow', 'IsWindowVisible', 'OpenProcess', 'PrintWindow', 'ScreenToClient', 'SelectObject', 'SetThreadDpiAwarenessContext', 'WaitForSingleObject' | Sort-Object)
+    $denied = @('BitBlt', 'GetDC(', 'GetWindowDC', 'GetDesktopWindow', 'CopyFromScreen', 'SetForegroundWindow', 'ShowWindow', 'MoveWindow', 'SetWindowPos', 'SendMessage', 'PostMessage', 'System.Drawing', 'SetFocus', 'BringWindowToTop' | Where-Object { $cs.Contains($_) })
+    & $add "capture service: it imports exactly the window, process and GDI calls it needs, prints the client area with flag 3 once, from a memory DC of its own, and calls nothing that touches a window ($(@($imported) -join ','); denied: $($denied -join ', '))" $true (
+        ($imported -join ',') -ceq ($allowed -join ',') -and @([regex]::Matches($cs, 'DllImport')).Count -eq $allowed.Count -and $denied.Count -eq 0 -and @([regex]::Matches($cs, 'PrintWindow\(')).Count -eq 2 -and
+        $cs -cmatch '\(!PrintWindow\(hwnd, dc, 3\)\) return null; // PW_CLIENTONLY \| PW_RENDERFULLCONTENT' -and @([regex]::Matches($cs, 'CreateCompatibleDC\(')).Count -eq 2 -and $cs.Contains('CreateCompatibleDC(IntPtr.Zero)') -and
+        $cs.Contains('IsBackground = true'))
+    $csPins = [ordered]@{
+        'the PID is tested first among top-level windows'   = $cs -cmatch 'EnumWindows\(\(h, l\) =>\s*\{\s*uint owner;\s*GetWindowThreadProcessId\(h, out owner\);\s*if \(owner != pid \|\| !IsWindowVisible\(h\)\) return true;\s*text\.Clear\(\); GetClassName'
+        'the PID is tested first among child windows'       = $cs -cmatch 'EnumChildWindows\(top, \(h, l\) =>\s*\{\s*uint owner;\s*GetWindowThreadProcessId\(h, out owner\);\s*if \(owner != pid\) return true;\s*text\.Clear\(\); GetClassName'
+        'the first view found ends the search'              = $cs -cmatch 'if \(text\.ToString\(\) != ViewClass\) return true;\s*hit = h;\s*return false;'
+        'the window is checked again right before the shot' = $cs -cmatch 'GetWindowThreadProcessId\(hwnd, out owner\);\s*if \(!IsWindow\(hwnd\) \|\| owner != pid\) return null;\s*if \(!PrintWindow\('
+        'nothing escapes the thread'                        = $cs -cmatch 'void Run\(\)\s*\{\s*//[^\n]*\n\s*try\s*\{' -and $cs -cmatch 'finally \{ CloseHandle\(process\); \}\s*\}\s*catch \(Exception\) \{ \}\s*\}\s*void Answer'
+        'an answer that throws is failed <Type>'            = $cs -cmatch 'try \{ reason = Shoot\(i\); \}\s*catch \(Exception e\) \{ reason = "failed " \+ e\.GetType\(\)\.Name; \}'
+        'an err that cannot be written is no answer'        = $cs -cmatch 'try \{ Put\(err\[i\], [^\n]*\); \} catch \(Exception\) \{ \}'
+        'every file through .part, never over another'      = $cs -cmatch 'string part = path \+ "\.part";\s*using \(var fs = new FileStream\(part, FileMode\.CreateNew, FileAccess\.Write, FileShare\.None\)\)[^\n]*\n\s*File\.Move\(part, path, false\);' -and
+            @([regex]::Matches($cs, 'FileStream\(|File\.Write|File\.Create|File\.Move')).Count -eq 2
+        'every file looks at its directory first'          = $cs -cmatch 'static void Put\(string path, byte\[\] data\)\s*\{\s*if \(\(File\.GetAttributes\(Path\.GetDirectoryName\(path\)\) & FileAttributes\.ReparsePoint\) != 0\) throw new IOException\([^
+]*\);\s*string part = path \+ "\.part";'
+        'the image before its answer'                       = $cs.IndexOf('Put(png[i], ') -gt 0 -and $cs.IndexOf('Put(png[i], ') -lt $cs.IndexOf('Put(done[i], ') -and @([regex]::Matches($cs, 'Put\((png|done|err)\[i\]')).Count -eq 3
+        'only the process the host started'                 = $cs -cmatch '\|\| Math\.Abs\(created - started\) > 10000\) return;' -and $cs -cmatch 'WaitForSingleObject\(process, 0\) == 258\)'
+    }
+    $csMissing = @($csPins.get_Keys() | Where-Object { -not $csPins[$_] })
+    & $add "capture service: its rules are as pinned (not as pinned: $($csMissing -join ' | '))" $true ($csMissing.Count -eq 0)
     # The probe run is made after every reference render, right before the scenario's own render; collection is the suite's
     $renderSc = & $callsIn (Join-Path $RepoRoot 'src/Scenarios.psm1') 'Invoke-HarnessRenderScenario'
     $runAt = @(& $at $renderSc 'New-HarnessProbeRun')
@@ -4257,17 +4779,38 @@ function Get-WiringCases([string]$RepoRoot) {
     $holdAt = [regex]::Match($winBody, '(?s)\n *if until10\(shown\) then\n *opened = opened \+ 1\n( *)if w\.hold then\n(.*?)\n\1else\n(.*?)\n\1end\n *reaper\.TrackFX_Show\(tested, w\.fx, 2\)\n')
     $holdText = $holdAt.Groups[2].Value
     $holdPins = [ordered]@{
-        'it lasts while shown, ten turns and hold ms'      = $holdText -cmatch '^ *local turns, loop, last = 0, 0, reaper\.time_precise\(\)\n *while \(turns < 10 or loop \* 1000 < w\.hold\) and shown\(\) do\n'
-        'a turn checks the record bit and counts <= 100 ms' = $holdText -cmatch ' do\n *coroutine\.yield\(\)\n *noRecord\(\)\n *turns = turns \+ 1\n *local now = reaper\.time_precise\(\)\n *loop = loop \+ math\.min\(now - last, 0\.1\)\n *last = now\n *end\n' -and @([regex]::Matches($holdText, 'coroutine\.yield\(\)')).Count -eq 1
-        'the shortest hold is kept'                         = $holdText -cmatch '\n *end\n *held = math\.min\(held or math\.huge, loop \* 1000\)$'
+        'it lasts while shown, ten turns and hold ms'      = $holdText -cmatch '^ *local shots = \(opened == 1 and w\.capture\) and \{ list = w\.capture, k = 1, at = \{\}, wall = \{\}, got = \{\}, seen = reaper\.time_precise\(\) \} or nil\n *local more = shots ~= nil\n *local turns, loop, last = 0, 0, reaper\.time_precise\(\)\n *while \(turns < 10 or loop \* 1000 < w\.hold or more\) and shown\(\) do\n'
+        'a turn checks the record bit and counts <= 100 ms' = $holdText -cmatch ' do\n *if shots then more = shoot\(shots, loop \* 1000, w\) end\n *coroutine\.yield\(\)\n *noRecord\(\)\n *turns = turns \+ 1\n *local now = reaper\.time_precise\(\)\n *loop = loop \+ math\.min\(now - last, 0\.1\)\n *last = now\n *end\n' -and @([regex]::Matches($holdText, 'coroutine\.yield\(\)')).Count -eq 1
+        'the shortest hold is kept'                         = $holdText -cmatch '\n *end\n *held = math\.min\(held or math\.huge, loop \* 1000\)\n *if shots then\n(?: *--[^\n]*\n)+ *if shots\.since then shoot\(shots, 0, w\) end\n *for k = shots\.k, #shots\.list do shots\.got\[k\] = "gone" end\n *cap = shots\n *end$'
         'ten turns without a hold'                          = $holdAt.Groups[3].Value -cmatch '^ *for _ = 1, 10 do coroutine\.yield\(\) noRecord\(\) end$'
-        '0 when none opened'                                = $winBody -cmatch '\n *local opened, closed, held = 0, 0, nil\n' -and $winBody -cmatch '\n *return opened, closed, held or 0\n'
-        'sent only with a hold, rounded'                    = $driverLf -cmatch '\n *local o, c, h = windows\(st\.windows\)\n *put\(p \.\. "win_open", o\)\n *put\(p \.\. "win_closed", c\)\n *if st\.windows\.hold then put\(p \.\. "win_held", int\(h\)\) end\n' -and
+        '0 when none opened'                                = $winBody -cmatch '\n *local opened, closed, held, cap = 0, 0, nil, nil\n' -and $winBody -cmatch '\n *return opened, closed, held or 0, cap\n'
+        'sent only with a hold, rounded'                    = $driverLf -cmatch '\n *local o, c, h, cap = windows\(st\.windows\)\n *put\(p \.\. "win_open", o\)\n *put\(p \.\. "win_closed", c\)\n *if st\.windows\.hold then put\(p \.\. "win_held", int\(h\)\) end\n' -and
             $driverLf -cmatch '\n *local function int\(x\) return math\.floor\(x \+ 0\.5\) end\n' -and @([regex]::Matches($driverLf, 'function int\b')).Count -eq 1
     }
     $holdMissing = @($holdPins.get_Keys() | Where-Object { -not $holdPins[$_] })
     & $add "driver: a window is held while it is shown, at least ten turns and until hold ms of the message loop have counted (a turn at most 100 ms); the shortest hold of the windows that opened, 0 when none did, is sent rounded and only for a state with a hold; without a hold the editor gets ten turns as before (found the hold: $($holdAt.Success); not as pinned: $($holdMissing -join ' | '))" $true (
         $holdAt.Success -and $holdMissing.Count -eq 0)
+    # The shots of a held window (windows.capture) only real REAPER takes, so the driver's part is pinned in the text as
+    # well: in the first window that opened, a request when the hold time reaches its offset (never later than the hold),
+    # one at a time, answered by the done or the err file within 10 s of wall-clock time, the hold running on meanwhile
+    $shootBody = [regex]::Match($driverLf, '(?s)\n( *)local function shoot\(cap, ms, w\)\n.*?\n\1end\n').Value
+    $existsBody = [regex]::Match($driverLf, '(?s)\n( *)local function exists\(path\)\n.*?\n\1end\n').Value
+    $shotPins = [ordered]@{
+        'shots only in the first window that opened'        = $holdText -cmatch 'local shots = \(opened == 1 and w\.capture\) and '
+        'an answer is a file that opens for reading'         = $existsBody -cmatch '\n *local f = io\.open\(path, "rb"\)\n *if f then f:close\(\) return true end\n *return false\n'
+        'one at a time: a pending request is answered first' = $shootBody -cmatch '\n *local s = cap\.list\[cap\.k\]\n *if not s then return false end\n *if cap\.since then\n'
+        'the done or the err file, or late after 10 s'       = $shootBody -cmatch '\n *if exists\(s\.done\) then cap\.got\[cap\.k\] = "done"\n *elseif exists\(s\.err\) then cap\.got\[cap\.k\] = "err"\n *elseif reaper\.time_precise\(\) - cap\.since > 10 then cap\.got\[cap\.k\] = "late"\n *else return true end\n *cap\.k, cap\.since = cap\.k \+ 1, nil\n *return cap\.list\[cap\.k\] ~= nil\n *end\n'
+        'a request when the hold reaches it, never later'   = $shootBody -cmatch '\n *end\n *if ms >= math\.min\(s\.at, w\.hold\) then\n'
+        'a request that cannot be written is skipped'       = $shootBody -cmatch '\n *local f = io\.open\(s\.req, "w"\)\n *if not f then cap\.k = cap\.k \+ 1 return cap\.list\[cap\.k\] ~= nil end\n *f:write\("1"\)\n *f:close\(\)\n' -and $shootBody -cnotmatch 'assert'
+        'the hold and the wall clock at the request'         = $shootBody -cmatch '\n *local now = reaper\.time_precise\(\)\n *cap\.at\[cap\.k\], cap\.wall\[cap\.k\], cap\.since = int\(ms\), int\(\(now - cap\.seen\) \* 1000\), now\n *end\n *return true\n *end\n$'
+        'the hold runs on while a shot is pending or to come' = $holdText -cmatch 'while \(turns < 10 or loop \* 1000 < w\.hold or more\) and shown\(\) do'
+        'a pending shot answered when the window went counts, the rest is gone' = $holdText -cmatch '\n *if shots\.since then shoot\(shots, 0, w\) end\n *for k = shots\.k, #shots\.list do shots\.got\[k\] = "gone" end\n' -and
+            @([regex]::Matches($holdText, 'shoot\(')).Count -eq 2
+        'every shot is put, none when never asked'          = $driverLf -cmatch 'if st\.windows\.hold then put\(p \.\. "win_held", int\(h\)\) end\n *for k in ipairs\(st\.windows\.capture or \{\}\) do\n *put\(p \.\. "shot" \.\. k, cap and cap\.got\[k\] or "none"\)\n *if cap and cap\.at\[k\] then put\(p \.\. "shot" \.\. k \.\. "_held", cap\.at\[k\]\) end\n *if cap and cap\.wall\[k\] then put\(p \.\. "shot" \.\. k \.\. "_wall", cap\.wall\[k\]\) end\n *end\n'
+    }
+    $shotMissing = @($shotPins.get_Keys() | Where-Object { -not $shotPins[$_] })
+    & $add "driver: shots are taken in the first window that opened, one at a time when the hold time reaches each offset, never past the hold, answered within 10 s of wall-clock time, a pending one whose answer is there when the window goes counts, and each is reported (not as pinned: $($shotMissing -join ' | '))" $true (
+        $shootBody.Length -gt 0 -and $shotMissing.Count -eq 0)
     # Every project with plugins and every read-back carries the preference: a scenario cannot lose it on the way (the
     # dry reference has no plugin to tell)
     $scenarioTree = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/Scenarios.psm1'), [ref]$null, [ref]$null)
@@ -4399,9 +4942,13 @@ function Get-ChildCases([string]$Tmp, [string]$RepoRoot, [string[]]$ExtraGuiLock
     # The real message box cases may only be missing where this session really has no desktop, and then the child has
     # to say so: a run that left them out by mistake must not look green
     $dialogs = @($cases | Where-Object { $_.Label -like 'dialog:*' }).Count
-    $skipLines = @($cases | Where-Object { $_.Label -clike '(no interactive desktop in this session:*' }).Count
+    $skipLines = @($cases | Where-Object { $_.Label -clike '(no interactive desktop in this session: the real message box cases*' }).Count
     $desktop = [Environment]::UserInteractive
     $cases.Add([pscustomobject]@{ Label = "child: the real message box cases ran whenever this session has a desktop; without one the child said they did not run (desktop: $desktop, cases: $dialogs, skip lines: $skipLines)"; Bad = $false; Passed = ($desktop ? $dialogs -ge 5 : $skipLines -eq 1) })
+    # The real capture cases likewise
+    $shotCases = @($cases | Where-Object { $_.Label -clike 'capture:*' }).Count
+    $shotSkips = @($cases | Where-Object { $_.Label -clike '(no interactive desktop in this session: the real capture cases*' }).Count
+    $cases.Add([pscustomobject]@{ Label = "child: the real capture cases ran whenever this session has a desktop; without one the child said they did not run (desktop: $desktop, cases: $shotCases, skip lines: $shotSkips)"; Bad = $false; Passed = ($desktop ? $shotCases -ge 10 : $shotSkips -eq 1) })
     $cases
 }
 
@@ -4450,7 +4997,7 @@ function Invoke-HarnessSelfTest {
         $groups = @(
             { Get-GuardCases $scratch $RepoRoot }, { Get-SubstResidueCases $scratch }, { Get-IniCases }, { Get-SnapshotCases $scratch }, { Get-LintCases $scratch $RepoRoot $CollisionSample },
             { Get-HostCases }, { Get-WavCases $scratch }, { Get-VerdictCases $scratch $RepoRoot }, { Get-ConfigCases $scratch $RepoRoot }, { Get-ProjectCases $scratch $RepoRoot }, { Get-SourceCases $scratch }, { Get-RenderCases $scratch $RepoRoot },
-            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-VariantCases $scratch $RepoRoot }, { Get-ListingCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-ProbeCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
+            { Get-PluginCases $scratch $RepoRoot }, { Get-LearnCases $scratch $RepoRoot }, { Get-VariantCases $scratch $RepoRoot }, { Get-ListingCases $scratch $RepoRoot }, { Get-StateCases $scratch $RepoRoot }, { Get-ExtensionCases $scratch $RepoRoot }, { Get-TransportCases $scratch $RepoRoot }, { Get-ReportCases $scratch $RepoRoot }, { Get-CaptureCases $scratch $RepoRoot }, { Get-ProbeCases $scratch $RepoRoot }, { Get-ExampleCases $RepoRoot }, { Get-WiringCases $RepoRoot }, { Get-SummaryCases },
             { Get-ChildCases $scratch $RepoRoot $ExtraGuiLock }
         )
         foreach ($group in $groups) {

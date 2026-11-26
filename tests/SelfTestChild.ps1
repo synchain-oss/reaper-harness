@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) # the parent decodes UTF-8
 
 $src = Join-Path $RepoRoot 'src'
-foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Sources', 'Probe', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
+foreach ($m in 'Guard', 'Host', 'Locks', 'Json', 'Wav', 'Config', 'Rpp', 'Plugins', 'Transport', 'Capture', 'Sources', 'Probe', 'Scenarios', 'Learn', 'Extensions', 'States', 'Renders', 'Suite') { Import-Module (Join-Path $src "$m.psm1") -ErrorAction Stop }
 Import-Module (Join-Path $RepoRoot 'tests/FakeReaper.psm1') -ErrorAction Stop
 
 function Write-Case([string]$Label, [bool]$Bad, [bool]$Passed) { Write-Output ("RESULT`t{0}`t{1}`t{2}" -f [int]$Bad, [int]$Passed, $Label) }
@@ -288,6 +288,88 @@ Write-Case "launch environment: a value outside the work directory: REAPER is no
     $h3Why -clike 'REAPER was not started: the value of X_ONE is not a path inside the work directory' -and -not $seenH3.Called -and $h3Ctx.Launches -eq 0 -and $h3Ctx.Started.Count -eq 0 -and (Test-HarnessLockFree -FullName $h3Lock))
 $h3Name = try { $null = & (Get-Module Scenarios) { param($c, $h) Invoke-HarnessLaunchOnce -Ctx $c -HostArgs $h } $h3Ctx @{ Environment = @{ COMSPEC = (Join-Path $h3Work 'x') } }; '' } catch { $_.Exception.Message }
 Write-Case "launch environment: a denied name with a value in the work directory starts nothing either ($h3Name)" $true ($h3Name -clike "REAPER was not started: 'COMSPEC' is a variable Windows or a runtime reads; the harness may not set it" -and -not $seenH3.Called)
+# ---- the capture service of a launch with shots: started with the process, stopped whatever ended the launch ----
+Initialize-HarnessCapture
+$shotRoot = Join-Path $Work 'host-shots'
+$null = New-Item -ItemType Directory -Force -Path $shotRoot
+$shotEntries = {
+    param([string]$Tag, [int]$Count = 2)
+    $d = Join-Path $shotRoot $Tag
+    $null = New-Item -ItemType Directory -Force -Path $d
+    @(for ($k = 1; $k -le $Count; $k++) { [pscustomobject]@{ Req = (Join-Path $d "s-$k.req"); Png = (Join-Path $d "s-$k.png"); Done = (Join-Path $d "s-$k.done"); Err = (Join-Path $d "s-$k.err") } })
+}
+# Whether either answer file of a shot comes within Ms
+$answered = {
+    param($Shot, [int]$ms)
+    $until = [DateTime]::UtcNow.AddMilliseconds($ms)
+    do { if ((Test-Path -LiteralPath $Shot.Done) -or (Test-Path -LiteralPath $Shot.Err)) { return $true }; Start-Sleep -Milliseconds 20 } while ([DateTime]::UtcNow -lt $until)
+    $false
+}
+$quoted = { param([string]$text) "'" + ($text -replace "'", "''") + "'" }
+$h1 = @(& $shotEntries 'h1')
+$h1Mark = Join-Path $shotRoot 'h1.mark'
+$h1Cmd = "[IO.File]::WriteAllText($(& $quoted $h1[0].Req), '1'); `$t = [Diagnostics.Stopwatch]::StartNew(); while (-not (Test-Path -LiteralPath $(& $quoted $h1[0].Err)) -and `$t.ElapsedMilliseconds -lt 2000) { Start-Sleep -Milliseconds 20 }; " +
+    "[IO.File]::WriteAllText($(& $quoted $h1Mark), [string]`$t.ElapsedMilliseconds); Start-Sleep -Seconds 2"
+$run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -Captures $h1 -Launcher (New-StandIn $h1Cmd @{})
+$h1Answer = (Test-Path -LiteralPath $h1[0].Err) ? [IO.File]::ReadAllText($h1[0].Err) : ''
+$h1Took = (Test-Path -LiteralPath $h1Mark) ? [IO.File]::ReadAllText($h1Mark) : ''
+[IO.File]::WriteAllText($h1[1].Req, '1')
+Write-Case "capture service: a request of the launched process is answered within 2 s (no plugin window: nowindow); once the host has returned the service has stopped and a later request gets no answer ($h1Took ms, $($h1Answer.Trim()))" $true (
+    $run.Status -ceq 'Exited' -and $run.CaptureStopped -eq $true -and $h1Answer -ceq "reason=nowindow`n" -and $h1Took -cmatch '^\d+$' -and [int]$h1Took -lt 2000 -and -not (& $answered $h1[1] 1000) -and
+    -not (Test-Path -LiteralPath $h1[0].Png))
+$run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -TimeoutSec 30 -Launcher (New-StandIn 'exit 0' @{})
+Write-Case 'capture service: a launch without shots has none (CaptureStopped is null)' $false ($run.Status -ceq 'Exited' -and $null -ne $run.PSObject.Properties['CaptureStopped'] -and $null -eq $run.CaptureStopped)
+$stoppedBy = @(
+    @{ L = 'a watch that fails (Error)'; A = @{ TimeoutSec = 30; WatchModules = 'X.vst3'; ModuleSampler = { param($p) throw 'the module list broke' } }; S = 'Error' }
+    @{ L = 'the timeout'; A = @{ TimeoutSec = 2 }; S = 'Timeout' }
+    @{ L = 'the kill point'; A = @{ TimeoutSec = 30; KillAfterSec = 1.5 }; S = 'Killed' }
+)
+foreach ($c in $stoppedBy) {
+    $later = @(& $shotEntries "stop-$($c.S.ToLowerInvariant())" 1)
+    $splat = $c.A
+    $run = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $standInLock -Captures $later -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{}) @splat
+    [IO.File]::WriteAllText($later[0].Req, '1')
+    Write-Case "capture service: $($c.L) stops it too: CaptureStopped, and a request after the launch gets no answer" $true ($run.Status -ceq $c.S -and $run.CaptureStopped -eq $true -and (& $gone $run.Pid) -and -not (& $answered $later[0] 1000))
+}
+# The service alone, on processes of this self-test: it leaves by itself once its process is gone, it answers only the
+# process that started when the host saw it start, and it leaves its loop at its deadline
+$serviceRule = & (Get-Module Host) { $script:PluginOnlyWindow }
+$serviceOf = { param($proc, $Shots, [long]$started, [int]$DeadlineMs = 60000) [HarnessCapture]::new([uint32]$proc.Id, $started, $serviceRule, [string[]]@($Shots.Req), [string[]]@($Shots.Png), [string[]]@($Shots.Done), [string[]]@($Shots.Err), $DeadlineMs) }
+$startOf = { param($proc) $proc.StartTime.ToUniversalTime().ToFileTimeUtc() }
+$shortLived = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new($pwshExe, '-NoProfile -Command Start-Sleep -Milliseconds 300'))
+$alone = @(& $shotEntries 'alone' 1)
+$svc = & $serviceOf $shortLived $alone (& $startOf $shortLived)
+$svc.Start()
+$null = $shortLived.WaitForExit(20000)
+Start-Sleep -Milliseconds 300
+[IO.File]::WriteAllText($alone[0].Req, '1')
+$aloneAnswered = & $answered $alone[0] 500
+Write-Case 'capture service: it leaves by itself once its process has exited, unasked' $true (-not $aloneAnswered -and $svc.Stop(0))
+$sleeper = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new($pwshExe, '-NoProfile -Command Start-Sleep -Seconds 30'))
+try {
+    $wrongStart = @(& $shotEntries 'wrong-start' 1)
+    $svc = & $serviceOf $sleeper $wrongStart ((& $startOf $sleeper) + 10000000)
+    $svc.Start()
+    [IO.File]::WriteAllText($wrongStart[0].Req, '1')
+    $wrongAnswered = & $answered $wrongStart[0] 1000
+    $wrongLeft = $svc.Stop(0)
+    $rightStart = @(& $shotEntries 'right-start' 1)
+    $svc = & $serviceOf $sleeper $rightStart (& $startOf $sleeper)
+    $svc.Start()
+    [IO.File]::WriteAllText($rightStart[0].Req, '1')
+    $rightAnswered = & $answered $rightStart[0] 2000
+    $rightStopped = $svc.Stop(5000)
+    Write-Case 'capture service: a process that did not start when the host saw it start is not the one it started: nothing is answered' $true (-not $wrongAnswered -and $wrongLeft -and $rightAnswered -and $rightStopped)
+    $pastDeadline = @(& $shotEntries 'deadline' 1)
+    $svc = & $serviceOf $sleeper $pastDeadline (& $startOf $sleeper) 300
+    $svc.Start()
+    Start-Sleep -Milliseconds 800
+    [IO.File]::WriteAllText($pastDeadline[0].Req, '1')
+    Write-Case 'capture service: it leaves its loop at its deadline, even while its process runs' $true (-not (& $answered $pastDeadline[0] 500) -and $svc.Stop(0))
+} finally { if (-not $sleeper.HasExited) { Stop-Process -Id $sleeper.Id -Force } }
+$h3Shot = try { $null = & (Get-Module Scenarios) { param($c, $h) Invoke-HarnessLaunchOnce -Ctx $c -HostArgs $h } $h3Ctx @{ Captures = @([pscustomobject]@{ Req = (Join-Path $h3Work 'a.req'); Png = (Join-Path $Work 'a.png'); Done = (Join-Path $h3Work 'a.done'); Err = (Join-Path $h3Work 'a.err') }) }; '' } catch { $_.Exception.Message }
+Write-Case "launch shots: a shot file outside the work directory: REAPER is not started, the stand-in is never called and no lock is taken ($h3Shot)" $true (
+    $h3Shot -ceq 'REAPER was not started: a shot file is not a path inside the work directory' -and -not $seenH3.Called -and $h3Ctx.Launches -eq 0 -and $h3Ctx.Started.Count -eq 0 -and (Test-HarnessLockFree -FullName $h3Lock))
 Exit-HarnessLocks $standInLock
 & $useDefaultLock $realGui
 # The text of the message box command itself, with an apostrophe in the title and the path; real boxes come below
@@ -327,6 +409,236 @@ $dialogCases = {
 }
 if ([Environment]::UserInteractive) { Invoke-WithHarnessLocks -Names (Get-HarnessGuiLockSet -Extra $extra) -TimeoutSeconds 1800 -ScriptBlock $dialogCases }
 else { Write-Case '(no interactive desktop in this session: the real message box cases did not run for real)' $false $true }
+
+# ---- shots of a real window (stand-ins with windows like REAPER's plugin window, under the GUI locks like a real run) ----
+# Printing a window needs a desktop; without one these cases say they did not run, and the parent fails when they are
+# missing although this session has one. Each stand-in (tests/FakeShots.ps1) shows its window without taking the focus
+# and closes it once its mark file is there; every stand-in started here is ended before its block returns.
+# A row, a fact or a file that is missing makes the case false, not the child stop: a condition that looks into a result
+# or a file runs here
+$holds = { param([scriptblock]$Condition) try { [bool](& $Condition) } catch { $false } }
+$captureCases = {
+    param($guiLock)
+    $null = $guiLock
+    $shotHome = Join-Path $Work 'real-shots'
+    $null = New-Item -ItemType Directory -Force -Path $shotHome
+    $fakeShots = Join-Path $RepoRoot 'tests/FakeShots.ps1'
+    $rule = & (Get-Module Host) { $script:PluginOnlyWindow }
+    $standIns = [Collections.Generic.List[object]]::new()
+    $showOne = {
+        param([string]$Tag, [string[]]$More = @(), [string]$Title = 'VST3: Fake Capture (Test) - Track 1 [1/1]')
+        $psi = [Diagnostics.ProcessStartInfo]::new($pwshExe)
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $mark = Join-Path $shotHome "$Tag.close"
+        foreach ($part in @('-NoProfile', '-NonInteractive', '-File', $fakeShots, '-Show', '-Until', $mark, '-Title', $Title) + $More) { $psi.ArgumentList.Add($part) }
+        $p = [Diagnostics.Process]::Start($psi)
+        $one = [pscustomobject]@{ Tag = $Tag; Proc = $p; Mark = $mark; Title = $Title; Started = $p.StartTime.ToUniversalTime().ToFileTimeUtc() }
+        $standIns.Add($one)
+        $one
+    }
+    # Its windows with that title, visible or not, once the stand-in has made them (at most 30 s)
+    $windowsOf = {
+        param($one, [int]$Want)
+        $until = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $rows = @([HarnessWin]::Windows([uint32]$one.Proc.Id) | Where-Object { ($_ -split "`t", 4)[3] -ceq $one.Title })
+            if ($rows.Count -ge $Want) { return $rows.Count }
+            Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $until -and -not $one.Proc.HasExited)
+        $rows.Count
+    }
+    $planIn = {
+        param([string]$Tag, [int]$Count = 1)
+        $d = Join-Path $shotHome $Tag
+        $null = New-Item -ItemType Directory -Force -Path $d
+        @(for ($k = 1; $k -le $Count; $k++) { [pscustomobject]@{ Req = (Join-Path $d "s-$k.req"); Png = (Join-Path $d "s-$k.png"); Done = (Join-Path $d "s-$k.done"); Err = (Join-Path $d "s-$k.err") } })
+    }
+    $serviceFor = { param([uint32]$ProcessId, [long]$started, $Shots) [HarnessCapture]::new($ProcessId, $started, $rule, [string[]]@($Shots.Req), [string[]]@($Shots.Png), [string[]]@($Shots.Done), [string[]]@($Shots.Err), 120000) }
+    # The answer to one request: done (with the image) or err, as the harness reads it; '' when none came within 5 s
+    $ask = {
+        param($Service, $Shot)
+        [IO.File]::WriteAllText($Shot.Req, '1')
+        $until = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            if (Test-Path -LiteralPath $Shot.Done) { return 'done' }
+            if (Test-Path -LiteralPath $Shot.Err) { return [IO.File]::ReadAllText($Shot.Err) }
+            Start-Sleep -Milliseconds 20
+        } while ([DateTime]::UtcNow -lt $until)
+        ''
+    }
+    $quiet = { param($Shot, [int]$ms) Start-Sleep -Milliseconds $ms; -not (Test-Path -LiteralPath $Shot.Done) -and -not (Test-Path -LiteralPath $Shot.Err) -and -not (Test-Path -LiteralPath $Shot.Png) }
+    # The PNG the service wrote, read back: chunks, sizes, every chunk's CRC, every row (filter 0, 3 bytes a pixel), and
+    # with the view's top row: the stand-in's view colour (red 32, green 128, blue 224) inside the view and not above it
+    $crcTable = [long[]]::new(256)
+    for ($n = 0; $n -lt 256; $n++) { $c = [long]$n; for ($j = 0; $j -lt 8; $j++) { $c = ($c -band 1) ? ([long]3988292384 -bxor ($c -shr 1)) : ($c -shr 1) }; $crcTable[$n] = $c }
+    $pngOk = {
+        param([string]$path, [int]$w, [int]$h, [int]$ViewTop = -1)
+        $b = [IO.File]::ReadAllBytes($path)
+        $be = { param([int]$At) ([long]$b[$At] -shl 24) -bor ([long]$b[$At + 1] -shl 16) -bor ([long]$b[$At + 2] -shl 8) -bor [long]$b[$At + 3] }
+        if ($b.Length -lt 57 -or [Convert]::ToHexString($b, 0, 8) -cne '89504E470D0A1A0A') { return $false }
+        $types = [Collections.Generic.List[string]]::new(); $idat = [IO.MemoryStream]::new(); $pos = 8; $ihdrOk = $false; $crcBad = 0
+        while ($pos + 12 -le $b.Length) {
+            $len = & $be $pos; $type = [Text.Encoding]::ASCII.GetString($b, $pos + 4, 4)
+            if ($pos + 12 + $len -gt $b.Length) { return $false }
+            $types.Add($type)
+            $c = [long]4294967295
+            for ($i = $pos + 4; $i -lt $pos + 8 + $len; $i++) { $c = $crcTable[($c -bxor $b[$i]) -band 255] -bxor ($c -shr 8) }
+            if (($c -bxor [long]4294967295) -ne (& $be ($pos + 8 + $len))) { $crcBad++ }
+            if ($type -ceq 'IHDR') { $ihdrOk = (& $be ($pos + 8)) -eq $w -and (& $be ($pos + 12)) -eq $h -and $b[$pos + 16] -eq 8 -and $b[$pos + 17] -eq 2 }
+            if ($type -ceq 'IDAT') { $idat.Write($b, $pos + 8, $len) }
+            $pos += 12 + $len
+        }
+        $idat.Position = 0
+        $raw = [IO.MemoryStream]::new()
+        $z = [IO.Compression.ZLibStream]::new($idat, [IO.Compression.CompressionMode]::Decompress)
+        try { $z.CopyTo($raw) } finally { $z.Dispose() }
+        $rows = $raw.ToArray(); $stride = 1 + 3 * $w
+        $filters = @(for ($y = 0; $y -lt $h; $y++) { if ($y * $stride -lt $rows.Length) { $rows[$y * $stride] } })
+        $pixel = { param([int]$Col, [int]$Line) $where = $Line * $stride + 1 + 3 * $Col; ($where + 2 -lt $rows.Length) ? ('{0:X2}{1:X2}{2:X2}' -f $rows[$where], $rows[$where + 1], $rows[$where + 2]) : '' }
+        $colours = $ViewTop -lt 0 -or ((& $pixel ($w / 2) ($ViewTop + 100)) -ceq '2080E0' -and (& $pixel ($w / 2) ($ViewTop / 2)) -cnotin '2080E0', '')
+        $pos -eq $b.Length -and ($types -join ',') -ceq 'IHDR,IDAT,IEND' -and $ihdrOk -and $crcBad -eq 0 -and $rows.Length -eq $h * $stride -and @($filters | Where-Object { $_ -ne 0 }).Count -eq 0 -and $colours
+    }
+    try {
+        $plain = & $showOne 'plain'
+        $two = & $showOne 'two' @('-Two')
+        $hidden = & $showOne 'hidden' @('-Hidden')
+        $noWrap = & $showOne 'nowrap' @('-NoWrap')
+        $chain = & $showOne 'chain' @() 'FX: Track 1'
+        $named = & $showOne 'named' @() 'Fake VST3: x'
+        $other = & $showOne 'other' @('-OtherClass')
+        $wide = & $showOne 'wide' @('-Wide')
+        $flat = & $showOne 'flat' @('-Flat')
+        $shownCount = [ordered]@{}
+        foreach ($s in $standIns) { $shownCount[$s.Tag] = & $windowsOf $s (($s.Tag -ceq 'two') ? 2 : 1) }
+        Write-Case "capture: every stand-in shows its window(s) ($(@($shownCount.get_Keys() | ForEach-Object { "$_ $($shownCount[$_])" }) -join ', '))" $false (@($shownCount.get_Keys() | Where-Object { $shownCount[$_] -ne (($_ -ceq 'two') ? 2 : 1) }).Count -eq 0)
+
+        # One plugin window of the process: the client area as a PNG, then the answer with its sizes and the view
+        $r1 = & $planIn 'r1' 3
+        $svc = & $serviceFor $plain.Proc.Id $plain.Started $r1
+        $svc.Start()
+        $a1 = & $ask $svc $r1[0]
+        $answer1 = ($a1 -ceq 'done') ? (Read-HarnessShotAnswer -Path $r1[0].Done -Kind done) : $null
+        $parts1 = @(Get-ChildItem -LiteralPath (Split-Path -Parent $r1[0].Png) -Filter '*.part' -Force)
+        Write-Case "capture: one plugin window: a PNG of its 640 x 427 client area, top row first and red, green, blue in that order, then the answer with the view at 0,27 640 x 400 and the DPI; no .part left ($a1)" $true (& $holds {
+            $null -ne $answer1 -and $answer1.Width -eq 640 -and $answer1.Height -eq 427 -and $null -ne $answer1.View -and $answer1.View.x -eq 0 -and $answer1.View.y -eq 27 -and $answer1.View.w -eq 640 -and
+            $answer1.View.h -eq 400 -and $answer1.Dpi -ge 96 -and (Test-HarnessShotImage -Path $r1[0].Png -Answer $answer1) -and (& $pngOk $r1[0].Png 640 427 27) -and $parts1.Count -eq 0 -and
+            ([IO.File]::GetLastWriteTimeUtc($r1[0].Done) -ge [IO.File]::GetLastWriteTimeUtc($r1[0].Png)) -and -not (Test-Path -LiteralPath $r1[0].Err) })
+        # A request answered is never answered again; a request file of a name not in the plan is no request
+        foreach ($f in $r1[0].Done, $r1[0].Png) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
+        [IO.File]::WriteAllText($r1[0].Req, '2')
+        $stray = Join-Path (Split-Path -Parent $r1[0].Png) 'stray-1.req'
+        [IO.File]::WriteAllText($stray, '1')
+        Write-Case 'capture: a request is answered once; a request file the plan does not name is not answered' $true (
+            (& $quiet $r1[0] 800) -and @(Get-ChildItem -LiteralPath (Split-Path -Parent $r1[0].Png) -Filter 'stray-1.*' -Force).Count -eq 1)
+        # An image already in place is never overwritten
+        [IO.File]::WriteAllText($r1[1].Png, 'there first')
+        $a7 = & $ask $svc $r1[1]
+        Write-Case "capture: an image already in its place is never overwritten: exists ($($a7.Trim()))" $true ($a7 -ceq "reason=exists`n" -and [IO.File]::ReadAllText($r1[1].Png) -ceq 'there first' -and -not (Test-Path -LiteralPath $r1[1].Done))
+        $a1b = & $ask $svc $r1[2]
+        Write-Case 'capture: the service answers each request of its plan in turn' $false ($a1b -ceq 'done')
+        $stop1 = $svc.Stop(5000)
+        Write-Case 'capture: the service stops when asked' $false $stop1
+
+        # A failure inside one answer is that answer's alone: the next request is answered all the same
+        $r10 = & $planIn 'r10' 3
+        $lost = Join-Path $shotHome 'r10-missing\deeper'
+        $r10[0].Png = Join-Path $lost 's-1.png'
+        $r10[1].Png = Join-Path $lost 's-2.png'; $r10[1].Err = Join-Path $lost 's-2.err'; $r10[1].Done = Join-Path $lost 's-2.done'
+        $svc = & $serviceFor $plain.Proc.Id $plain.Started $r10
+        $svc.Start()
+        $a10 = & $ask $svc $r10[0]
+        $a10b = & $ask $svc $r10[1]
+        $a10c = & $ask $svc $r10[2]
+        $null = $svc.Stop(5000)
+        Write-Case "capture: an answer that fails is failed <exception>, one whose err file cannot be written is none, and the next request is answered all the same ($($a10.Trim()) | $a10b | $a10c)" $true (
+            $a10 -ceq "reason=failed DirectoryNotFoundException`n" -and $a10b -ceq '' -and $a10c -ceq 'done' -and -not (Test-Path -LiteralPath $lost))
+
+        # What is not one plugin window of that process is no shot
+        $notShots = @(
+            @{ L = 'two plugin windows'; S = $two; W = "reason=windows 2`n" }
+            @{ L = 'a plugin window that is not visible'; S = $hidden; W = "reason=nowindow`n" }
+            @{ L = 'an FX chain window'; S = $chain; W = "reason=nowindow`n" }
+            @{ L = 'a title that only contains a format'; S = $named; W = "reason=nowindow`n" }
+            @{ L = 'a window of another class'; S = $other; W = "reason=nowindow`n" }
+            @{ L = 'a client area wider than 4096'; S = $wide; W = "reason=toolarge`n" }
+            @{ L = 'a window without a client area'; S = $flat; W = "reason=empty`n" }
+        )
+        foreach ($c in $notShots) {
+            $one = & $planIn "not-$($c.S.Tag)"
+            $svc = & $serviceFor $c.S.Proc.Id $c.S.Started $one
+            $svc.Start()
+            $got = & $ask $svc $one[0]
+            $null = $svc.Stop(5000)
+            Write-Case "capture: $($c.L) is no shot ($($got.Trim()))" $true ($got -ceq $c.W -and -not (Test-Path -LiteralPath $one[0].Png))
+        }
+        # A shot directory that is a junction gets no answer of any kind, before any window is looked at: neither one
+        # window, nor two, nor an image already there changes that, and nothing is written behind it. The service passes
+        # those requests by (it answers each planned request at most once), so a later request of its plan in a plain
+        # directory is answered all the same; written after the others had time to be seen, it is answered after them
+        $behind = Join-Path $shotHome 'r11-behind'
+        $null = New-Item -ItemType Directory -Force -Path $behind
+        $linked = Join-Path $shotHome 'r11'
+        $linkMade = try { $null = New-Item -ItemType Junction -Path $linked -Target $behind -ErrorAction Stop; $true } catch { $false }
+        try {
+            $r11 = @(foreach ($k in 1..3) { [pscustomobject]@{ Req = (Join-Path $linked "s-$k.req"); Png = (Join-Path $linked "s-$k.png"); Done = (Join-Path $linked "s-$k.done"); Err = (Join-Path $linked "s-$k.err") } })
+            $after11 = @(& $planIn 'r11-plain' 2)
+            [IO.File]::WriteAllText((Join-Path $behind 's-2.png'), 'there first')
+            $svc = & $serviceFor $plain.Proc.Id $plain.Started @($r11[0], $r11[1], $after11[0])
+            $svc.Start()
+            foreach ($x in $r11[0], $r11[1]) { [IO.File]::WriteAllText($x.Req, '1') }
+            Start-Sleep -Milliseconds 300
+            $a11 = & $ask $svc $after11[0]
+            $null = $svc.Stop(5000)
+            $svc = & $serviceFor $two.Proc.Id $two.Started @($r11[2], $after11[1])
+            $svc.Start()
+            [IO.File]::WriteAllText($r11[2].Req, '1')
+            Start-Sleep -Milliseconds 300
+            $a11b = & $ask $svc $after11[1]
+            $null = $svc.Stop(5000)
+            $more11 = @(Get-ChildItem -LiteralPath $behind -Force | Where-Object { $_.Name -cnotmatch '\As-[123]\.req\z' -and $_.Name -cne 's-2.png' } | ForEach-Object { $_.Name })
+            Write-Case "capture: a shot directory that is a junction gets no answer at all, before any window is looked at, and nothing is written behind it; a later request in a plain directory is answered ($($a11.Trim()) | $($a11b.Trim()); more: $($more11 -join ', '))" $true (
+                $linkMade -and $a11 -ceq 'done' -and $a11b -ceq "reason=windows 2`n" -and $more11.Count -eq 0 -and @(Get-ChildItem -LiteralPath $behind -Filter 's-*.req' -Force).Count -eq 3 -and
+                [IO.File]::ReadAllText((Join-Path $behind 's-2.png')) -ceq 'there first')
+        } finally { if ($linkMade) { [IO.Directory]::Delete($linked) } }
+        $r5 = & $planIn 'r5'
+        $svc = & $serviceFor $noWrap.Proc.Id $noWrap.Started $r5
+        $svc.Start()
+        $a5 = & $ask $svc $r5[0]
+        $null = $svc.Stop(5000)
+        $answer5 = ($a5 -ceq 'done') ? (Read-HarnessShotAnswer -Path $r5[0].Done -Kind done) : $null
+        Write-Case "capture: a plugin window without the view child is shot all the same, its view none ($a5)" $true (& $holds { $null -ne $answer5 -and $null -eq $answer5.View -and $answer5.Width -eq 640 -and (Test-HarnessShotImage -Path $r5[0].Png -Answer $answer5) })
+        # Only windows of the PID it was given: a process without a window gets nowindow while another's is on screen
+        $loneInfo = [Diagnostics.ProcessStartInfo]::new($pwshExe, '-NoProfile -Command Start-Sleep -Seconds 30')
+        $loneInfo.CreateNoWindow = $true
+        $lone = [Diagnostics.Process]::Start($loneInfo)
+        try {
+            $r3 = & $planIn 'r3'
+            $svc = & $serviceFor $lone.Id $lone.StartTime.ToUniversalTime().ToFileTimeUtc() $r3
+            $svc.Start()
+            $a3 = & $ask $svc $r3[0]
+            $null = $svc.Stop(5000)
+            Write-Case "capture: only windows of the process it was given count: another process's plugin window is no shot of this one ($($a3.Trim()))" $true ($a3 -ceq "reason=nowindow`n" -and -not $plain.Proc.HasExited -and (& $windowsOf $plain 1) -eq 1)
+        } finally { if (-not $lone.HasExited) { Stop-Process -Id $lone.Id -Force } }
+        # Through the host, as a launch hands it over: the rule the host gives the service takes the plugin's window and
+        # leaves an FX chain window of the same process alone, so the one plugin window is shot (not two windows)
+        $viaHost = @(& $planIn 'via-host')
+        $hostSpec = ConvertTo-Json -Compress -Depth 6 -InputObject ([ordered]@{ result = (Join-Path $shotHome 'via-host.txt'); window = $true; chain = $true
+                shots = @([ordered]@{ n = 1; k = 1; at = 0; req = $viaHost[0].Req; done = $viaHost[0].Done; err = $viaHost[0].Err; name = 's-1.png' }) })
+        $launchExe = $pwshExe
+        $hostLaunch = { param($psi) $psi.FileName = $launchExe; $psi.ArgumentList.Clear(); foreach ($part in '-NoProfile', '-NonInteractive', '-File', $fakeShots) { $psi.ArgumentList.Add($part) }; $psi.Environment['FAKE_SHOTS'] = $hostSpec; [Diagnostics.Process]::Start($psi) }.GetNewClosure()
+        $hostRun = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $guiLock -TimeoutSec 30 -Captures $viaHost -Launcher $hostLaunch
+        $hostSaid = (Test-Path -LiteralPath $viaHost[0].Err) ? [IO.File]::ReadAllText($viaHost[0].Err).Trim() : ''
+        Write-Case "capture: through the host, a plugin window next to an FX chain window of the same process is the one shot ($($hostRun.Status)$($hostSaid ? "; $hostSaid" : ''))" $true (& $holds {
+                $hostRun.Status -ceq 'Exited' -and $hostRun.CaptureStopped -eq $true -and -not (Test-Path -LiteralPath $viaHost[0].Err) -and
+                (Test-HarnessShotImage -Path $viaHost[0].Png -Answer (Read-HarnessShotAnswer -Path $viaHost[0].Done -Kind done)) })
+    } finally {
+        foreach ($s in $standIns) { [IO.File]::WriteAllText($s.Mark, '1') }
+        foreach ($s in $standIns) { if (-not $s.Proc.WaitForExit(15000)) { Stop-Process -Id $s.Proc.Id -Force -ErrorAction SilentlyContinue } }
+    }
+    Write-Case 'capture: every stand-in window process has ended' $false (@($standIns | Where-Object { -not (& $gone $_.Proc.Id) }).Count -eq 0)
+}
+if ([Environment]::UserInteractive) { Invoke-WithHarnessLocks -Names (Get-HarnessGuiLockSet -Extra $extra) -TimeoutSeconds 1800 -ScriptBlock $captureCases }
+else { Write-Case '(no interactive desktop in this session: the real capture cases did not run for real)' $false $true }
 
 # ---- GUI locks (switched to names of this self-test, so a real run and the self-test never wait for each other) ----
 & (Get-Module Locks) { $script:DefaultGui = "Local\ReaperHarness-selftest-$PID-gui" }
@@ -1591,8 +1903,6 @@ $reportRun = {
     finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
     [pscustomobject]@{ Run = $run; Row = @($run.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]; Env = @($envSeen) }
 }
-# A row or a fact that is missing makes the case false, not the child stop: a condition that looks into a result runs here
-$holds = { param([scriptblock]$Condition) try { [bool](& $Condition) } catch { $false } }
 $stateOf = { param($ResultRow) try { @($ResultRow.facts.states | Where-Object { $_.name -ceq 'stopped-armed-on' })[0] } catch { $null } }
 $rp = & $reportRun
 $armedState = & $stateOf $rp.Row
@@ -1649,6 +1959,79 @@ foreach ($c in $holdBad) {
     Write-Case "end to end: $($c.L) makes the state and the row $($c.S), for that alone ($($got.Row.detail))" $true (& $holds {
             $got.Run.verdict -ceq $c.S -and $got.Row.status -ceq $c.S -and $gotState.status -ceq $c.S -and @($gotState.problems).Count -eq 1 -and $got.Row.detail -clike $c.W })
 }
+# Shots of the window held open (windows.capture): the stand-in REAPER asks for them as the driver does and the real
+# capture service of the host answers; the images move to the results, the state's facts list every shot
+$shotCfg = & $writeVariant { param($c) & $reportChange $c; $c.scenarios[0].states[1].windows.holdMs = 2000; $c.scenarios[0].states[1].windows.capture = @(0, 1000, 2000) }
+$shotCfg.ReaperExe = $pwshExe; $shotCfg.ResultDir = $e2e.ResultDir
+$shotNames = 'stopped-armed-on-0.png', 'stopped-armed-on-1000.png', 'stopped-armed-on-2000.png'
+$shotDirsLeft = { @(Get-ChildItem -LiteralPath (Join-Path $e2e.ResultDir 'work') -Recurse -Directory -Filter 'monitor-states.shots' -ErrorAction SilentlyContinue) }
+# Every launch of the run through the host, as the scenarios module calls it: only the transport step has a service
+$hostSeen = [Collections.Generic.List[string]]::new()
+$hostWrap = { $r = Host\Invoke-HarnessHost @args; $hostSeen.Add([string]$r.CaptureStopped); $r }.GetNewClosure()
+$hostWas = & (Get-Module Scenarios) { param($s) $w = (Get-Item 'function:Invoke-HarnessHost').ScriptBlock; Set-Item 'function:script:Invoke-HarnessHost' $s; $w } $hostWrap
+try { $sp = & $reportRun @{ Shots = @{ Window = $true } } $shotCfg }
+finally { & (Get-Module Scenarios) { param($w) Set-Item 'function:script:Invoke-HarnessHost' $w } $hostWas }
+$shotState = & $stateOf $sp.Row
+$shotList = @(@(try { $shotState.shots } catch { $null }) | Where-Object { $_ })
+$keptShots = @($shotList | ForEach-Object { if ($_.path) { Join-Path $e2e.ResultDir $_.path } })
+Write-Case "end to end: three shots of a window held 2000 ms: PASS, the line counts them, and each image is in the results with its size, view, hash and the driver's times ($($sp.Row.detail))" $false (& $holds {
+        $sp.Run.verdict -ceq 'PASS' -and $sp.Row.status -ceq 'PASS' -and $shotState.status -ceq 'PASS' -and
+        $sp.Row.detail -clike '*stopped-armed-on: * windows=3/3 of 3 held=2003/2000ms shots=3/3 report gain.opens=22 (+10) gain.blocks=22 (+10)*' -and $sp.Row.detail -cnotlike '*not taken*' -and
+        (@($shotList | ForEach-Object { $_.name }) -join ',') -ceq ($shotNames -join ',') -and (@($shotList | ForEach-Object { $_.at }) -join ',') -ceq '0,1000,2000' -and
+        (@($shotList | ForEach-Object { $_.held }) -join ',') -ceq '2,1002,2002' -and (@($shotList | ForEach-Object { $_.wallMs }) -join ',') -ceq '5,1005,2005' -and
+        @($shotList | Where-Object { $_.taken -and $null -eq $_.problem -and $_.width -eq 640 -and $_.height -eq 427 -and $_.view.x -eq 0 -and $_.view.y -eq 27 -and $_.view.w -eq 640 -and $_.view.h -eq 400 -and $_.dpi -ge 96 -and
+                $_.path -clike 'renders/*/run1/monitor-states.shots/stopped-armed-on-*.png' }).Count -eq 3 -and $keptShots.Count -eq 3 -and
+        @(for ($i = 0; $i -lt 3; $i++) { if ((Get-HarnessSha256 $keptShots[$i]) -ceq $shotList[$i].sha256 -and ([IO.FileInfo]::new($keptShots[$i])).Length -eq $shotList[$i].bytes) { $i } }).Count -eq 3 })
+Write-Case "end to end: a green round with shots leaves no shot directory and no shot file in the work directory ($(@(& $shotDirsLeft).Count) left)" $true ($sp.Run.verdict -ceq 'PASS' -and @(& $shotDirsLeft).Count -eq 0)
+Write-Case "end to end: only the transport step with shots has a capture service, which stopped; the other launches of the run have none ($($hostSeen -join ','))" $true (
+    $hostSeen.Count -ge 2 -and @($hostSeen | Where-Object { $_ -ceq 'True' }).Count -eq 1 -and @($hostSeen | Where-Object { $_ -cne 'True' -and $_ -cne '' }).Count -eq 0)
+# With -KeepWork the requests, the answers and the emptied directory stay in the work directory, the images still move
+$spec = @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs; EnvName = 'FIXTURE_REPORT_JSON'; EnvSeen = $envSeen; Shots = @{ Window = $true } }
+Set-FakeReaper $spec
+try { $keptRun = Invoke-HarnessSuite @shotCfg -NoNegative -KeepWork -SelfTestHooks $hooks }
+finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
+$keptState = & $stateOf @($keptRun.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]
+$keptShotList = @(@(try { $keptState.shots } catch { $null }) | Where-Object { $_ })
+$keptStamp = ($keptShotList.Count -and $keptShotList[0].path -cmatch '^renders/([^/]+)/run1/') ? $Matches[1] : 'none'
+$keptDir = Join-Path $e2e.ResultDir "work/$keptStamp-run1/monitor-states.shots"
+$keptLeft = @(Get-ChildItem -LiteralPath $keptDir -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Sort-Object)
+Write-Case "end to end: with -KeepWork the requests and answers stay in the shot directory, the images are in the results ($($keptLeft -join ', '))" $false (& $holds {
+        $keptRun.verdict -ceq 'PASS' -and ($keptLeft -join ',') -ceq (@(foreach ($n in $shotNames) { foreach ($x in 'done', 'err', 'req') { if ($x -cne 'err') { $n.Replace('.png', ".$x") } } }) -join ',') -and
+        @($keptShotList | Where-Object { $_.path -and (Test-Path -LiteralPath (Join-Path $e2e.ResultDir $_.path) -PathType Leaf) }).Count -eq 3 })
+$noWindow = 'no plugin window of this REAPER was visible'
+$shotBad = @(
+    @{ L = 'shots without a plugin window'; X = @{ Shots = @{} }; S = 'INCOMPLETE'; T = 0
+        W = "*held=2003/2000ms shots=0/3 report gain.opens=22 (+10) gain.blocks=22 (+10); not taken: stopped-armed-on-0.png ($noWindow), stopped-armed-on-1000.png ($noWindow), stopped-armed-on-2000.png ($noWindow)*" }
+    @{ L = 'two plugin windows'; X = @{ Shots = @{ Window = $true; Two = $true } }; S = 'INCOMPLETE'; T = 0
+        W = '*shots=0/3 report * not taken: stopped-armed-on-0.png (2 plugin windows of this REAPER were visible: which one is meant cannot be told), *' }
+    @{ L = 'a shot answered late, one whose window went, one the driver saw answered without an answer file'; S = 'INCOMPLETE'; T = 0
+        X = @{ Shots = @{ Window = $true; Status = @{ 'stopped-armed-on-0.png' = 'late'; 'stopped-armed-on-1000.png' = 'gone'; 'stopped-armed-on-2000.png' = 'noreq' } } }
+        W = '*shots=0/3 report * not taken: stopped-armed-on-0.png (no answer within 10 s), stopped-armed-on-1000.png (the window was gone before the shot was taken), stopped-armed-on-2000.png (the driver saw an answer, but there is no answer file)*' }
+    @{ L = 'a shot never asked for and one the driver did not report, the third taken'; S = 'INCOMPLETE'; T = 1
+        X = @{ Shots = @{ Window = $true; Status = @{ 'stopped-armed-on-0.png' = 'none'; 'stopped-armed-on-1000.png' = 'missing' } } }
+        W = '*shots=1/3 report * not taken: stopped-armed-on-0.png (it was never asked for: the window did not open, or the request could not be written), stopped-armed-on-1000.png (the driver reported nothing about it)*' }
+    @{ L = 'a window held too short whose shots were not taken'; X = @{ HoldShort = $true; Shots = @{} }; S = 'FAIL'; T = 0
+        W = "*held=1000/2000ms shots=0/3 report * failed: the window of gain was held 1000 of 2000 ms; not taken: stopped-armed-on-0.png ($noWindow), *" }
+)
+foreach ($c in $shotBad) {
+    $got = & $reportRun $c.X $shotCfg
+    $gotState = & $stateOf $got.Row
+    $gotShots = @(@(try { $gotState.shots } catch { $null }) | Where-Object { $_ })
+    $taken = @($gotShots | Where-Object { $_.taken })
+    Write-Case "end to end: $($c.L) makes the state and the row $($c.S), the shots taken kept all the same ($($got.Row.detail))" $true (& $holds {
+            $got.Run.verdict -ceq $c.S -and $got.Row.status -ceq $c.S -and $gotState.status -ceq $c.S -and $got.Row.detail -clike $c.W -and $gotShots.Count -eq 3 -and $taken.Count -eq $c.T -and
+            @($taken | Where-Object { $_.path -and (Test-Path -LiteralPath (Join-Path $e2e.ResultDir $_.path) -PathType Leaf) }).Count -eq $c.T -and
+            @($gotShots | Where-Object { -not $_.taken -and ($null -ne $_.path -or -not $_.problem) }).Count -eq 0 })
+}
+# One shot: the facts list an array of one, in the result as in its JSON (the variant file is shared: the cases with
+# three shots have run)
+$oneShotCfg = & $writeVariant { param($c) & $reportChange $c; $c.scenarios[0].states[1].windows.holdMs = 2000; $c.scenarios[0].states[1].windows.capture = @(1000) }
+$oneShotCfg.ReaperExe = $pwshExe; $oneShotCfg.ResultDir = $e2e.ResultDir
+$os = & $reportRun @{ Shots = @{ Window = $true } } $oneShotCfg
+$osState = & $stateOf $os.Row
+Write-Case "end to end: a state with one shot lists an array of one, in the facts and in their JSON ($($os.Row.detail))" $false (& $holds {
+        $os.Run.verdict -ceq 'PASS' -and $osState.shots -is [array] -and $osState.shots.Count -eq 1 -and $osState.shots[0].taken -and $os.Row.detail -clike '* shots=1/1 *' -and
+        (ConvertTo-HarnessJsonText -Value $osState) -cmatch '"shots":\[\{"at":1000,' })
 # A render judged by what the plugin reports: the driver renders between two readings, the audio is compared as ever
 $reportRenderChange = {
     param($c)

@@ -9,6 +9,7 @@
 #       expectation pass without evidence). Problems are usage errors: REAPER is never started. Fills in File, Sha256
 #       (first 12 hex digits) and FileChannels of the feed.
 #   Get-HarnessTransportHoldMs   how long each window of a state is held open, 0 for windows without HoldMs (pure)
+#   Get-HarnessTransportCapture  the offsets of the shots of a state's windows, none without Capture (pure)
 #   Get-HarnessTransportJob      the job of the driver's transport step (pure)
 #   Get-HarnessTransportTimeout  the time the driver's transport step may take (pure)
 #   Read-HarnessTransportRow     the numbers the driver reported for one state (pure)
@@ -64,23 +65,33 @@ function Read-HarnessFeeds {
 # windows: the windows of an older caller or an extension may not have it.
 function Get-HarnessTransportHoldMs($Windows) { ($Windows -and $Windows.PSObject.Properties['HoldMs']) ? [int]$Windows.HoldMs : 0 }
 
+# The offsets of the shots of a state's windows (windows.capture, in ms of the hold); Capture came after HoldMs, so the
+# windows of an older caller or an extension may not have it either: none then.
+function Get-HarnessTransportCapture($Windows) { ($Windows -and $Windows.PSObject.Properties['Capture']) ? @($Windows.Capture) : @() }
+
 # Tools: tool JSFX name -> the name to add it by. The tested track is found by name in the layout; tracks are written
-# in layout order, so its index in the project is its index there.
+# in layout order, so its index in the project is its index there. Capture: the shot plan of the scenario
+# (Capture.psm1), or $null.
 function Get-HarnessTransportJob {
-    param([Parameter(Mandatory)]$Scenario, [Parameter(Mandatory)]$Layout, [Parameter(Mandatory)][hashtable]$Tools, [Parameter(Mandatory)][string]$RecordDir)
+    param([Parameter(Mandatory)]$Scenario, [Parameter(Mandatory)]$Layout, [Parameter(Mandatory)][hashtable]$Tools, [Parameter(Mandatory)][string]$RecordDir, $Capture = $null)
     $index = -1
     for ($i = 0; $i -lt $Layout.Tracks.Count; $i++) { if ($Layout.Tracks[$i].Name -ceq $Scenario.track) { $index = $i; break } }
     if ($index -lt 0) { throw "the tested track '$($Scenario.track)' is not in the layout" }
+    $stateNo = 0
     $job = @{
         track = $index; sr = $Scenario.sr; probe = $Tools['harness-block-probe']; recordDir = $RecordDir
         states = @(foreach ($st in $Scenario.states) {
+                $stateNo++
                 $one = @{ name = $st.Name; transport = $st.Transport; arm = ($st.Arm ? 1 : 0); monitor = $script:MonitorCode[$st.Monitor]; samples = $st.Samples }
                 # The driver puts the block probe first in the chain, so the plugin's FX index there is one more. hold
-                # only for a window held open: without it the driver closes each window after ten turns, as it always did
+                # only for a window held open: without it the driver closes each window after ten turns, as it always did.
+                # capture only for a held window with shots, and only those up to its hold: the driver never waits past it
                 if ($st.Windows) {
                     $one.windows = @{ fx = $st.Windows.Fx + 1; count = $st.Windows.Count }
                     $hold = Get-HarnessTransportHoldMs $st.Windows
                     if ($hold -gt 0) { $one.windows.hold = $hold }
+                    $mine = @($Capture ? @($Capture.Shots | Where-Object { $_.StateNo -eq $stateNo -and $_.At -le $hold }) : @())
+                    if ($hold -gt 0 -and $mine.Count) { $one.windows.capture = @(foreach ($x in $mine) { @{ at = $x.At; req = $x.Req; done = $x.Done; err = $x.Err } }) }
                 }
                 $one
             })
@@ -101,15 +112,16 @@ function ConvertTo-TransportNumber([AllowNull()][string]$Text) {
 # while the audio runs on) and the 10 s each of a state's two waits gives itself in the driver, so that the driver's own
 # "the device clock stopped" comes before the watchdog. Without settleSamples it counts 5 s a state, REAPER's default.
 # On top: 20 s per window opened and closed (each waits up to 10 s) and its hold (holdMs) three times over, like the
-# settle times, and with reports 60 s a state (two readings, each with a 30 s limit in the driver).
+# settle times, and with reports 60 s a state (two readings, each with a 30 s limit in the driver). Each shot adds 10 s,
+# the most the driver waits for its answer.
 function Get-HarnessTransportTimeout {
     param([Parameter(Mandatory)]$Scenario, [Parameter(Mandatory)][double]$LuaTimeoutSec, [switch]$Reports)
-    $seconds = 0.0; $cycles = 0
+    $seconds = 0.0; $cycles = 0; $shotCount = 0
     foreach ($st in $Scenario.states) {
         $seconds += ($st.Samples + (($null -ne $Scenario.settleSamples) ? $Scenario.settleSamples : 5 * $Scenario.sr)) / $Scenario.sr
-        if ($st.Windows) { $cycles += $st.Windows.Count; $seconds += $st.Windows.Count * (Get-HarnessTransportHoldMs $st.Windows) / 1000 }
+        if ($st.Windows) { $cycles += $st.Windows.Count; $seconds += $st.Windows.Count * (Get-HarnessTransportHoldMs $st.Windows) / 1000; $shotCount += @(Get-HarnessTransportCapture $st.Windows).Count }
     }
-    $LuaTimeoutSec + 3 * $seconds + 20 * $cycles + (20 + ($Reports ? 60 : 0)) * @($Scenario.states).Count
+    $LuaTimeoutSec + 3 * $seconds + 20 * $cycles + (20 + ($Reports ? 60 : 0)) * @($Scenario.states).Count + 10 * $shotCount
 }
 
 # The driver's numbers for state N (1-based): $null when the state was not observed (a field missing or unreadable).
@@ -160,10 +172,24 @@ function Format-TransportPlay([long]$Code) { switch ($Code) { 0 { 'stop' } 1 { '
 # PASS / FAIL / INCOMPLETE, or recorded for a state without expectations. INCOMPLETE: the device did not run the whole
 # window, REAPER does not report the transport, arm and monitoring the state asked for (the numbers would describe
 # another state), or the scenario has a feed (HasFeed), the track is armed and the feed played nothing in the window (a
-# silent input would prove nothing). Line: what was seen, then "; failed: ..." or "; no evidence: ...".
+# silent input would prove nothing). Line: what was seen, then "; failed: ..." or "; no evidence: ...". Shots: the
+# state's shots as Get-HarnessShotFacts lists them (Capture.psm1). How many were asked for comes from the state itself:
+# a shot not taken, or shots asked for and not listed, never hides anything else: PASS becomes INCOMPLETE, a FAIL stays
+# FAIL, and the line ends "; not taken: ...".
 function Test-HarnessTransportState {
-    param([Parameter(Mandatory)]$State, [AllowNull()]$Row, [switch]$HasFeed, $Readings = $null)
-    if ($null -eq $Row) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Line = "$($State.Name): not observed"; Problems = @('not observed') } }
+    param([Parameter(Mandatory)]$State, [AllowNull()]$Row, [switch]$HasFeed, $Readings = $null, $Shots = $null)
+    $asked = @(Get-HarnessTransportCapture ($State.PSObject.Properties['Windows'] ? $State.Windows : $null)).Count
+    $listed = ($null -eq $Shots) ? @() : @($Shots)
+    $shotParts = [Collections.Generic.List[string]]::new()
+    $shotProblems = [Collections.Generic.List[string]]::new()
+    if ($asked -and ($null -eq $Shots -or $listed.Count -ne $asked)) { $shotParts.Add('shots were asked for and not reported'); $shotProblems.Add('shots were asked for and not reported') }
+    elseif ($asked) { foreach ($shot in $listed) { if (-not $shot['taken']) { $shotParts.Add("$($shot['name']) ($($shot['problem']))"); $shotProblems.Add("shot $($shot['name']) not taken: $($shot['problem'])") } } }
+    $finish = {
+        param([string]$Verdict, [string]$Said, [string[]]$Found)
+        if ($shotProblems.Count) { $Said += "; not taken: $($shotParts -join ', ')"; $Found = @($Found) + $shotProblems.ToArray(); if ($Verdict -cin 'PASS', 'recorded') { $Verdict = 'INCOMPLETE' } }
+        [pscustomobject]@{ Status = $Verdict; Line = $Said; Problems = @($Found) }
+    }
+    if ($null -eq $Row) { return & $finish 'INCOMPLETE' "$($State.Name): not observed" @('not observed') }
     $r = $Row
     $line = '{0}: blocks={1}/{2} silent={3} signal={4} left={5} right={6} same={7} transport={8} monitoring={9}' -f $State.Name, $r.blocks, $r.clock, $r.silent, $r.signal, $r.left, $r.right, $r.equal, (Format-TransportPlay $r.playstate), $r.monitoring
     $gap = [Collections.Generic.List[string]]::new()
@@ -181,6 +207,7 @@ function Test-HarnessTransportState {
     if ($w) {
         $line += " windows=$($r.win_open)/$($r.win_closed) of $($w.Count)"
         if ($hold -gt 0) { $line += " held=$shortest/${hold}ms" }
+        if ($asked) { $line += " shots=$(@($listed | Where-Object { $_ -and $_['taken'] }).Count)/$asked" }
         if ($null -eq $r.win_open -or $null -eq $r.win_closed) { $gap.Add('the driver reported no window counts') }
         if ($hold -gt 0 -and $null -eq $shortest) { $gap.Add('the driver reported no hold time') }
     }
@@ -189,7 +216,7 @@ function Test-HarnessTransportState {
     if ($rep -and $rep.Text) { $line += " report $($rep.Text)" }
     if ($criteria -and $criteria.get_Count() -and -not $rep) { $gap.Add('no report was read') }
     if ($rep) { foreach ($g in $rep.Gaps) { $gap.Add($g) } }
-    if ($gap.Count) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Line = "$line; no evidence: $($gap -join '; ')"; Problems = $gap.ToArray() } }
+    if ($gap.Count) { return & $finish 'INCOMPLETE' "$line; no evidence: $($gap -join '; ')" $gap.ToArray() }
     $x = $State.Expect
     $bad = [Collections.Generic.List[string]]::new()
     if ($w) {
@@ -200,7 +227,7 @@ function Test-HarnessTransportState {
         if (-not ($x -and $false -eq $x.Called) -and [Math]::Abs($r.blocks - $r.clock) -gt $w.MaxBlockDiff) { $bad.Add("the chain ran $($r.blocks) blocks and the device $($r.clock) while the window opened and closed, more than $($w.MaxBlockDiff) apart") }
     }
     if ($rep) { foreach ($b in $rep.Problems) { $bad.Add($b) } }
-    if ($null -eq $x -and -not $w) { return [pscustomobject]@{ Status = 'recorded'; Line = $line; Problems = @() } }
+    if ($null -eq $x -and -not $w) { return & $finish 'recorded' $line @() }
     if ($null -eq $x) { $x = [pscustomobject]@{ Called = $null; Input = $null; Channels = $null; Monitoring = $null } }
     $none = 'not called, so it has no input'
     if ($true -eq $x.Called -and $r.blocks -eq 0) { $bad.Add("not called (0 blocks while the device ran $($r.clock))") }
@@ -232,8 +259,8 @@ function Test-HarnessTransportState {
         }
     }
     if ($null -ne $x.Monitoring -and $r.monitoring -ne [int][bool]$x.Monitoring) { $bad.Add("monitoring in effect reads $($r.monitoring), expected $([int][bool]$x.Monitoring)") }
-    if ($bad.Count) { return [pscustomobject]@{ Status = 'FAIL'; Line = "$line; failed: $($bad -join '; ')"; Problems = $bad.ToArray() } }
-    [pscustomobject]@{ Status = 'PASS'; Line = $line; Problems = @() }
+    if ($bad.Count) { return & $finish 'FAIL' "$line; failed: $($bad -join '; ')" $bad.ToArray() }
+    & $finish 'PASS' $line @()
 }
 
-Export-ModuleMember -Function Read-HarnessFeeds, Get-HarnessTransportHoldMs, Get-HarnessTransportJob, Get-HarnessTransportTimeout, Read-HarnessTransportRow, Test-HarnessTransportSetup, Test-HarnessTransportState
+Export-ModuleMember -Function Read-HarnessFeeds, Get-HarnessTransportHoldMs, Get-HarnessTransportCapture, Get-HarnessTransportJob, Get-HarnessTransportTimeout, Read-HarnessTransportRow, Test-HarnessTransportSetup, Test-HarnessTransportState

@@ -48,6 +48,11 @@
 #       RenderSkip (n): the n-th render writes no file. TailLost: no item plays past the end of its file, as if REAPER
 #       ignored the longer item. Drift = @{ Plugin (bundle or JSFX ident); Step; Frame }: after that plugin's FX the
 #       sample at Frame of every channel is set to Step x the number of this render, so two renders differ there only
+#       Shots = @{ Window; Two; Status }: a transport job with windows.capture hands the driver's part of the shot
+#       handshake to the stand-in process (tests/FakeShots.ps1), and the real capture service of the host answers it.
+#       Window: the stand-in shows a window like REAPER's plugin window (Two: two of them); without the key, or without
+#       Window, it shows none. Status (shot name -> late, gone, none, noreq or missing): what the stand-in does instead
+#       of asking for that shot and waiting (see FakeShots.ps1)
 #   An item longer than its file plays the file again from its start (REAPER's "loop source"), unless it has LOOP 0;
 #   then the rest of the item is silent
 #   Get-FakeReaperLauncher / Get-FakeModuleSampler   script blocks for the context (Launcher, ModuleSampler)
@@ -536,6 +541,8 @@ function Add-FakeListing($job, $report, $made) {
 # field is the stand-in process (written once it is started). Spec.ReportMode: none (the plugin writes nothing), otherpid
 # (another process wrote it), text (not JSON), string (the first field is a string), toolarge, stale, busy.
 $script:PendingCopies = [Collections.Generic.List[object]]::new()
+$script:Shots = [Collections.Generic.List[object]]::new() # the shots of the last transport step (Spec.Shots)
+$script:ShotResult = ''
 $script:ReportValue = @{}
 function Write-FakeReports($job, $report, [int]$Reading) {
     $mode = [string]$script:Spec['ReportMode']
@@ -570,6 +577,7 @@ function Write-FakeReports($job, $report, [int]$Reading) {
 # Spec.Unread = a state name: no clean reading of that state's counts, so it reports none of them, like the driver.
 # A window held open (windows.hold) is held 3 ms longer; Spec.HoldShort: 1000 ms shorter (at least 0); Spec.HoldMissing:
 # no hold time is reported; Spec.HoldAlways: one is reported for a window without hold too, as by a driver that sent it.
+# Shots (windows.capture) are collected for the stand-in process, which asks for them and reports them (Spec.Shots).
 function Invoke-FakeTransport($job, $report) {
     $sr = [int](Get-FakeIniValue 'dummy_srate')
     $block = [int](Get-FakeIniValue 'dummy_blocksize')
@@ -622,6 +630,14 @@ function Invoke-FakeTransport($job, $report) {
             $hold = $st['windows'].Contains('hold') ? [int]$st['windows']['hold'] : 0
             $report.Add("st${n}_win_held=$($script:Spec['HoldShort'] ? [Math]::Max(0, $hold - 1000) : $hold + 3)")
         }
+        if ($st.Contains('windows') -and $st['windows'].Contains('capture')) {
+            $shotNo = 0
+            foreach ($asked in @($st['windows']['capture'])) {
+                $shotNo++
+                $script:Shots.Add([ordered]@{ n = $n; k = $shotNo; at = [int]$asked['at']; req = [string]$asked['req']; done = [string]$asked['done']; err = [string]$asked['err']
+                    name = [IO.Path]::GetFileNameWithoutExtension([string]$asked['req']) + '.png' })
+            }
+        }
         Write-FakeReports $job $report (2 * $n - 1)
         Write-FakeReports $job $report (2 * $n)
     }
@@ -630,10 +646,11 @@ function Invoke-FakeTransport($job, $report) {
     foreach ($kv in @("feed_handle=$handle", "feed_channels=$nch", "feed_rate=$rate")) { $report.Add($kv) }
 }
 
-# Runs one step; returns how the stand-in process should behave: quick, linger (alive long enough to be sampled) or
-# hang.
+# Runs one step; returns how the stand-in process should behave: quick, linger (alive long enough to be sampled), hang,
+# or shots (it does the shot handshake, then appends to the result and ends it).
 function Invoke-FakeStep([string]$JobFile) {
     $job = ConvertFrom-FakeLua ([IO.File]::ReadAllText($JobFile))
+    $script:Shots.Clear()
     if ($script:Spec.ContainsKey('CopiesAtStart') -and $job.Contains('reports')) {
         $script:Spec.CopiesAtStart.Add(@(foreach ($r in @($job['reports'])) { Get-ChildItem -LiteralPath (Split-Path $r['copy']) -Filter "$(Split-Path $r['copy'] -Leaf)*.json" -File }).Count)
     }
@@ -677,6 +694,11 @@ function Invoke-FakeStep([string]$JobFile) {
         }
         'hang' { return 'hang' }
         default { $report.Add("error=no such step: $($job['step'])") }
+    }
+    if ($script:Shots.Count) {
+        $script:ShotResult = [string]$job['result']
+        [IO.File]::WriteAllText($job['result'], ($report -join "`n") + "`n")
+        return 'shots'
     }
     [IO.File]::WriteAllText($job['result'], (($report + 'done=1') -join "`n") + "`n")
     $behave
@@ -742,14 +764,22 @@ function Invoke-FakeLaunch($psi) {
     $late = $rendering ? (Write-FakeProbe $psi) : ''
     $psi.FileName = $script:Spec.Pwsh
     $psi.ArgumentList.Clear()
-    $command = @{ quick = 'exit 0'; linger = 'Start-Sleep -Milliseconds 1500'; hang = 'Start-Sleep -Seconds 60' }[$behave]
+    $command = @{ quick = 'exit 0'; linger = 'Start-Sleep -Milliseconds 1500'; hang = 'Start-Sleep -Seconds 60'; shots = '' }[$behave]
     if ($late) {
         # The stand-in writes final.json (and a .tmp) last, right before it exits: the text and the place travel in its environment
         $psi.Environment['FAKE_PROBE_DIR'] = [string]$psi.Environment[$script:Spec.Probe.Out]
         $psi.Environment['FAKE_PROBE_FINAL'] = $late
         $command = 'Start-Sleep -Milliseconds 400; ' + ($script:Spec.Probe['LateTmp'] ? "[IO.File]::WriteAllText((Join-Path `$env:FAKE_PROBE_DIR 'final.json.4242.tmp'), '{}'); " : '') + "[IO.File]::WriteAllText((Join-Path `$env:FAKE_PROBE_DIR 'final.json'), `$env:FAKE_PROBE_FINAL); exit 0"
     }
-    foreach ($part in '-NoProfile', '-NonInteractive', '-Command', $command) { $psi.ArgumentList.Add($part) }
+    $how = @('-Command', $command)
+    if ($behave -ceq 'shots') {
+        $shotSpec = $script:Spec['Shots'] ?? @{}
+        $psi.Environment['FAKE_SHOTS'] = ConvertTo-Json -Compress -Depth 6 -InputObject ([ordered]@{
+                result = $script:ShotResult; window = [bool]$shotSpec['Window']; two = [bool]$shotSpec['Two']; status = ($shotSpec['Status'] ?? @{}); shots = @($script:Shots)
+            })
+        $how = @('-File', (Join-Path $PSScriptRoot 'FakeShots.ps1'))
+    }
+    foreach ($part in @('-NoProfile', '-NonInteractive') + $how) { $psi.ArgumentList.Add($part) }
     $proc = [Diagnostics.Process]::Start($psi)
     foreach ($c in $script:PendingCopies) { [IO.File]::WriteAllText($c.File, [IO.File]::ReadAllText($c.File).Replace('__PID__', "$($proc.Id + $c.Shift)")) }
     $script:PendingCopies.Clear()

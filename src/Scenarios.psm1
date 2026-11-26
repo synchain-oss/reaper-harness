@@ -29,6 +29,7 @@ Import-Module (Join-Path $PSScriptRoot 'Rpp.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Wav.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Config.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Probe.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Capture.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Plugins.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Transport.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Report.psm1') -ErrorAction Stop
@@ -109,7 +110,8 @@ function New-HarnessContext {
         ReportEnvNames = @(Get-HarnessPluginEnvNames $Config -OnlyReports) # held to the released deny list at launch
         ProbeFiles = @{} # probe file key -> the file checked before the start (Read-HarnessProbeFiles)
         ProbeRuns = @{} # scenario id -> @{ From }: its probe run was made, after From processes had been started
-        Dirs = [Collections.Generic.List[string]]::new() # probe directories made in the work directory
+        Dirs = [Collections.Generic.List[string]]::new() # probe and shot directories made in the work directory
+        CaptureLeft = [Collections.Generic.List[string]]::new() # shot directories whose capture service did not stop in time, or whose host threw
         StillRunning = $null # set when the watchdog could not end a process: Pid, Label, Lock
         Launcher = $null; ModuleSampler = $null; Stopper = $null # self-test only
         Api = $null # filled in below
@@ -202,11 +204,39 @@ function Test-HarnessLaunchEnvironment([hashtable]$LaunchEnv, [string]$Work, [st
     foreach ($k in $LaunchEnv.get_Keys()) {
         $varName = [string]$k
         if ($varName -cne 'REAPER_HARNESS_JOB') { $why = Test-HarnessReportEnvName $varName -What 'the harness' -Strict:($varName -cnotin $ReportNames); if ($why) { return $why } }
-        $v = [string]$LaunchEnv[$k]
-        if (-not [IO.Path]::IsPathFullyQualified($v)) { return "the value of $varName is not a full path" }
-        $full = [IO.Path]::GetFullPath($v).TrimEnd('\', '/')
-        if (-not (Test-HarnessUnder $full $root) -or $full -ieq $root) { return "the value of $varName is not a path inside the work directory" }
+        $where = Get-HarnessWorkPathProblem ([string]$LaunchEnv[$k]) $root
+        if ($where) { return "the value of $varName is $where" }
     }
+    $null
+}
+
+# What keeps a value from being a full path strictly inside the work directory (Inside: its full path, no separator at
+# the end), or ''. Pure. The values of the environment and the shot files of a launch are held to it.
+function Get-HarnessWorkPathProblem([string]$Value, [string]$Inside) {
+    if (-not [IO.Path]::IsPathFullyQualified($Value)) { return 'not a full path' }
+    $full = [IO.Path]::GetFullPath($Value).TrimEnd('\', '/')
+    if (-not (Test-HarnessUnder $full $Inside) -or $full -ieq $Inside) { return 'not a path inside the work directory' }
+    ''
+}
+
+# The shot files of a launch (Captures: entries of a capture plan, Capture.psm1), whoever asks (an extension too):
+# every entry has Req, Png, Done and Err, each a full path strictly inside the work directory, no two the same, all in
+# one directory. The first problem, or $null. Pure.
+function Test-HarnessLaunchCaptures([object[]]$Captures, [string]$Work) {
+    $root = [IO.Path]::GetFullPath($Work).TrimEnd('\', '/')
+    $named = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $parents = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($c in $Captures) {
+        foreach ($part in 'Req', 'Png', 'Done', 'Err') {
+            $given = ($c -and $c.PSObject.Properties[$part]) ? [string]$c.$part : ''
+            if (-not $given) { return 'a shot lacks one of its files' }
+            if (Get-HarnessWorkPathProblem $given $root) { return 'a shot file is not a path inside the work directory' }
+            $given = [IO.Path]::GetFullPath($given)
+            if (-not $named.Add($given)) { return 'two shot files have the same path' }
+            $null = $parents.Add([IO.Path]::GetDirectoryName($given))
+        }
+    }
+    if ($parents.Count -gt 1) { return 'the shot files are not all in one directory' }
     $null
 }
 
@@ -215,6 +245,13 @@ function Invoke-HarnessLaunchOnce {
     # Before anything is taken, so nothing has to be released; the scenario is INCOMPLETE through its caller's catch
     $why = Test-HarnessLaunchEnvironment ($HostArgs['Environment'] ?? @{}) $Ctx.Work @($Ctx['ReportEnvNames'] | Where-Object { $_ })
     if ($why) { throw "REAPER was not started: $why" }
+    # The shot files likewise; the capture service is built here too, so a failure leaves nothing to release
+    $shotFiles = @($HostArgs['Captures'] | Where-Object { $_ })
+    $why = Test-HarnessLaunchCaptures $shotFiles $Ctx.Work
+    if ($why) { throw "REAPER was not started: $why" }
+    if ($shotFiles.Count) { Initialize-HarnessCapture }
+    # All the launch's shot files are in one directory (Test-HarnessLaunchCaptures sees to that)
+    $shotDir = $shotFiles.Count ? [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$shotFiles[0].Png)) : $null
     $none = { param($s) [pscustomobject]@{ Status = $s; ExitCode = $null; Seconds = 0; Pid = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{}; SampleLost = @(); Modules = @{}; ModuleScans = 0; PluginModules = @(); StillRunning = $false } }
     if ($Ctx.StillRunning) { return & $none 'Blocked' }
     if (Get-HarnessSkipMarkerHit $Ctx.SkipMarkers) { return & $none 'SkipMarker' }
@@ -236,8 +273,12 @@ function Invoke-HarnessLaunchOnce {
         if ($Ctx.Launcher) { $extra.Launcher = $Ctx.Launcher }
         if ($Ctx.ModuleSampler) { $extra.ModuleSampler = $Ctx.ModuleSampler }
         if ($Ctx.Stopper) { $extra.Stopper = $Ctx.Stopper }
-        $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work -Lock $lock @HostArgs @extra
+        # A capture service that did not stop may still write: collection reads nothing from its directory. A host that
+        # threw counts as one: whether its service stopped is not known
+        try { $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work -Lock $lock @HostArgs @extra }
+        catch { if ($shotDir -and $null -ne $Ctx['CaptureLeft']) { $Ctx.CaptureLeft.Add($shotDir) }; throw }
         $Ctx.LaunchLog.Add([pscustomobject]@{ Label = $Label; Status = $Run.Status; Modules = $Run.Modules; PluginModules = @($Run.PluginModules) })
+        if ($shotDir -and $null -ne $Ctx['CaptureLeft'] -and $Run.PSObject.Properties['CaptureStopped'] -and $false -eq $Run.CaptureStopped) { $Ctx.CaptureLeft.Add($shotDir) }
         if ($Run.StillRunning) {
             $keepLock = $true
             $script:KeptLocks.Add($lock)
@@ -386,11 +427,13 @@ function Invoke-HarnessRender($Ctx, [string]$Project, [string]$Wav, [string]$Lab
 # (Get-HarnessReportCopies), deleted before the start and before a retry; the caller deletes them once read, and this
 # function when the launch throws (then nobody reads them). Outputs: further files the step writes, for the retry after
 # a licence reminder. Label: what the launch is called in Ctx.LaunchLog and Ctx.Retries (default: Step). ProbeEnv: as for
-# Invoke-HarnessRender (never deleted before the start: the copy is the plugin's input). Result: the key=value lines as
-# a hashtable.
+# Invoke-HarnessRender (never deleted before the start: the copy is the plugin's input). Captures: the shots of the
+# step's held windows (Capture.psm1), the harness's own; their directory is among Outputs. Result: the key=value lines
+# as a hashtable.
 function Invoke-HarnessLuaStep {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Step, [hashtable]$Job = @{}, [hashtable]$Watch = @{},
-          [double]$TimeoutSec = 0, [double]$KillAfterSec = 0, [hashtable]$ReportEnv = @{}, [string[]]$Copies = @(), [string[]]$Outputs = @(), [string]$Label = '', [hashtable]$ProbeEnv = @{})
+          [double]$TimeoutSec = 0, [double]$KillAfterSec = 0, [hashtable]$ReportEnv = @{}, [string[]]$Copies = @(), [string[]]$Outputs = @(), [string]$Label = '', [hashtable]$ProbeEnv = @{},
+          [object[]]$Captures = @())
     $jobFile = Join-Path $Ctx.Work "$Name.job.lua"
     $resultFile = Join-Path $Ctx.Work "$Name.result"
     $environment = @{ REAPER_HARNESS_JOB = $jobFile }
@@ -401,11 +444,13 @@ function Invoke-HarnessLuaStep {
     $full = @{ step = $Step; result = $resultFile; extensions = @($Ctx.LuaExtensions) }
     foreach ($k in $Job.get_Keys()) { $full[$k] = $Job[$k] }
     Write-HarnessText -Path $jobFile -Text (ConvertTo-HarnessLuaTable $full)
+    $launchHost = @{
+        ReaperArgs = @($Ctx.Driver); Environment = $environment; WatchFiles = $Watch
+        TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
+    }
+    if ($Captures.Count) { $launchHost.Captures = $Captures }
     try {
-        $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label ($Label ? $Label : $Step) -Outputs (@($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies + @($Job['saveAs'] | Where-Object { $_ }) + $Outputs + (Get-HarnessEnvDirs $ProbeEnv)) -HostArgs @{
-            ReaperArgs = @($Ctx.Driver); Environment = $environment; WatchFiles = $Watch
-            TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : [double]$Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
-        }
+        $Run = Invoke-HarnessLaunch -Ctx $Ctx -Label ($Label ? $Label : $Step) -Outputs (@($resultFile) + @($Watch.get_Values()) + @($ReportEnv.get_Values()) + $Copies + @($Job['saveAs'] | Where-Object { $_ }) + $Outputs + (Get-HarnessEnvDirs $ProbeEnv)) -HostArgs $launchHost
     } catch {
         # The error that ended the launch is what the caller gets, not one about a copy that could not be deleted
         foreach ($f in $Copies) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
@@ -824,7 +869,8 @@ function Invoke-HarnessInstancesScenario($Ctx, $s) {
 # setup that leaves no evidence is INCOMPLETE; otherwise the worst of the states, raised to INCOMPLETE (a FAIL stays
 # FAIL) when the latency of a plugin that only reports it was not read. The project has no items: what the
 # tested track gets comes through its input. The Lua step gets the time its windows need on top of luaTimeoutSec
-# (Get-HarnessTransportTimeout).
+# (Get-HarnessTransportTimeout). Shots of held windows come from the capture plan (Capture.psm1): their directory, the
+# job, the launch and each state's shots; a row that ends before its states are judged lists none of them.
 function Invoke-HarnessTransportScenario($Ctx, $s) {
     if (-not $Ctx.ToolJsfx.Count) { return New-HarnessOutcome INCOMPLETE 'the block probe and the feed JSFX were not installed' }
     $Layout = Get-HarnessLayout $Ctx $s.layout
@@ -838,14 +884,28 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
         $feed = [ordered]@{ source = ($s.feed.Wav ? $s.feed.Wav : 'test signal'); sha256 = ($s.feed.Wav ? $s.feed.Sha256 : $null); channels = $s.feed.Channels }
     }
     $recordDir = Join-Path $Ctx.Work "$($s.id)-record"
+    # The shot directory is made new and empty; the request and answer files are work files (a green round deletes them,
+    # then the directory), the images are moved by the suite or stay for inspection. REAPER's C runtime writes the
+    # requests, and the longest of these paths must stay within what it can write
+    $shotPlan = Get-HarnessCapturePlan -Scenario $s -Work $Ctx.Work
+    if ($shotPlan) {
+        $tooLong = @(foreach ($x in $shotPlan.Shots) { foreach ($shotFile in $x.Req, "$($x.Png).part", "$($x.Done).part", "$($x.Err).part") { if ($shotFile.Length -gt 259) { $shotFile } } })
+        if ($tooLong.Count) { return New-HarnessOutcome INCOMPLETE 'the shot files would have paths longer than 259 characters, too long for REAPER to write them' }
+        # Never -Force: a directory that is there already is not reused
+        try { $null = New-Item -ItemType Directory -Path $shotPlan.Dir }
+        catch { return New-HarnessOutcome INCOMPLETE ((Test-Path -LiteralPath $shotPlan.Dir) ? "the shot directory $(Split-Path -Leaf $shotPlan.Dir) is there already" : "the shot directory $(Split-Path -Leaf $shotPlan.Dir) could not be made: $($_.Exception.Message -replace '\s+', ' ')") }
+        $Ctx.Dirs.Add($shotPlan.Dir)
+        foreach ($x in $shotPlan.Shots) { $Ctx.Files.Add($x.Req); $Ctx.Files.Add($x.Done); $Ctx.Files.Add($x.Err) }
+    }
     $Reads = Get-HarnessParamReads $Layout
-    $Job = Get-HarnessTransportJob -Scenario $s -Layout $Layout -Tools @{ 'harness-block-probe' = $Ctx.ToolJsfx['harness-block-probe'].AddName; 'harness-feed' = $Ctx.ToolJsfx['harness-feed'].AddName } -RecordDir $recordDir
+    $Job = Get-HarnessTransportJob -Scenario $s -Layout $Layout -Tools @{ 'harness-block-probe' = $Ctx.ToolJsfx['harness-block-probe'].AddName; 'harness-feed' = $Ctx.ToolJsfx['harness-feed'].AddName } -RecordDir $recordDir -Capture $shotPlan
     $Job.project = $r.Project
     $Job.reads = ConvertTo-LuaReads $Reads
     $plan = Get-HarnessReportPlan -Plugins $Ctx.Config.Plugins -Layout $Layout -Work $Ctx.Work -Name $s.id
     $Job.reports = ConvertTo-HarnessReportJob $plan
     $lua = Invoke-HarnessLuaStep -Ctx $Ctx -Name $s.id -Step transport -Job $Job -TimeoutSec (Get-HarnessTransportTimeout -Scenario $s -LuaTimeoutSec ([double]$Ctx.Limits.luaTimeoutSec) -Reports:([bool]$plan.Count)) `
-        -ReportEnv (Get-HarnessReportEnvironment $plan) -Copies (Get-HarnessReportCopies $plan (2 * $s.states.Count))
+        -ReportEnv (Get-HarnessReportEnvironment $plan) -Copies (Get-HarnessReportCopies $plan (2 * $s.states.Count)) -Captures @($shotPlan ? $shotPlan.Shots : @()) -Outputs @($shotPlan ? $shotPlan.Dir : @())
+    $shotsStopped = ($lua.Run -and $lua.Run.PSObject.Properties['CaptureStopped']) ? $lua.Run.CaptureStopped : $null
     $taken = Read-HarnessReportReadings -Facts $lua.Result -Plan $plan -Count (2 * $s.states.Count) -ProcessId $lua.Run.Pid
     $recorded = @(Get-ChildItem -LiteralPath $recordDir -Recurse -File -Force -ErrorAction SilentlyContinue)
     if ($recorded.Count) { return New-HarnessOutcome FAIL "$($recorded.Count) file(s) appeared in the record directory of the project: something was recorded" }
@@ -869,9 +929,11 @@ function Invoke-HarnessTransportScenario($Ctx, $s) {
         $row = Read-HarnessTransportRow $f ($i + 1) -Held:((Get-HarnessTransportHoldMs $st.Windows) -gt 0)
         # Readings 2i+1 and 2i+2 of the reports were taken right before and after the state's window
         $readings = $plan.Count ? @{ Start = $taken[2 * $i]; End = $taken[2 * $i + 1] } : $null
-        $j = Test-HarnessTransportState -State $st -Row $row -HasFeed:($null -ne $s.feed) -Readings $readings
+        $stateShots = ($shotPlan -and @($shotPlan.Shots | Where-Object { $_.StateNo -eq $i + 1 }).Count) ? (Get-HarnessShotFacts -Plan $shotPlan -Facts $f -StateNo ($i + 1) -Stopped $shotsStopped) : $null
+        $j = Test-HarnessTransportState -State $st -Row $row -HasFeed:($null -ne $s.feed) -Readings $readings -Shots $stateShots
         $one = [ordered]@{ name = $st.Name; transport = $st.Transport; arm = $st.Arm; monitor = $st.Monitor; windowSamples = $st.Samples; status = $j.Status; problems = @($j.Problems) }
         if ($row) { foreach ($p in $row.PSObject.Properties) { if ($null -ne $p.Value) { $one[$p.Name] = $p.Value } } }
+        if ($null -ne $stateShots) { $one.shots = $stateShots }
         if ($readings) { $one.report = (Test-HarnessReportCriteria -Start $readings.Start -End $readings.End).Facts }
         $perState.Add($one)
         $j
@@ -941,4 +1003,4 @@ function Invoke-HarnessScenario {
 Export-ModuleMember -Function New-HarnessOutcome, Hide-HarnessPaths, Hide-HarnessFacts, New-HarnessContext, Set-HarnessAudioConfig, Invoke-HarnessLaunch, Get-HarnessHostFailure, Get-HarnessSignal,
     Get-HarnessLayout, Get-HarnessScenarioLayout, Get-HarnessPdcFacts, Get-HarnessRunFiles, Get-HarnessReferenceName, New-HarnessRun, Invoke-HarnessRender, Invoke-HarnessLuaStep, Get-HarnessParamReads, Test-HarnessParamValue, Test-HarnessFxReport, Get-HarnessReference,
     Get-HarnessScenarioKinds, Get-HarnessApi, Invoke-HarnessScenario, Get-HarnessSkipMarkerHit, Get-HarnessWorkrender, Test-HarnessStateProof, Invoke-HarnessCompare,
-    Test-HarnessHostReadback, Test-HarnessReopenFacts, Get-HarnessRunAllOnStop, Get-HarnessVstFullState, Get-HarnessRenderGap, New-HarnessComparisonFacts, Get-HarnessOutcomeFact, Test-HarnessLaunchEnvironment
+    Test-HarnessHostReadback, Test-HarnessReopenFacts, Get-HarnessRunAllOnStop, Get-HarnessVstFullState, Get-HarnessRenderGap, New-HarnessComparisonFacts, Get-HarnessOutcomeFact, Test-HarnessLaunchEnvironment, Test-HarnessLaunchCaptures

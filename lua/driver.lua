@@ -394,6 +394,8 @@ end
 -- without a clean reading has no _clock up to _fed_samples, which makes it a state that was not observed. A state with
 -- windows (fx, count) opens and closes that FX's floating window count times in its window: _win_open, _win_closed;
 -- with windows.hold (ms) each stays open that long, and _win_held is the shortest hold of the windows that opened.
+-- With windows.capture, per shot k: _shot<k> (done, err, late, gone or none), _shot<k>_held (the hold time at its
+-- request, ms) and _shot<k>_wall (the wall-clock time from when the window was first seen shown to its request, ms).
 -- With job.reports, reading 2n-1 of every plugin report is taken after the settle time and 2n after the window.
 function steps.transport()
     openAndWait(job.project)
@@ -496,22 +498,60 @@ function steps.transport()
         end
         return true
     end
+    -- Shots of a held window (src/Capture.psm1 answers them): w.capture lists { at = ms of the hold, req, done, err }.
+    -- In the first window of the state that opened, when the hold time reaches the next offset (never later than
+    -- w.hold) the driver writes that request and keeps turning the message loop, the window open, until the harness
+    -- has written the done or the err file, at most 10 s of wall-clock time (a limit only); only then comes the next.
+    -- got[k]: done, err, late (no answer in time) or gone (the window went away first); none for a shot never asked
+    -- for (the window did not open, or the request could not be written). at[k]: the hold time at the request in ms;
+    -- wall[k]: the wall-clock time from when the window was first seen shown to the request, in ms. shoot returns
+    -- whether a shot is pending or still to come.
+    local function exists(path)
+        local f = io.open(path, "rb")
+        if f then f:close() return true end
+        return false
+    end
+    local function shoot(cap, ms, w)
+        local s = cap.list[cap.k]
+        if not s then return false end
+        if cap.since then
+            if exists(s.done) then cap.got[cap.k] = "done"
+            elseif exists(s.err) then cap.got[cap.k] = "err"
+            elseif reaper.time_precise() - cap.since > 10 then cap.got[cap.k] = "late"
+            else return true end
+            cap.k, cap.since = cap.k + 1, nil
+            return cap.list[cap.k] ~= nil
+        end
+        if ms >= math.min(s.at, w.hold) then
+            local f = io.open(s.req, "w")
+            if not f then cap.k = cap.k + 1 return cap.list[cap.k] ~= nil end
+            f:write("1")
+            f:close()
+            local now = reaper.time_precise()
+            cap.at[cap.k], cap.wall[cap.k], cap.since = int(ms), int((now - cap.seen) * 1000), now
+        end
+        return true
+    end
     -- Opens and closes the floating window of FX w.fx of the tested track w.count times; each step is checked with
     -- TrackFX_GetFloatingWindow, and the editor gets ten turns of the message loop in between (a web view, for one,
     -- builds itself asynchronously). With w.hold (ms) a window stays open for ten turns and at least that much time of
     -- the message loop: wall-clock time, but a turn counts at most 100 ms as in readReports (a stalled main thread
     -- stalls the editor too). A window gone on its own ends its hold at once. The third result is the shortest hold of
-    -- the windows that opened, in ms (0 when none did).
+    -- the windows that opened, in ms (0 when none did). With w.capture the hold also runs on while a shot is pending
+    -- or still to come (shoot); the fourth result is what became of the shots, nil when no window opened.
     local function windows(w)
-        local opened, closed, held = 0, 0, nil
+        local opened, closed, held, cap = 0, 0, nil, nil
         local function shown() return reaper.TrackFX_GetFloatingWindow(tested, w.fx) ~= nil end
         for _ = 1, w.count do
             reaper.TrackFX_Show(tested, w.fx, 3)
             if until10(shown) then
                 opened = opened + 1
                 if w.hold then
+                    local shots = (opened == 1 and w.capture) and { list = w.capture, k = 1, at = {}, wall = {}, got = {}, seen = reaper.time_precise() } or nil
+                    local more = shots ~= nil
                     local turns, loop, last = 0, 0, reaper.time_precise()
-                    while (turns < 10 or loop * 1000 < w.hold) and shown() do
+                    while (turns < 10 or loop * 1000 < w.hold or more) and shown() do
+                        if shots then more = shoot(shots, loop * 1000, w) end
                         coroutine.yield()
                         noRecord()
                         turns = turns + 1
@@ -520,6 +560,13 @@ function steps.transport()
                         last = now
                     end
                     held = math.min(held or math.huge, loop * 1000)
+                    if shots then
+                        -- The window went away first: a pending shot whose answer is there already counts as
+                        -- answered; what is still pending or still to come is gone
+                        if shots.since then shoot(shots, 0, w) end
+                        for k = shots.k, #shots.list do shots.got[k] = "gone" end
+                        cap = shots
+                    end
                 else
                     for _ = 1, 10 do coroutine.yield() noRecord() end
                 end
@@ -530,7 +577,7 @@ function steps.transport()
             noRecord()
         end
         reaper.TrackFX_Show(tested, w.fx, 2)
-        return opened, closed, held or 0
+        return opened, closed, held or 0, cap
     end
     local settle = job.settle or int(((tonumber(after) or 4000) + 500) * job.sr / 1000)
     put("settle", settle)
@@ -545,10 +592,15 @@ function steps.transport()
         local c0, t0, f0 = snap(CLOCK), snap(TESTED), snap(FEED)
         local w0 = reaper.gmem_read(CLOCK + 1)
         if st.windows then
-            local o, c, h = windows(st.windows)
+            local o, c, h, cap = windows(st.windows)
             put(p .. "win_open", o)
             put(p .. "win_closed", c)
             if st.windows.hold then put(p .. "win_held", int(h)) end
+            for k in ipairs(st.windows.capture or {}) do
+                put(p .. "shot" .. k, cap and cap.got[k] or "none")
+                if cap and cap.at[k] then put(p .. "shot" .. k .. "_held", cap.at[k]) end
+                if cap and cap.wall[k] then put(p .. "shot" .. k .. "_wall", cap.wall[k]) end
+            end
         end
         local ran = reaper.gmem_read(CLOCK + 1) - w0
         if ran < st.samples then waitSamples(st.samples - ran) end

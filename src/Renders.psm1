@@ -23,6 +23,16 @@
 #                               claimed as for keeping). Never throws; returns Status, Detail (a collection problem is
 #                               INCOMPLETE, FAIL stays FAIL) and Facts ($null when it stopped on an unexpected error).
 #   ConvertTo-HarnessProbeRowFacts  those facts as the row has them: dir relative to the result directory, masked
+#   Save-HarnessShots           after a transport scenario with shots returned (every launch of it has ended), with or
+#                               without keep: each shot taken (a plain file of at most 64 MiB) moves to
+#                               run<k>/<id>.shots/<name>, and its facts get the path (relative to the result directory),
+#                               bytes and sha256 of the moved file. A launch that failed as a whole (no state judged)
+#                               still has every image whose answer checks out moved, listed in the facts' shots. Nothing
+#                               from a directory this round did not make, nor through a link; nothing is read from one
+#                               whose capture service did not stop in time (Ctx.CaptureLeft) or that was replaced by a
+#                               link (INCOMPLETE, the facts as given). Never throws; $null for a
+#                               scenario without shots or nothing to say, else Status, Detail (a shot not kept is
+#                               INCOMPLETE, FAIL stays FAIL) and Seen (the outcome's facts with the shots)
 #   Move-HarnessKeptFile        one file, only to a place under the result directory, never over another (pure on files);
 #                               -Retry: a move that met a sharing violation is tried again (Invoke-HarnessHeldRetry)
 #   Get-HarnessKeptFileFacts    a kept file: path, sha256, frames, channels, sampleRate, format, peakDb, nanCount, infCount
@@ -42,6 +52,7 @@ Import-Module (Join-Path $PSScriptRoot 'Plugins.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Sources.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Probe.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Capture.psm1') -ErrorAction Stop
 
 $script:ToolVersion = '0.1.0'
 $script:Hex40 = '^[0-9a-f]{40}$'
@@ -377,5 +388,79 @@ function ConvertTo-HarnessProbeRowFacts($Probe, [string]$Rel) {
     Hide-HarnessFacts $copy
 }
 
+function Save-HarnessShots {
+    param([Parameter(Mandatory)]$Keep, [Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario, [int]$Round = 1, [Parameter(Mandatory)][string]$Status, [string]$Detail = '', $Seen = $null)
+    $s = $Scenario
+    try {
+        $shotPlan = Get-HarnessCapturePlan -Scenario $s -Work $Ctx.Work
+        if ($null -eq $shotPlan -or -not $Ctx.Dirs.Contains($shotPlan.Dir)) { return $null }
+        $leaf = Split-Path -Leaf $shotPlan.Dir
+        # The directory itself is never followed: $null when it is not there, else whether it is a link, no directory,
+        # or a directory that resolves elsewhere
+        $swapped = {
+            $attr = try { [IO.File]::GetAttributes($shotPlan.Dir) } catch { $null }
+            ($null -eq $attr) ? $null : [bool](($attr -band [IO.FileAttributes]::ReparsePoint) -or -not ($attr -band [IO.FileAttributes]::Directory) -or
+                (Resolve-HarnessRealPath $shotPlan.Dir) -ine [IO.Path]::Join((Resolve-HarnessRealPath $Ctx.Work), $leaf))
+        }
+        # The shots the states list, or for a launch that failed as a whole what the service answered: every image whose
+        # answer reads and whose header matches it (read below, only once the directory may be read)
+        $judged = @((($Seen -is [Collections.IDictionary]) -and $Seen.Contains('states')) ? @($Seen['states'] | Where-Object { $_ -is [Collections.IDictionary] -and $_.Contains('shots') }) : @())
+        $moving = @(foreach ($st in $judged) { foreach ($e in @($st['shots'])) { if ($e['taken']) { $e } } })
+        # A shot taken and not moved says why in its own entry too
+        $unkept = { param([string]$Reason) foreach ($e in $moving) { if (-not $e['path'] -and -not $e['problem']) { $e['problem'] = "could not be kept: $Reason" } } }
+        # Before anything is read or moved: a service that did not stop may still write there, a link leads elsewhere
+        $early = if (@($Ctx['CaptureLeft']) -icontains $shotPlan.Dir) { 'the capture service did not stop in time' }
+        elseif (& $swapped) { 'the shot directory was replaced by a link or junction' }
+        if ($early) { & $unkept $early; return [pscustomobject]@{ Status = (Get-HarnessWorse $Status 'INCOMPLETE'); Detail = "$Detail; shots: nothing collected: $early"; Seen = $Seen } }
+        $byName = @{}
+        foreach ($x in $shotPlan.Shots) { $byName[$x.Name] = $x }
+        if (-not $judged.Count) {
+            $moving = @(foreach ($x in $shotPlan.Shots) {
+                    $reply = Read-HarnessShotAnswer -Path $x.Done -Kind done
+                    if (-not ($reply -and (Test-HarnessShotImage -Path $x.Png -Answer $reply))) { continue }
+                    $e = [ordered]@{ state = $x.State }
+                    $fact = New-HarnessShotFact $x
+                    foreach ($k in $fact.get_Keys()) { $e[$k] = $fact[$k] }
+                    $e.taken = $true; $e.width = $reply.Width; $e.height = $reply.Height; $e.view = $reply.View; $e.dpi = $reply.Dpi
+                    $e
+                })
+            if (-not $moving.Count) { return $null }
+            if ($null -eq $Seen) { $Seen = [ordered]@{} }
+            $Seen['shots'] = $moving
+        }
+        # The directory is looked at once more just before the move
+        $now = $moving.Count ? (& $swapped) : $false
+        $stop = if (-not $moving.Count) { $null }
+        elseif ($Ctx.StillRunning) { 'nothing collected: a REAPER of this round could not be ended' }
+        elseif ($null -eq $now) { 'nothing collected: the shot directory is not there any more' }
+        elseif ($now) { 'nothing collected: the shot directory was replaced by a link or junction' }
+        else { $null }
+        $notKept = [Collections.Generic.List[string]]::new()
+        $refused = ($moving.Count -and -not $stop) ? (Get-HarnessKeepClaim $Keep) : ''
+        if ($refused) { $notKept.Add($refused); & $unkept $refused }
+        if ($stop) { & $unkept ($stop -creplace '^nothing collected: ', '') }
+        foreach ($e in @($moving | Where-Object { -not $stop -and -not $refused })) {
+            $x = $byName[$e['name']]
+            $dest = Join-Path $Keep.Dir "run$Round/$($s.id).shots/$($x.Name)"
+            $info = [IO.FileInfo]::new($x.Png)
+            $why = if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { "$($x.Name) is not a plain file" }
+            elseif ($info.Length -gt 64MB) { "$($x.Name) is larger than $(64MB) bytes" }
+            else { Move-HarnessKeptFile -From $x.Png -To $dest -ResultDir $Keep.ResultDir -Retry }
+            if ($why) { $e['problem'] = "could not be kept: $why"; $notKept.Add($why); continue }
+            $e['path'] = "$($Keep.Rel)/run$Round/$($s.id).shots/$($x.Name)"
+            try { $e['sha256'] = Invoke-HarnessHeldRetry { Get-HarnessSha256 $dest }; $e['bytes'] = [IO.FileInfo]::new($dest).Length }
+            catch {
+                $e['sha256'] = $null; $e['problem'] = "kept, but it could not be read: $($_.Exception.Message -replace '\s+', ' ')"
+                $notKept.Add("$($x.Name) was kept, but it could not be read")
+            }
+        }
+        if ($stop) { $Status = Get-HarnessWorse $Status 'INCOMPLETE'; $Detail += "; shots: $stop" }
+        if ($notKept.Count) { $Status = Get-HarnessWorse $Status 'INCOMPLETE'; $Detail += "; shots: not kept: $($notKept -join '; ')" }
+        [pscustomobject]@{ Status = $Status; Detail = $Detail; Seen = $Seen }
+    } catch {
+        [pscustomobject]@{ Status = (Get-HarnessWorse $Status 'INCOMPLETE'); Detail = "$Detail; shots: collection stopped on an unexpected error: $($_.Exception.Message -replace '\s+', ' ')"; Seen = $Seen }
+    }
+}
+
 Export-ModuleMember -Function Get-HarnessToolVersion, Get-HarnessGitCommit, New-HarnessKeep, Move-HarnessKeptFile, Get-HarnessKeptFileFacts, Get-HarnessFxFacts, Get-HarnessSourceFacts,
-    Save-HarnessKeptRender, ConvertTo-HarnessKeptFacts, Get-HarnessKeepClaim, Save-HarnessProbeFiles, ConvertTo-HarnessProbeRowFacts
+    Save-HarnessKeptRender, ConvertTo-HarnessKeptFacts, Get-HarnessKeepClaim, Save-HarnessProbeFiles, ConvertTo-HarnessProbeRowFacts, Save-HarnessShots

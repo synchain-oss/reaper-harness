@@ -152,6 +152,7 @@ function New-HarnessSpec {
                         plugin       = (SStr $script:IdPattern -Doc 'a plugin on the tested track (once)')
                         count        = (SInt 1 1000 -Doc 'open and close its floating window this many times during the window')
                         holdMs       = (SInt 0 60000 -Doc 'keep each window open at least this long before it is closed, in ms of message-loop time; default 0: ten turns of the message loop. count x holdMs is at most 600000')
+                        capture      = (SArr (SInt 0 60000) -Min 1 -Max 8 -Unique -Doc 'shots of the held window, in ms of the hold: each a PNG of its client area, taken when the hold time reaches it (rising, at most holdMs; needs holdMs above 0); in the first window of the state that opened; at most 32 in a scenario; not in a negative case; never judged')
                         maxBlockDiff = (SInt 0 1000000 -Doc 'the most the tested chain''s blocks may differ from the device''s in the window, default 4')
                     }) @('plugin', 'count'))
             expect    = (SRef transportExpect)
@@ -967,7 +968,7 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
             $f = Get-Or $Raw 'feed' $null
             # File, Sha256 and FileChannels are filled in by Read-HarnessFeeds (Transport.psm1), which reads the file
             $o.feed = ($null -eq $f) ? $null : [pscustomobject]@{ Wav = [string](Get-Or $f 'wav' ''); Channels = [string](Get-Or $f 'channels' 'different'); File = ''; Sha256 = ''; FileChannels = 2 }
-            $o.states = ConvertTo-TransportStates @($Raw['states']) $Path $o.sr $o.block $Problems -PluginTable $PluginTable -UsedIn $layout -TestedTrack $o.track
+            $o.states = ConvertTo-TransportStates @($Raw['states']) $Path $o.sr $o.block $Problems -PluginTable $PluginTable -UsedIn $layout -TestedTrack $o.track -Negative:$Negative
         }
     }
     [pscustomobject]$o
@@ -976,10 +977,12 @@ function ConvertTo-Scenario($Raw, [string]$Path, [bool]$Negative, $Layouts, $Plu
 # The states of a transport scenario: names unique, at least one with an expectation (a scenario that judges nothing
 # would be an empty PASS), no expectation that contradicts itself, every window at least 4 blocks long. Windows: a plugin
 # that is on the tested track (TestedTrack of the layout UsedIn) exactly once; Fx is its index in that track's FX. At
-# most ten minutes of holding windows open in one state: a digit too many would keep REAPER busy for hours.
-function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int]$DeviceBlock, $Problems, $PluginTable = @{}, $UsedIn = $null, [string]$TestedTrack = '') {
+# most ten minutes of holding windows open in one state: a digit too many would keep REAPER busy for hours. Shots
+# (windows.capture) need a hold, rise and end within it, are not taken in a negative case, and number at most 32.
+function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int]$DeviceBlock, $Problems, $PluginTable = @{}, $UsedIn = $null, [string]$TestedTrack = '', [switch]$Negative) {
     $seen = @{}
     $judged = 0
+    $shotCount = 0
     $trackFx = @($UsedIn ? @($UsedIn.Tracks | Where-Object { $_.Name -ceq $TestedTrack } | Select-Object -First 1 | ForEach-Object { $_.Fx }) : @())
     $out = for ($i = 0; $i -lt $Raw.Count; $i++) {
         $r = $Raw[$i]
@@ -995,9 +998,21 @@ function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int
             $judged++
             $at = @(for ($k = 0; $k -lt $trackFx.Count; $k++) { if ($trackFx[$k].Plugin -ceq $w['plugin']) { $k } })
             if ($UsedIn -and $at.Count -ne 1) { $Problems.Add("$p.windows.plugin: '$($w['plugin'])' is on the tested track $($at.Count) times; its window needs exactly one") }
-            $win = [pscustomobject]@{ Plugin = [string]$w['plugin']; Count = [int]$w['count']; HoldMs = [int](Get-Or $w 'holdMs' 0); MaxBlockDiff = [int](Get-Or $w 'maxBlockDiff' 4); Fx = ($at.Count ? $at[0] : -1) }
+            $win = [pscustomobject]@{ Plugin = [string]$w['plugin']; Count = [int]$w['count']; HoldMs = [int](Get-Or $w 'holdMs' 0); MaxBlockDiff = [int](Get-Or $w 'maxBlockDiff' 4); Fx = ($at.Count ? $at[0] : -1)
+                Capture = [int[]]@(Get-Or $w 'capture' @() | ForEach-Object { [int]$_ }) }
             $holding = $win.Count * $win.HoldMs
             if ($holding -gt 600000) { $Problems.Add("$p.windows: $($win.Count) windows held $($win.HoldMs) ms each is $holding ms of holding, more than 600000 in one state") }
+            # One problem a state at most: the first that applies
+            $offsets = $win.Capture
+            $shotCount += $offsets.Count
+            $falls = @(for ($k = 1; $k -lt $offsets.Count; $k++) { if ($offsets[$k] -lt $offsets[$k - 1]) { $k } })
+            $shotWhy = if (-not $offsets.Count) { '' }
+            elseif ($Negative) { 'no shots in a negative case' }
+            elseif ($win.HoldMs -le 0) { 'shots are taken while the window is held open: it needs holdMs above 0' }
+            elseif ($falls.Count) { "the offsets must rise: $($offsets[$falls[0]]) comes after $($offsets[$falls[0] - 1])" }
+            elseif ($offsets[-1] -gt $win.HoldMs) { "$($offsets[-1]) ms is after the hold of $($win.HoldMs) ms" }
+            else { '' }
+            if ($shotWhy) { $Problems.Add("$p.windows.capture: $shotWhy") }
         }
         $e = Get-Or $r 'expect' $null
         $x = $null
@@ -1012,6 +1027,7 @@ function ConvertTo-TransportStates([object[]]$Raw, [string]$Path, [int]$Sr, [int
         [pscustomobject]@{ Name = $stateName; Transport = [string]$r['transport']; Arm = [bool]$r['arm']; Monitor = [string]$r['monitor']; Samples = $samples; Windows = $win; Report = $crit; Expect = $x }
     }
     if ($Raw.Count -and $judged -eq 0) { $Problems.Add("$Path.states: no state has an expect or windows: the scenario would judge nothing") }
+    if ($shotCount -gt 32) { $Problems.Add("$Path.states: $shotCount shots in one scenario, more than 32") }
     , @($out)
 }
 

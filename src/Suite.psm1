@@ -502,6 +502,15 @@ function Invoke-HarnessSuite {
                         if (-not ($row.Contains('facts') -and $row.facts -is [System.Collections.IDictionary])) { $row.facts = [ordered]@{} }
                         $row.facts['probe'] = ConvertTo-HarnessProbeRowFacts $probeDone.Facts $keeper.Rel
                     }
+                    # The shots of held windows move out of the work directory once the launch has ended, whatever its outcome
+                    if (-not $gap -and $s.kind -ceq 'transport') {
+                        $shotDone = Save-HarnessShots -Keep $keeper -Ctx $ctx -Scenario $s -Round $k -Status $o.Status -Detail $o.Detail -Seen ($o.PSObject.Properties['Facts'] ? $o.Facts : $null)
+                        if ($shotDone) {
+                            $shown = $shotDone
+                            $row.status = $shotDone.Status; $row.detail = Hide-HarnessPaths $shotDone.Detail
+                            if ($null -ne $shotDone.Seen) { $row.facts = Hide-HarnessFacts $shotDone.Seen }
+                        }
+                    }
                     if ($s.kind -ceq 'render' -and $s.keep) {
                         # Whatever the verdict: its render and stems move out of the work directory, a line goes into the manifest
                         $kept = Save-HarnessKeptRender -Keep $keeper -Ctx $ctx -Scenario $s -Round $k -Status $shown.Status -Detail $shown.Detail -Comparison (Get-HarnessOutcomeFact $o 'comparison') -Tail (Get-HarnessOutcomeFact $o 'tail') `
@@ -533,7 +542,7 @@ function Invoke-HarnessSuite {
                 if (-not $KeepWork -and @($rows | Where-Object { $_.status -ne 'PASS' }).Count -eq 0 -and $mods.Status -eq 'PASS') {
                     # All green: delete this round's files one by one (never recursively); otherwise keep them for inspection
                     foreach ($f in $ctx.Files) { if (Test-Path -LiteralPath $f -PathType Leaf) { Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue } }
-                    # Every probe directory is empty by now: anything left in one made its row INCOMPLETE
+                    # Every probe and shot directory is empty by now: anything left in one made its row INCOMPLETE
                     foreach ($probeDir in $ctx.Dirs) { $null = Remove-HarnessEmptyDirectory -Path $probeDir }
                 }
             } catch {
