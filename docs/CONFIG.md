@@ -763,6 +763,18 @@ stays FAIL. Nothing in an image is judged: a black or an unfinished image is a t
 
 A configuration without `capture` is as before, and never loads the code that takes shots.
 
+Measured on REAPER 7.82 (x64, Dummy Audio 48 kHz / 512 samples, 96 DPI, the private configuration directory) with the same
+test build ([validation record](validation/2026-11-25-window-capture.md)): the three shots of the state above were PNGs of
+1120 x 727 pixels at 96 DPI with `view` at 0, 27, 1120 x 700, so REAPER's row of controls was 27 pixels high and the view
+reached the bottom of the image; the shot at 300 ms showed the view not drawn yet, the ones at 2000 and 8000 ms the editor
+complete, and all three were taken (` shots=3/3`), their `bytes` and `sha256` those of the moved files. A shot's `held`
+read 2 to 13 ms past its `at` (24 and 95 ms for the one at 300 ms, while the editor was still starting), and its `wallMs`
+73 to 84 ms more than its `held`, the same for every shot of a run. In a scenario with a warm-up state, a state of three
+windows held 5 s with `capture` `[4000]` gave one image, from its first window, and `windows=3/3 of 3`. Three shots made the
+row of a 10 s hold 0.1 to 0.5 s longer (21.4 and 21.7 s, against 21.2 and 21.3 s without `capture`), the hold did not get
+longer, and the chain and the device ran the same number of blocks in every state; after a green round the work directory
+had no shot directory, and with `-KeepWork` it kept the request and answer files of the shots but no image.
+
 ```json
 { "id": "monitor-states", "kind": "transport", "layout": "vocal", "feed": { "channels": "different" },
   "states": [
