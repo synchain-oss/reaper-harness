@@ -147,9 +147,12 @@ public sealed class HarnessCapture
         try { Put(err[i], Encoding.ASCII.GetBytes("reason=" + reason + "\n")); } catch (Exception) { }
     }
 
-    // Every file goes through <file>.part, renamed once complete; never over a file that is there
+    // Every file goes through <file>.part, renamed once complete; never over a file that is there. Its directory is
+    // looked at again right before: one replaced by a link or junction since Shoot looked gets no file (the throw makes
+    // the answer failed IOException, whose err write then throws too: no answer)
     static void Put(string path, byte[] data)
     {
+        if ((File.GetAttributes(Path.GetDirectoryName(path)) & FileAttributes.ReparsePoint) != 0) throw new IOException("the shot directory is a link or junction");
         string part = path + ".part";
         using (var fs = new FileStream(part, FileMode.CreateNew, FileAccess.Write, FileShare.None)) fs.Write(data, 0, data.Length);
         File.Move(part, path, false);

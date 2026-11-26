@@ -4649,12 +4649,15 @@ function Get-WiringCases([string]$RepoRoot) {
     # A capture service that did not stop in time may still write: the launch names its shot directory for collection,
     # which then reads nothing there; only then, and only once the host has returned. Every round's context has the list
     $onceFlat = $onceAst.Extent.Text -replace '\s+', ' '
-    $leftAdd = 'if ($shotFiles.Count -and $null -ne $Ctx[''CaptureLeft''] -and $Run.PSObject.Properties[''CaptureStopped''] -and $false -eq $Run.CaptureStopped) {' +
-        ' $Ctx.CaptureLeft.Add([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$shotFiles[0].Png))) }'
+    $leftAdd = 'if ($shotDir -and $null -ne $Ctx[''CaptureLeft''] -and $Run.PSObject.Properties[''CaptureStopped''] -and $false -eq $Run.CaptureStopped) { $Ctx.CaptureLeft.Add($shotDir) }'
+    # A host that throws counts as a service that did not stop, and the error goes on to the caller
+    $leftThrow = 'try { $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work -Lock $lock @HostArgs @extra } catch { if ($shotDir -and $null -ne $Ctx[''CaptureLeft'']) { $Ctx.CaptureLeft.Add($shotDir) }; throw }'
+    $shotDirSet = '$shotDir = $shotFiles.Count ? [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$shotFiles[0].Png)) : $null'
     $ctxText = $onceAst.Parent.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'New-HarnessContext' }, $true).Extent.Text
     $hostAt = $onceFlat.IndexOf('$Run = Invoke-HarnessHost ')
-    & $add "wiring: a launch whose capture service did not stop in time names its shot directory in Ctx.CaptureLeft, only then and after the host returned; every round's context has that list" $true (
-        $hostAt -gt 0 -and $onceFlat.IndexOf($leftAdd) -gt $hostAt -and @([regex]::Matches($onceFlat, 'CaptureLeft')).Count -eq 2 -and
+    & $add "wiring: a launch whose capture service did not stop in time, or whose host threw, names its shot directory in Ctx.CaptureLeft, only then and after the host call, and a host's error goes on; every round's context has that list" $true (
+        $hostAt -gt 0 -and $onceFlat.IndexOf($leftAdd) -gt $hostAt -and @([regex]::Matches($onceFlat, 'CaptureLeft')).Count -eq 4 -and $onceFlat.Contains($leftThrow) -and
+        $onceFlat.IndexOf($shotDirSet) -gt 0 -and $onceFlat.IndexOf($shotDirSet) -lt $hostAt -and @([regex]::Matches($onceFlat, '\$shotDir\b')).Count -eq 5 -and
         $ctxText -cmatch '\n *CaptureLeft = \[Collections\.Generic\.List\[string\]\]::new\(\) #')
     $shotCallers = @(& $callers @('Save-HarnessShots', 'Get-HarnessCapturePlan', 'Get-HarnessShotFacts') | Sort-Object)
     & $add "wiring: shots are planned by the transport scenario and collection only, judged by the scenario, collected by the suite alone, after the probe files ($($shotCallers -join ', '))" $true (
@@ -4680,6 +4683,8 @@ function Get-WiringCases([string]$RepoRoot) {
         'an err that cannot be written is no answer'        = $cs -cmatch 'try \{ Put\(err\[i\], [^\n]*\); \} catch \(Exception\) \{ \}'
         'every file through .part, never over another'      = $cs -cmatch 'string part = path \+ "\.part";\s*using \(var fs = new FileStream\(part, FileMode\.CreateNew, FileAccess\.Write, FileShare\.None\)\)[^\n]*\n\s*File\.Move\(part, path, false\);' -and
             @([regex]::Matches($cs, 'FileStream\(|File\.Write|File\.Create|File\.Move')).Count -eq 2
+        'every file looks at its directory first'          = $cs -cmatch 'static void Put\(string path, byte\[\] data\)\s*\{\s*if \(\(File\.GetAttributes\(Path\.GetDirectoryName\(path\)\) & FileAttributes\.ReparsePoint\) != 0\) throw new IOException\([^
+]*\);\s*string part = path \+ "\.part";'
         'the image before its answer'                       = $cs.IndexOf('Put(png[i], ') -gt 0 -and $cs.IndexOf('Put(png[i], ') -lt $cs.IndexOf('Put(done[i], ') -and @([regex]::Matches($cs, 'Put\((png|done|err)\[i\]')).Count -eq 3
         'only the process the host started'                 = $cs -cmatch '\|\| Math\.Abs\(created - started\) > 10000\) return;' -and $cs -cmatch 'WaitForSingleObject\(process, 0\) == 258\)'
     }

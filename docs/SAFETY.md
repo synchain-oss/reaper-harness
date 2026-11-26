@@ -266,18 +266,18 @@ keeps that contained:
 - **The handshake.** The driver asks for a shot with a file in the work directory that names nothing; the harness
   answers only the file names it planned, each once, and writes only those files, each through a `.part` file and a
   rename, never over a file that is there, all inside the work directory: a launch whose shot files would lie
-  elsewhere is not started. The shot directory is looked at before each answer, before any window: one that was
-  replaced by a link or junction during the launch gets no answer at all, and nothing is written through it; the
-  driver reports such a shot as not answered within 10 s, and collection names the replaced directory. The window
-  stays open while a request is pending, at most 10 s.
+  elsewhere is not started. The shot directory is looked at before each answer, before any window, and again right
+  before each file: one that was replaced by a link or junction during the launch gets no answer at all, and no file
+  is written through it; the driver reports such a shot as not answered within 10 s, and collection names the
+  replaced directory. The window stays open while a request is pending, at most 10 s.
 - **The images.** They show what REAPER and the plugin draw in that window, which may be anything the plugin shows: a
   file path, a user name, an account. The harness never reads or masks what is in them; the result has their names,
   sizes, hashes, pixel sizes, the view rectangle and the DPI. They are your results: moved to
   `renders/<run stamp>/run<round>/<id>.shots/` with or without `keep`, under the rules of kept renders
   ([below](#source-files-and-kept-renders)), never overwritten, never following a link, at most 64 MiB each. Nothing
-  is read from a shot directory whose capture service did not stop in time (it may still be writing there) or that was
-  replaced by a link or junction: that row is INCOMPLETE and says so. Nothing uploads them. Keep them out of
-  repositories, like the work files ([INTEGRATING.md](INTEGRATING.md)).
+  is read from a shot directory whose capture service did not stop in time (it may still be writing there; a host
+  that failed with an error counts as one) or that was replaced by a link or junction: that row is INCOMPLETE and
+  says so. Nothing uploads them. Keep them out of repositories, like the work files ([INTEGRATING.md](INTEGRATING.md)).
 - **Outcomes.** A shot asked for and not taken makes its state INCOMPLETE with the reason; a FAIL stays FAIL. What is
   in an image is never judged: a black or an unfinished image is a taken shot.
 
