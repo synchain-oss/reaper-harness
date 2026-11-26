@@ -623,7 +623,7 @@ A state:
 | `arm` | required, `true` / `false`: the track's record arm (recording is disabled on the track, see below) |
 | `monitor` | required: input monitoring `off`, `on` or `auto` (REAPER's tape style: only while not playing) |
 | `samples` | the observation window in device samples, 64 … 115200000 and at least 4 blocks; default 2 seconds |
-| `windows` | `{ "plugin": "<id>", "count": 1 … 1000, "holdMs": 0 … 60000, "maxBlockDiff": 0 … 1000000 }`: open and close that plugin's floating window `count` times in the window, each held open for `holdMs` when it is given (below) |
+| `windows` | `{ "plugin": "<id>", "count": 1 … 1000, "holdMs": 0 … 60000, "capture": [ms, …], "maxBlockDiff": 0 … 1000000 }`: open and close that plugin's floating window `count` times in the window, each held open for `holdMs` when it is given, and a PNG of the held window at each `capture` offset (below) |
 | `expect` | what must hold in the window; a state without it and without `windows` is only recorded. At least one state of a scenario has one of them |
 
 `expect`:
@@ -675,8 +675,9 @@ stopped-armed-on: blocks=94/94 silent=0 signal=94 left=94 right=94 same=0 transp
 `blocks=B/C`: the chain ran in B blocks while the device ran C; `silent` and `signal`: blocks without and with signal;
 `left`, `right`: blocks with signal on that side; `same`: blocks with signal whose left and right are equal;
 `transport` and `monitoring` as read back at the end of the window; with `windows`, ` windows=O/C of N`: how often the
-window opened and closed, and with `holdMs` then ` held=H/<holdMs>ms`: the shortest time a window was held open; with
-report criteria, ` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state that fails adds
+window opened and closed, and with `holdMs` then ` held=H/<holdMs>ms`: the shortest time a window was held open, and
+with `capture` then ` shots=T/N`: T of its N shots were taken; with report criteria,
+` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state that fails adds
 `; failed: ...`. A state whose numbers describe another state than the one asked for is INCOMPLETE
 (`; no evidence: ...`): the device ran less than the window, or the transport, the arm or the monitoring mode did not
 read back as asked. So is an armed state of a scenario with a feed in whose window the feed played no block: its chain
@@ -689,7 +690,8 @@ although a state arms the track, or not every state was observed; it is FAIL, wh
 appeared in the record directory. Facts: `track`, `runFxWhenStopped`, `runFxAfterStopMs`, `settleSamples`, `feed`
 (`source`, `sha256`, `channels`) and per state its settings, `status`, `problems` and the numbers, among them `fed`
 and `fed_samples`: the blocks and frames the feed played in the window, `win_open` and `win_closed` with `windows`,
-`win_held` with `holdMs`, and `report` with a report: per plugin and field its `start`, `end` and `delta`. A plugin of
+`win_held` with `holdMs`, `shots` with `capture` (below), and `report` with a report: per plugin and field its `start`,
+`end` and `delta`. A plugin of
 the layout that declares a [report](#reports) is read around every state, so a state without `expect.report` has those
 too.
 
@@ -735,6 +737,31 @@ after ten turns, left both counters at 0 while the counters of editor opens and 
 the editor had finished starting. A hold ran 6 to 37 ms past its time, the chain and the device ran the same number of
 blocks in every state that held a window (1060 and 1060 in the one held for 10 s), and a state that held a window for
 10 s took about 10 s longer as a row than the same state without a hold.
+
+Shots of a held window: `capture` lists 1 to 8 offsets in ms of the hold, the message-loop time above, rising and
+none after `holdMs`; at each the harness saves a PNG of the window. It needs `holdMs` above 0, a scenario has at most
+32 shots and a negative case none: anything else is refused before REAPER starts. Only the first window of the state
+that opened is shot. When its hold reaches an offset, the driver asks for that shot with a file in the work
+directory and the harness answers it; the window stays open while a shot is pending, at most 10 s of wall-clock time
+each, and the time the step may take grows by 10 s a shot. The image is the client area of the plugin's floating
+window of this REAPER: REAPER's row of controls on top, the plugin's view below. Nothing else on the screen is in
+it, a window in front of it neither ([SAFETY.md](SAFETY.md#shots-of-a-held-window)). The state's line adds
+` shots=T/N` after ` held=`, and its facts `shots`, one entry per offset: `at`, `held` (the hold's time when the
+shot was asked for), `wallMs` (the wall-clock ms from when the window was first seen shown to that moment), `name`
+(`<state>-<ms>.png`), `taken`, `problem`, and for a shot taken `path`, `bytes`, `sha256`, `width`, `height`, `view`
+(where the plugin's view is in the image) and `dpi` ([RESULTS.md](RESULTS.md#a-row-scenarios)). The images move to
+`renders/<run stamp>/run<round>/<id>.shots/` with or without `keep` ([kept renders](RESULTS.md#kept-renders)). A shot
+asked for and not taken makes the state INCOMPLETE, the line ending `; not taken: <name> (<reason>), ...`; a FAIL
+stays FAIL. Nothing in an image is judged: a black or an unfinished image is a taken shot. Shots have been measured at
+96 DPI only. For the same test build:
+
+```json
+{ "name": "editor-start", "transport": "play", "arm": false, "monitor": "off",
+  "windows": { "plugin": "rec", "count": 1, "holdMs": 10000, "capture": [300, 2000, 8000] },
+  "expect": { "report": { "rec": { "editorReady": { "delta": 1 } } } } }
+```
+
+A configuration without `capture` is as before, and never loads the code that takes shots.
 
 ```json
 { "id": "monitor-states", "kind": "transport", "layout": "vocal", "feed": { "channels": "different" },

@@ -6,6 +6,15 @@ stays backward compatible or raises that number, and the entry of that version s
 
 ## Unreleased
 
+- `windows.capture` on a transport state with `holdMs`: 1 to 8 rising offsets in ms of the hold, none after
+  `holdMs`, at most 32 shots a scenario, none in a negative case (refused before REAPER starts otherwise). At each, a
+  PNG of the client area of the first held window of the state, the plugin's floating window of this REAPER, taken by
+  the harness with `PrintWindow` during that launch only. The line adds ` shots=T/N`, the state's facts `shots` (per
+  shot its offset, the hold and wall-clock times it was asked at, the file's path, size and hash, the image size, where
+  the plugin's view is and the DPI); the images move to `renders/<run stamp>/run<round>/<id>.shots/` with or without
+  `keep`. A shot not taken makes the state INCOMPLETE, a FAIL stays FAIL, and nothing in an image is judged. The
+  step's time limit grows by 10 s a shot. A configuration without `capture` is as before and never loads the capture
+  code. The configuration and the result stay `schema: 1`.
 - `windows.holdMs` on a transport state (0 … 60000, default 0) keeps each floating window open for ten turns of the
   message loop and at least that many ms of message-loop time (a turn counts at most 100 ms) before it is closed, so
   that an editor that needs seconds to start, a web view for one, has them. A window that closes itself ends its hold.

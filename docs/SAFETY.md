@@ -177,7 +177,8 @@ editor. What keeps that contained:
   (INCOMPLETE), never a PASS.
 
 Opening an editor runs the plugin's own GUI code, in REAPER's process, under your account. Holding the window open
-(`holdMs`) lets that code run for longer; nothing else changes. The tool does not know what it writes: a plugin with a
+(`holdMs`) lets that code run for longer; nothing else changes. Shots of a held window are described
+[below](#shots-of-a-held-window). The tool does not know what it writes: a plugin with a
 web view, for one, keeps a cache in its user data. To keep a run off that data, start the tool with `USERPROFILE`,
 `APPDATA` and `LOCALAPPDATA` pointed at a scratch profile, and `WEBVIEW2_USER_DATA_FOLDER` at a directory of it. That
 is yours to do: the tool never sets them, and then its before-and-after check of the default REAPER resource directory
@@ -241,6 +242,43 @@ keeps that contained:
   Keep them out of repositories, like the work files ([INTEGRATING.md](INTEGRATING.md)).
 - **Outcomes.** A collection problem is INCOMPLETE. It never turns a FAIL into anything else.
 
+## Shots of a held window
+
+With `windows.capture` ([CONFIG.md](CONFIG.md#transport)) the harness saves images of a plugin's held window. What
+keeps that contained:
+
+- **Who and when.** The harness process takes the shots, on a thread of its own that runs only during the launch of a
+  transport scenario that asks for shots. The host starts it right after REAPER started and stops it after that REAPER
+  has exited or was ended, before the launch returns, whatever ended it; it also leaves by itself once that process is
+  gone, and at the launch's time limit plus 30 s. It is compiled on first use, so a configuration without shots never
+  loads it.
+- **Which window.** Only top-level windows of the process the harness started, by the PID it may end and the start
+  time it saw: visible, of the dialog class, with a title that starts with a plugin format's prefix (`VST3: `,
+  `VST3i: `, `VST: `, `VSTi: `, `CLAP: `, `CLAPi: `, `JS: `, case-sensitive; not `FX: `, a chain window). Exactly one,
+  or no shot. It never finds a process by name or by a window's title, and never looks at another process's windows,
+  the screen or the desktop. Inside the window it reads only the class names and rectangles of the child windows that
+  process owns, to find where the plugin's view is; it sends no window anything.
+- **How.** `PrintWindow` with `PW_CLIENTONLY | PW_RENDERFULLCONTENT`: the window draws its client area into the
+  harness's memory. A window in front of it is not in the image, the title bar is not either, and nothing is moved,
+  resized, focused, raised, shown, clicked or typed into. This runs REAPER's and the plugin's own drawing code once per
+  shot, in REAPER's process, under your account, like opening the editor; for a web view that drawing can reach the
+  web view's own processes.
+- **The handshake.** The driver asks for a shot with a file in the work directory that names nothing; the harness
+  answers only the file names it planned, each once, and writes only those files, each through a `.part` file and a
+  rename, never over a file that is there, all inside the work directory: a launch whose shot files would lie
+  elsewhere is not started. The window stays open while a request is pending, at most 10 s.
+- **The images.** They show what REAPER and the plugin draw in that window, which may be anything the plugin shows: a
+  file path, a user name, an account. The harness never reads or masks what is in them; the result has their names,
+  sizes, hashes, pixel sizes, the view rectangle and the DPI. They are your results: moved to
+  `renders/<run stamp>/run<round>/<id>.shots/` with or without `keep`, under the rules of kept renders
+  ([below](#source-files-and-kept-renders)), never overwritten, never following a link, at most 64 MiB each. Nothing
+  uploads them. Keep them out of repositories, like the work files ([INTEGRATING.md](INTEGRATING.md)).
+- **Outcomes.** A shot asked for and not taken makes its state INCOMPLETE with the reason; a FAIL stays FAIL. What is in
+  an image is never judged: a black or an unfinished image is a taken shot.
+
+The launch path, the locks, the watchdog and its window rule, and the module check are unchanged: the shots ride on
+the guarded launch, which is no new way to start REAPER.
+
 ## Outcomes never lie in your favour
 
 - PASS, FAIL, INCOMPLETE (no conclusion: something did not run or could not be checked), SKIPPED (the suite did not
@@ -281,8 +319,9 @@ REAPER never sees the file itself:
 - `NewRun` refuses a file at another rate than the render or with more channels than it, for the kinds of extensions
   too: nothing is resampled or mixed down without being said.
 
-[Kept renders](CONFIG.md#keep) and the files collected from a [probe directory](CONFIG.md#probes) are the only files a
-run leaves in `-ResultDir` besides its result file and `work/`:
+[Kept renders](CONFIG.md#keep), the files collected from a [probe directory](CONFIG.md#probes) and the shots of a
+[held window](#shots-of-a-held-window) are the only files a run leaves in `-ResultDir` besides its result file and
+`work/`:
 
 - they go to `<ResultDir>/renders/<run stamp>/`, which must be under `-ResultDir` after expanding links and junctions
   before anything is made in it, and so must each file's place; a real path that cannot be read (links in a circle) is
@@ -452,6 +491,7 @@ any run.
 - A render that asks for a probe directory and gets fewer files than `min` (default 1) is `INCOMPLETE`, and so is one
   whose directory could not be looked at: replaced by a link or junction, more than 10000 entries, or a process of the
   round still running.
+- A `transport` state that asks for shots and does not get each one is `INCOMPLETE`, with the reason per shot.
 
 ## Scripts
 
