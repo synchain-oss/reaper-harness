@@ -16,11 +16,12 @@
 #   Get-HarnessShotFacts -Plan -Facts -StateNo [-Stopped]   (pure on files) the shots of one state as its facts list them
 # The service (class HarnessCapture) is handed the PID of the REAPER the host started, its start time, the shot rule of
 # Host.psm1 and the plan's file names. It answers each planned request at most once and ignores every other file. On
-# a request it looks at the top-level windows of that PID only: visible, of the dialog class, with a title of the shot
-# rule; exactly one, or no shot. PrintWindow with PW_CLIENTONLY | PW_RENDERFULLCONTENT draws the client area into a
-# bitmap of the harness, then the PNG (8-bit RGB) and the answer are written, each through <file>.part and a rename,
-# never over a file that is there. Inside the window it reads only the class names and rectangles of that PID's own
-# child windows, to find the plugin's view; it sends nothing to any window and moves, sizes, shows or focuses nothing.
+# a request it first looks at the shot directory (a link or junction gets no image), then at the top-level windows of
+# that PID only: visible, of the dialog class, with a title of the shot rule; exactly one, or no shot. PrintWindow
+# with PW_CLIENTONLY | PW_RENDERFULLCONTENT draws the client area into a bitmap of the harness, then the PNG (8-bit
+# RGB) and the answer are written, each through <file>.part and a rename, never over a file that is there. Inside the
+# window it reads only the class names and rectangles of that PID's own child windows, to find the plugin's view; it
+# sends nothing to any window and moves, sizes, shows or focuses nothing.
 # It leaves its loop when stopped, when that process has exited, or at its deadline, and nothing escapes its thread.
 
 Set-StrictMode -Version Latest
@@ -157,6 +158,9 @@ public sealed class HarnessCapture
     // null: the PNG and then the done file were written; else the reason of the err file
     string Shoot(int i)
     {
+        // The shot directory before anything else (the plan's files share it): a link or junction there gets no image and
+        // no done file, and its err answer, of fixed text, is the one file written through it
+        if ((File.GetAttributes(Path.GetDirectoryName(png[i])) & FileAttributes.ReparsePoint) != 0) return "link";
         IntPtr hwnd = IntPtr.Zero;
         int seen = 0;
         var text = new StringBuilder(512);
@@ -180,7 +184,6 @@ public sealed class HarnessCapture
         if (w <= 0 || h <= 0) return "empty";
         if (w > MaxSide || h > MaxSide) return "toolarge";
         if (File.Exists(png[i])) return "exists";
-        if ((File.GetAttributes(Path.GetDirectoryName(png[i])) & FileAttributes.ReparsePoint) != 0) return "link";
         byte[] pixels = Print(hwnd, w, h);
         if (pixels == null) return "printfailed";
         Put(png[i], Png(pixels, w, h));

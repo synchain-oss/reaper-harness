@@ -266,7 +266,10 @@ keeps that contained:
 - **The handshake.** The driver asks for a shot with a file in the work directory that names nothing; the harness
   answers only the file names it planned, each once, and writes only those files, each through a `.part` file and a
   rename, never over a file that is there, all inside the work directory: a launch whose shot files would lie
-  elsewhere is not started. The window stays open while a request is pending, at most 10 s.
+  elsewhere is not started. The shot directory is looked at before each answer: one that was replaced by a link or
+  junction during the launch gets no image and no answer with sizes, and its error answer, of fixed text
+  (`reason=link`), is then the one file written where the link leads. The window stays open while a request is
+  pending, at most 10 s.
 - **The images.** They show what REAPER and the plugin draw in that window, which may be anything the plugin shows: a
   file path, a user name, an account. The harness never reads or masks what is in them; the result has their names,
   sizes, hashes, pixel sizes, the view rectangle and the DPI. They are your results: moved to

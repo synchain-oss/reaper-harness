@@ -4455,6 +4455,28 @@ function Get-CaptureCases([string]$Tmp, [string]$RepoRoot) {
     $r8b = & $saved $m8 'c8b' 'PASS'
     & $add 'shot collection: nothing to say without an image that checks out, for a directory this round did not make, or for a scenario without shots' $true (
         $null -eq $r8 -and $null -eq $r8b -and $null -eq (Save-HarnessShots -Keep (New-HarnessKeep -ResultDir $saveRes -Stamp 'c9') -Ctx $m8.Ctx -Scenario ([pscustomobject]@{ id = 'n'; states = @() }) -Status 'PASS'))
+    # An image that is a symbolic link stays: moved, the link would go along and the hash be of the file it leads to. A
+    # symbolic link needs a privilege most sessions do not have (runners do)
+    $m10 = & $made 'save10'
+    $outsideImage = Join-Path $capRoot 'outside10.png'
+    & $pngHead $outsideImage 640 427
+    Remove-Item -LiteralPath $m10.Plan.Shots[0].Png -Force
+    $imageLinked = try { $null = New-Item -ItemType SymbolicLink -Path $m10.Plan.Shots[0].Png -Target $outsideImage -ErrorAction Stop; $true } catch { $false }
+    $noImageLink = $imageLinked ? '' : ' (symbolic links cannot be made in this session; not run for real)'
+    $r10 = & $saved $m10 'c10'
+    & $add "shot collection: an image that is a symbolic link is not moved, and the file it leads to is never hashed$noImageLink ($(& $toldBy $r10))" $true ((-not $imageLinked) -or (& $holds {
+                $r10.Status -ceq 'INCOMPLETE' -and $r10.Detail -ceq 'ok; shots: not kept: s-0.png is not a plain file' -and ([IO.File]::GetAttributes($m10.Plan.Shots[0].Png) -band [IO.FileAttributes]::ReparsePoint) -and
+                -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c10/run1/sv.shots/s-0.png')) -and $null -eq $r10.Seen.states[0].shots[0].sha256 -and $null -eq $r10.Seen.states[0].shots[0].path }))
+    if ($imageLinked) { [IO.File]::Delete($m10.Plan.Shots[0].Png) }
+    # A moved image that cannot be read for its hash (held open by another, sharing only its deletion): kept and listed
+    # with its path and no hash, and the row is INCOMPLETE
+    $m11 = & $made 'save11'
+    $imageHeld = [IO.File]::Open($m11.Plan.Shots[0].Png, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Delete)
+    try { $r11 = & $saved $m11 'c11' } finally { $imageHeld.Dispose() }
+    $shot11 = try { $r11.Seen.states[0].shots[0] } catch { $null }
+    & $add "shot collection: a moved image that cannot be read is kept and listed without its hash, and the row is INCOMPLETE ($(& $toldBy $r11))" $true (& $holds {
+            $r11.Status -ceq 'INCOMPLETE' -and $r11.Detail -ceq 'ok; shots: not kept: s-0.png was kept, but it could not be read' -and (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c11/run1/sv.shots/s-0.png')) -and
+            $shot11.path -ceq 'renders/c11/run1/sv.shots/s-0.png' -and $null -eq $shot11.sha256 -and $null -eq $shot11.bytes -and $shot11.problem -clike 'kept, but it could not be read: *' })
     $null = $RepoRoot
     $cases
 }
@@ -4579,6 +4601,10 @@ function Get-WiringCases([string]$RepoRoot) {
         $procAt -gt 0 -and $procAt -lt $watchAt -and $watchAt -lt $newAt -and $newAt -lt $startAt -and $startAt -lt $killAt -and $killAt -lt $stopAt -and $stopAt -lt $doneAt -and
         $hostFnText.Substring($killAt, $stopAt - $killAt) -cmatch '\} finally \{' -and @([regex]::Matches($hostFnText, '\[HarnessCapture\]::new\(')).Count -eq 1 -and
         ($makers -join ',') -ceq 'Host.psm1' -and $printers.Count -eq 0)
+    $serviceArgs = '[HarnessCapture]::new([uint32]$ownPid, [long]($startUtc ? $startUtc.ToFileTimeUtc() : 0), $script:PluginOnlyWindow, [string[]]@($Captures.Req), [string[]]@($Captures.Png),' +
+        ' [string[]]@($Captures.Done), [string[]]@($Captures.Err), [int](($TimeoutSec + 30) * 1000))'
+    & $add "wiring: the host hands the service the PID it started and that process's start time, the shot rule (a plugin's window, never a chain's), the plan's files and the launch's time limit plus 30 s" $true (
+        ($hostFnText -replace '\s+', ' ').Contains($serviceArgs))
     $captureGiven = @(foreach ($f in $ownFiles) {
             $tree = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
             foreach ($c in $tree.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and @($node.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'Captures' }).Count }, $true)) {

@@ -467,22 +467,24 @@ $captureCases = {
         ''
     }
     $quiet = { param($Shot, [int]$ms) Start-Sleep -Milliseconds $ms; -not (Test-Path -LiteralPath $Shot.Done) -and -not (Test-Path -LiteralPath $Shot.Err) -and -not (Test-Path -LiteralPath $Shot.Png) }
-    # The PNG the service wrote, read back: chunks, sizes, the IHDR's CRC, and every row (filter 0, 3 bytes a pixel)
+    # The PNG the service wrote, read back: chunks, sizes, every chunk's CRC, every row (filter 0, 3 bytes a pixel), and
+    # with the view's top row: the stand-in's view colour (red 32, green 128, blue 224) inside the view and not above it
+    $crcTable = [long[]]::new(256)
+    for ($n = 0; $n -lt 256; $n++) { $c = [long]$n; for ($j = 0; $j -lt 8; $j++) { $c = ($c -band 1) ? ([long]3988292384 -bxor ($c -shr 1)) : ($c -shr 1) }; $crcTable[$n] = $c }
     $pngOk = {
-        param([string]$path, [int]$w, [int]$h)
+        param([string]$path, [int]$w, [int]$h, [int]$ViewTop = -1)
         $b = [IO.File]::ReadAllBytes($path)
         $be = { param([int]$At) ([long]$b[$At] -shl 24) -bor ([long]$b[$At + 1] -shl 16) -bor ([long]$b[$At + 2] -shl 8) -bor [long]$b[$At + 3] }
         if ($b.Length -lt 57 -or [Convert]::ToHexString($b, 0, 8) -cne '89504E470D0A1A0A') { return $false }
-        $types = [Collections.Generic.List[string]]::new(); $idat = [IO.MemoryStream]::new(); $pos = 8; $ihdrCrc = $false
+        $types = [Collections.Generic.List[string]]::new(); $idat = [IO.MemoryStream]::new(); $pos = 8; $ihdrOk = $false; $crcBad = 0
         while ($pos + 12 -le $b.Length) {
             $len = & $be $pos; $type = [Text.Encoding]::ASCII.GetString($b, $pos + 4, 4)
             if ($pos + 12 + $len -gt $b.Length) { return $false }
             $types.Add($type)
-            if ($type -ceq 'IHDR') {
-                $c = [long]4294967295
-                for ($i = $pos + 4; $i -lt $pos + 8 + $len; $i++) { $c = $c -bxor $b[$i]; for ($j = 0; $j -lt 8; $j++) { $c = ($c -band 1) ? ([long]3988292384 -bxor ($c -shr 1)) : ($c -shr 1) } }
-                $ihdrCrc = ($c -bxor [long]4294967295) -eq (& $be ($pos + 8 + $len)) -and (& $be ($pos + 8)) -eq $w -and (& $be ($pos + 12)) -eq $h -and $b[$pos + 16] -eq 8 -and $b[$pos + 17] -eq 2
-            }
+            $c = [long]4294967295
+            for ($i = $pos + 4; $i -lt $pos + 8 + $len; $i++) { $c = $crcTable[($c -bxor $b[$i]) -band 255] -bxor ($c -shr 8) }
+            if (($c -bxor [long]4294967295) -ne (& $be ($pos + 8 + $len))) { $crcBad++ }
+            if ($type -ceq 'IHDR') { $ihdrOk = (& $be ($pos + 8)) -eq $w -and (& $be ($pos + 12)) -eq $h -and $b[$pos + 16] -eq 8 -and $b[$pos + 17] -eq 2 }
             if ($type -ceq 'IDAT') { $idat.Write($b, $pos + 8, $len) }
             $pos += 12 + $len
         }
@@ -492,7 +494,9 @@ $captureCases = {
         try { $z.CopyTo($raw) } finally { $z.Dispose() }
         $rows = $raw.ToArray(); $stride = 1 + 3 * $w
         $filters = @(for ($y = 0; $y -lt $h; $y++) { if ($y * $stride -lt $rows.Length) { $rows[$y * $stride] } })
-        $pos -eq $b.Length -and ($types -join ',') -ceq 'IHDR,IDAT,IEND' -and $ihdrCrc -and $rows.Length -eq $h * $stride -and @($filters | Where-Object { $_ -ne 0 }).Count -eq 0
+        $pixel = { param([int]$Col, [int]$Line) $where = $Line * $stride + 1 + 3 * $Col; ($where + 2 -lt $rows.Length) ? ('{0:X2}{1:X2}{2:X2}' -f $rows[$where], $rows[$where + 1], $rows[$where + 2]) : '' }
+        $colours = $ViewTop -lt 0 -or ((& $pixel ($w / 2) ($ViewTop + 100)) -ceq '2080E0' -and (& $pixel ($w / 2) ($ViewTop / 2)) -cnotin '2080E0', '')
+        $pos -eq $b.Length -and ($types -join ',') -ceq 'IHDR,IDAT,IEND' -and $ihdrOk -and $crcBad -eq 0 -and $rows.Length -eq $h * $stride -and @($filters | Where-Object { $_ -ne 0 }).Count -eq 0 -and $colours
     }
     try {
         $plain = & $showOne 'plain'
@@ -502,6 +506,8 @@ $captureCases = {
         $chain = & $showOne 'chain' @() 'FX: Track 1'
         $named = & $showOne 'named' @() 'Fake VST3: x'
         $other = & $showOne 'other' @('-OtherClass')
+        $wide = & $showOne 'wide' @('-Wide')
+        $flat = & $showOne 'flat' @('-Flat')
         $shownCount = [ordered]@{}
         foreach ($s in $standIns) { $shownCount[$s.Tag] = & $windowsOf $s (($s.Tag -ceq 'two') ? 2 : 1) }
         Write-Case "capture: every stand-in shows its window(s) ($(@($shownCount.get_Keys() | ForEach-Object { "$_ $($shownCount[$_])" }) -join ', '))" $false (@($shownCount.get_Keys() | Where-Object { $shownCount[$_] -ne (($_ -ceq 'two') ? 2 : 1) }).Count -eq 0)
@@ -513,9 +519,9 @@ $captureCases = {
         $a1 = & $ask $svc $r1[0]
         $answer1 = ($a1 -ceq 'done') ? (Read-HarnessShotAnswer -Path $r1[0].Done -Kind done) : $null
         $parts1 = @(Get-ChildItem -LiteralPath (Split-Path -Parent $r1[0].Png) -Filter '*.part' -Force)
-        Write-Case "capture: one plugin window: a PNG of its 640 x 427 client area, then the answer with the view at 0,27 640 x 400 and the DPI; no .part left ($a1)" $true (& $holds {
+        Write-Case "capture: one plugin window: a PNG of its 640 x 427 client area, top row first and red, green, blue in that order, then the answer with the view at 0,27 640 x 400 and the DPI; no .part left ($a1)" $true (& $holds {
             $null -ne $answer1 -and $answer1.Width -eq 640 -and $answer1.Height -eq 427 -and $null -ne $answer1.View -and $answer1.View.x -eq 0 -and $answer1.View.y -eq 27 -and $answer1.View.w -eq 640 -and
-            $answer1.View.h -eq 400 -and $answer1.Dpi -ge 96 -and (Test-HarnessShotImage -Path $r1[0].Png -Answer $answer1) -and (& $pngOk $r1[0].Png 640 427) -and $parts1.Count -eq 0 -and
+            $answer1.View.h -eq 400 -and $answer1.Dpi -ge 96 -and (Test-HarnessShotImage -Path $r1[0].Png -Answer $answer1) -and (& $pngOk $r1[0].Png 640 427 27) -and $parts1.Count -eq 0 -and
             ([IO.File]::GetLastWriteTimeUtc($r1[0].Done) -ge [IO.File]::GetLastWriteTimeUtc($r1[0].Png)) -and -not (Test-Path -LiteralPath $r1[0].Err) })
         # A request answered is never answered again; a request file of a name not in the plan is no request
         foreach ($f in $r1[0].Done, $r1[0].Png) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
@@ -554,6 +560,8 @@ $captureCases = {
             @{ L = 'an FX chain window'; S = $chain; W = "reason=nowindow`n" }
             @{ L = 'a title that only contains a format'; S = $named; W = "reason=nowindow`n" }
             @{ L = 'a window of another class'; S = $other; W = "reason=nowindow`n" }
+            @{ L = 'a client area wider than 4096'; S = $wide; W = "reason=toolarge`n" }
+            @{ L = 'a window without a client area'; S = $flat; W = "reason=empty`n" }
         )
         foreach ($c in $notShots) {
             $one = & $planIn "not-$($c.S.Tag)"
@@ -563,6 +571,28 @@ $captureCases = {
             $null = $svc.Stop(5000)
             Write-Case "capture: $($c.L) is no shot ($($got.Trim()))" $true ($got -ceq $c.W -and -not (Test-Path -LiteralPath $one[0].Png))
         }
+        # A shot directory that is a junction is answered link before anything else is looked at: neither one window,
+        # nor two, nor an image already there changes that, and no image and no done file are written behind it
+        $behind = Join-Path $shotHome 'r11-behind'
+        $null = New-Item -ItemType Directory -Force -Path $behind
+        $linked = Join-Path $shotHome 'r11'
+        $linkMade = try { $null = New-Item -ItemType Junction -Path $linked -Target $behind -ErrorAction Stop; $true } catch { $false }
+        try {
+            $r11 = @(foreach ($k in 1..3) { [pscustomobject]@{ Req = (Join-Path $linked "s-$k.req"); Png = (Join-Path $linked "s-$k.png"); Done = (Join-Path $linked "s-$k.done"); Err = (Join-Path $linked "s-$k.err") } })
+            [IO.File]::WriteAllText((Join-Path $behind 's-2.png'), 'there first')
+            $svc = & $serviceFor $plain.Proc.Id $plain.Started @($r11[0], $r11[1])
+            $svc.Start()
+            $a11 = & $ask $svc $r11[0]
+            $a11b = & $ask $svc $r11[1]
+            $null = $svc.Stop(5000)
+            $svc = & $serviceFor $two.Proc.Id $two.Started @($r11[2])
+            $svc.Start()
+            $a11c = & $ask $svc $r11[2]
+            $null = $svc.Stop(5000)
+            $more11 = @(Get-ChildItem -LiteralPath $behind -Force | Where-Object { $_.Name -cnotmatch '\As-[123]\.(req|err)\z' -and $_.Name -cne 's-2.png' } | ForEach-Object { $_.Name })
+            Write-Case "capture: a shot directory that is a junction is answered link before anything else, and nothing but that answer is written behind it ($($a11.Trim()) | $($a11b.Trim()) | $($a11c.Trim()); more: $($more11 -join ', '))" $true (
+                $linkMade -and $a11 -ceq "reason=link`n" -and $a11b -ceq "reason=link`n" -and $a11c -ceq "reason=link`n" -and $more11.Count -eq 0 -and [IO.File]::ReadAllText((Join-Path $behind 's-2.png')) -ceq 'there first')
+        } finally { if ($linkMade) { [IO.Directory]::Delete($linked) } }
         $r5 = & $planIn 'r5'
         $svc = & $serviceFor $noWrap.Proc.Id $noWrap.Started $r5
         $svc.Start()
@@ -582,6 +612,18 @@ $captureCases = {
             $null = $svc.Stop(5000)
             Write-Case "capture: only windows of the process it was given count: another process's plugin window is no shot of this one ($($a3.Trim()))" $true ($a3 -ceq "reason=nowindow`n" -and -not $plain.Proc.HasExited -and (& $windowsOf $plain 1) -eq 1)
         } finally { if (-not $lone.HasExited) { Stop-Process -Id $lone.Id -Force } }
+        # Through the host, as a launch hands it over: the rule the host gives the service takes the plugin's window and
+        # leaves an FX chain window of the same process alone, so the one plugin window is shot (not two windows)
+        $viaHost = @(& $planIn 'via-host')
+        $hostSpec = ConvertTo-Json -Compress -Depth 6 -InputObject ([ordered]@{ result = (Join-Path $shotHome 'via-host.txt'); window = $true; chain = $true
+                shots = @([ordered]@{ n = 1; k = 1; at = 0; req = $viaHost[0].Req; done = $viaHost[0].Done; err = $viaHost[0].Err; name = 's-1.png' }) })
+        $launchExe = $pwshExe
+        $hostLaunch = { param($psi) $psi.FileName = $launchExe; $psi.ArgumentList.Clear(); foreach ($part in '-NoProfile', '-NonInteractive', '-File', $fakeShots) { $psi.ArgumentList.Add($part) }; $psi.Environment['FAKE_SHOTS'] = $hostSpec; [Diagnostics.Process]::Start($psi) }.GetNewClosure()
+        $hostRun = Invoke-HarnessHost -ReaperExe 'stand-in' -Lock $guiLock -TimeoutSec 30 -Captures $viaHost -Launcher $hostLaunch
+        $hostSaid = (Test-Path -LiteralPath $viaHost[0].Err) ? [IO.File]::ReadAllText($viaHost[0].Err).Trim() : ''
+        Write-Case "capture: through the host, a plugin window next to an FX chain window of the same process is the one shot ($($hostRun.Status)$($hostSaid ? "; $hostSaid" : ''))" $true (& $holds {
+                $hostRun.Status -ceq 'Exited' -and $hostRun.CaptureStopped -eq $true -and -not (Test-Path -LiteralPath $viaHost[0].Err) -and
+                (Test-HarnessShotImage -Path $viaHost[0].Png -Answer (Read-HarnessShotAnswer -Path $viaHost[0].Done -Kind done)) })
     } finally {
         foreach ($s in $standIns) { [IO.File]::WriteAllText($s.Mark, '1') }
         foreach ($s in $standIns) { if (-not $s.Proc.WaitForExit(15000)) { Stop-Process -Id $s.Proc.Id -Force -ErrorAction SilentlyContinue } }
