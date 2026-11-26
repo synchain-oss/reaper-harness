@@ -748,10 +748,12 @@ it, a window in front of it neither ([SAFETY.md](SAFETY.md#shots-of-a-held-windo
 shot was asked for), `wallMs` (the wall-clock ms from when the window was first seen shown to that moment), `name`
 (`<state>-<ms>.png`), `taken`, `problem`, and for a shot taken `path`, `bytes`, `sha256`, `width`, `height`, `view`
 (where the plugin's view is in the image) and `dpi` ([RESULTS.md](RESULTS.md#a-row-scenarios)). The images move to
-`renders/<run stamp>/run<round>/<id>.shots/` with or without `keep` ([kept renders](RESULTS.md#kept-renders)). A shot
-asked for and not taken makes the state INCOMPLETE, the line ending `; not taken: <name> (<reason>), ...`; a FAIL
-stays FAIL. Nothing in an image is judged: a black or an unfinished image is a taken shot. Shots have been measured at
-96 DPI only. For the same test build:
+`renders/<run stamp>/run<round>/<id>.shots/` with or without `keep` ([kept renders](RESULTS.md#kept-renders)); nothing
+is collected from a shot directory whose capture service did not stop in time, or that was replaced by a link or
+junction (the row is INCOMPLETE, its detail adds `; shots: nothing collected: <why>`). A shot asked for and not taken
+makes the state INCOMPLETE, the line ending `; not taken: <name> (<reason>), ...`; a FAIL stays FAIL. Nothing in an
+image is judged: a black or an unfinished image is a taken shot. Shots have been measured at 96 DPI only. For the same
+test build:
 
 ```json
 { "name": "editor-start", "transport": "play", "arm": false, "monitor": "off",

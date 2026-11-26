@@ -571,27 +571,34 @@ $captureCases = {
             $null = $svc.Stop(5000)
             Write-Case "capture: $($c.L) is no shot ($($got.Trim()))" $true ($got -ceq $c.W -and -not (Test-Path -LiteralPath $one[0].Png))
         }
-        # A shot directory that is a junction is answered link before anything else is looked at: neither one window,
-        # nor two, nor an image already there changes that, and no image and no done file are written behind it
+        # A shot directory that is a junction gets no answer of any kind, before any window is looked at: neither one
+        # window, nor two, nor an image already there changes that, and nothing is written behind it. The service passes
+        # those requests by (it answers each planned request at most once), so a later request of its plan in a plain
+        # directory is answered all the same; written after the others had time to be seen, it is answered after them
         $behind = Join-Path $shotHome 'r11-behind'
         $null = New-Item -ItemType Directory -Force -Path $behind
         $linked = Join-Path $shotHome 'r11'
         $linkMade = try { $null = New-Item -ItemType Junction -Path $linked -Target $behind -ErrorAction Stop; $true } catch { $false }
         try {
             $r11 = @(foreach ($k in 1..3) { [pscustomobject]@{ Req = (Join-Path $linked "s-$k.req"); Png = (Join-Path $linked "s-$k.png"); Done = (Join-Path $linked "s-$k.done"); Err = (Join-Path $linked "s-$k.err") } })
+            $after11 = @(& $planIn 'r11-plain' 2)
             [IO.File]::WriteAllText((Join-Path $behind 's-2.png'), 'there first')
-            $svc = & $serviceFor $plain.Proc.Id $plain.Started @($r11[0], $r11[1])
+            $svc = & $serviceFor $plain.Proc.Id $plain.Started @($r11[0], $r11[1], $after11[0])
             $svc.Start()
-            $a11 = & $ask $svc $r11[0]
-            $a11b = & $ask $svc $r11[1]
+            foreach ($x in $r11[0], $r11[1]) { [IO.File]::WriteAllText($x.Req, '1') }
+            Start-Sleep -Milliseconds 300
+            $a11 = & $ask $svc $after11[0]
             $null = $svc.Stop(5000)
-            $svc = & $serviceFor $two.Proc.Id $two.Started @($r11[2])
+            $svc = & $serviceFor $two.Proc.Id $two.Started @($r11[2], $after11[1])
             $svc.Start()
-            $a11c = & $ask $svc $r11[2]
+            [IO.File]::WriteAllText($r11[2].Req, '1')
+            Start-Sleep -Milliseconds 300
+            $a11b = & $ask $svc $after11[1]
             $null = $svc.Stop(5000)
-            $more11 = @(Get-ChildItem -LiteralPath $behind -Force | Where-Object { $_.Name -cnotmatch '\As-[123]\.(req|err)\z' -and $_.Name -cne 's-2.png' } | ForEach-Object { $_.Name })
-            Write-Case "capture: a shot directory that is a junction is answered link before anything else, and nothing but that answer is written behind it ($($a11.Trim()) | $($a11b.Trim()) | $($a11c.Trim()); more: $($more11 -join ', '))" $true (
-                $linkMade -and $a11 -ceq "reason=link`n" -and $a11b -ceq "reason=link`n" -and $a11c -ceq "reason=link`n" -and $more11.Count -eq 0 -and [IO.File]::ReadAllText((Join-Path $behind 's-2.png')) -ceq 'there first')
+            $more11 = @(Get-ChildItem -LiteralPath $behind -Force | Where-Object { $_.Name -cnotmatch '\As-[123]\.req\z' -and $_.Name -cne 's-2.png' } | ForEach-Object { $_.Name })
+            Write-Case "capture: a shot directory that is a junction gets no answer at all, before any window is looked at, and nothing is written behind it; a later request in a plain directory is answered ($($a11.Trim()) | $($a11b.Trim()); more: $($more11 -join ', '))" $true (
+                $linkMade -and $a11 -ceq 'done' -and $a11b -ceq "reason=windows 2`n" -and $more11.Count -eq 0 -and @(Get-ChildItem -LiteralPath $behind -Filter 's-*.req' -Force).Count -eq 3 -and
+                [IO.File]::ReadAllText((Join-Path $behind 's-2.png')) -ceq 'there first')
         } finally { if ($linkMade) { [IO.Directory]::Delete($linked) } }
         $r5 = & $planIn 'r5'
         $svc = & $serviceFor $noWrap.Proc.Id $noWrap.Started $r5

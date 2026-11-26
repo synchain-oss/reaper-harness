@@ -4261,12 +4261,13 @@ function Get-CaptureCases([string]$Tmp, [string]$RepoRoot) {
     foreach ($c in $doneBad) { & $add "shot answer: a done file with $($c.L) is not read" $true ($null -eq (& $answerOf 'bad.done' $c.C)) }
     $errWant = [ordered]@{
         nowindow = 'no plugin window of this REAPER was visible'; empty = 'the window had no client area'; toolarge = 'its client area is larger than 4096 x 4096'; printfailed = 'PrintWindow failed'
-        exists = 'its file was there already and is never overwritten'; link = 'the shot directory was a link or junction: no image was written'
+        exists = 'its file was there already and is never overwritten'
         'windows 2' = '2 plugin windows of this REAPER were visible: which one is meant cannot be told'; 'failed IOException' = 'the capture failed (IOException)'
     }
     $errGot = @(foreach ($k in $errWant.get_Keys()) { if ((& $answerOf 'one.err' "reason=$k`n" 'err') -cne $errWant[$k]) { $k } })
     & $add "shot answer: every reason of the table gives its own text ($($errGot -join ', '))" $false ($errGot.Count -eq 0)
-    $errOdd = @(@(foreach ($r in 'failed a/b', 'boom', 'windows 1', 'windows 1000', 'NOWINDOW') { & $answerOf 'odd.err' "reason=$r`n" 'err' }) | Where-Object { $null -ne $_ })
+    # link is no reason: the service writes nothing through a link, so an err that says link is no answer of its own
+    $errOdd = @(@(foreach ($r in 'failed a/b', 'boom', 'windows 1', 'windows 1000', 'NOWINDOW', 'link') { & $answerOf 'odd.err' "reason=$r`n" 'err' }) | Where-Object { $null -ne $_ })
     & $add "shot answer: a reason not in the table is not read, so its text is never shown ($($errOdd -join ' | '))" $true ($errOdd.Count -eq 0 -and $null -eq (& $answerOf 'two.err' "reason=nowindow`nother=1`n" 'err'))
 
     # A state's shots as its facts list them, from the driver's word and the files
@@ -4477,6 +4478,29 @@ function Get-CaptureCases([string]$Tmp, [string]$RepoRoot) {
     & $add "shot collection: a moved image that cannot be read is kept and listed without its hash, and the row is INCOMPLETE ($(& $toldBy $r11))" $true (& $holds {
             $r11.Status -ceq 'INCOMPLETE' -and $r11.Detail -ceq 'ok; shots: not kept: s-0.png was kept, but it could not be read' -and (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c11/run1/sv.shots/s-0.png')) -and
             $shot11.path -ceq 'renders/c11/run1/sv.shots/s-0.png' -and $null -eq $shot11.sha256 -and $null -eq $shot11.bytes -and $shot11.problem -clike 'kept, but it could not be read: *' })
+    # Nothing is read from a directory whose capture service did not stop in time (Ctx.CaptureLeft, without regard to
+    # case), not even for a launch without facts: the answer and the image that checks out stay where they are. Every
+    # other collection case has a context without CaptureLeft, like one built by hand
+    $m12 = & $made 'save12'
+    $m12.Ctx.CaptureLeft = [Collections.Generic.List[string]]::new()
+    $m12.Ctx.CaptureLeft.Add($m12.Plan.Dir.ToUpperInvariant())
+    $r12 = & $saved $m12 'c12' 'INCOMPLETE' $null
+    & $add "shot collection: nothing is read from a shot directory whose capture service did not stop in time, not even for a launch without facts ($(& $toldBy $r12))" $true (& $holds {
+            $r12.Status -ceq 'INCOMPLETE' -and $r12.Detail -ceq 'ok; shots: nothing collected: the capture service did not stop in time' -and $null -eq $r12.Seen -and
+            (Test-Path -LiteralPath $m12.Plan.Shots[0].Png) -and (Test-Path -LiteralPath $m12.Plan.Shots[0].Done) -and -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c12')) })
+    # A judged row whose shots were all late, its directory replaced by a junction: nothing to move, and it says why
+    $m13 = & $made 'save13'
+    $m13.Seen.states[0].shots = Get-HarnessShotFacts -Plan $m13.Plan -Facts @{ st1_shot1 = 'late'; st1_shot2 = 'late' } -StateNo 1
+    $elsewhere13 = Join-Path $capRoot 'elsewhere13'
+    $null = New-Item -ItemType Directory -Path $elsewhere13
+    Get-ChildItem -LiteralPath $m13.Plan.Dir -Force | Move-Item -Destination $elsewhere13
+    Remove-Item -LiteralPath $m13.Plan.Dir -Force
+    $junction13 = try { $null = New-Item -ItemType Junction -Path $m13.Plan.Dir -Target $elsewhere13; $true } catch { $false }
+    $r13 = & $saved $m13 'c13'
+    & $add "shot collection: a shot directory replaced by a junction is named when no shot was taken as well ($(& $toldBy $r13))" $true (& $holds {
+            $junction13 -and $r13.Status -ceq 'INCOMPLETE' -and $r13.Detail -ceq 'ok; shots: nothing collected: the shot directory was replaced by a link or junction' -and
+            (Test-Path -LiteralPath (Join-Path $elsewhere13 's-0.png')) -and -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c13')) })
+    if ($junction13) { [IO.Directory]::Delete($m13.Plan.Dir) }
     $null = $RepoRoot
     $cases
 }
@@ -4622,6 +4646,16 @@ function Get-WiringCases([string]$RepoRoot) {
     & $add "wiring: every launch checks its shot files and builds the capture service before the skip marker, the locks and the host ($($shotCheckAt -join ','); $($compileAt -join ','))" $true (
         $shotCheckAt.Count -eq 1 -and $compileAt.Count -eq 1 -and $envCheck[0] -lt $shotCheckAt[0] -and $shotCheckAt[0] -lt $compileAt[0] -and $compileAt[0] -lt (& $at $launch 'Get-HarnessSkipMarkerHit')[0] -and
         $compileAt[0] -lt (& $at $launch 'Enter-HarnessLocks')[0] -and $compileAt[0] -lt (& $at $launch 'Invoke-HarnessHost')[0])
+    # A capture service that did not stop in time may still write: the launch names its shot directory for collection,
+    # which then reads nothing there; only then, and only once the host has returned. Every round's context has the list
+    $onceFlat = $onceAst.Extent.Text -replace '\s+', ' '
+    $leftAdd = 'if ($shotFiles.Count -and $null -ne $Ctx[''CaptureLeft''] -and $Run.PSObject.Properties[''CaptureStopped''] -and $false -eq $Run.CaptureStopped) {' +
+        ' $Ctx.CaptureLeft.Add([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$shotFiles[0].Png))) }'
+    $ctxText = $onceAst.Parent.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'New-HarnessContext' }, $true).Extent.Text
+    $hostAt = $onceFlat.IndexOf('$Run = Invoke-HarnessHost ')
+    & $add "wiring: a launch whose capture service did not stop in time names its shot directory in Ctx.CaptureLeft, only then and after the host returned; every round's context has that list" $true (
+        $hostAt -gt 0 -and $onceFlat.IndexOf($leftAdd) -gt $hostAt -and @([regex]::Matches($onceFlat, 'CaptureLeft')).Count -eq 2 -and
+        $ctxText -cmatch '\n *CaptureLeft = \[Collections\.Generic\.List\[string\]\]::new\(\) #')
     $shotCallers = @(& $callers @('Save-HarnessShots', 'Get-HarnessCapturePlan', 'Get-HarnessShotFacts') | Sort-Object)
     & $add "wiring: shots are planned by the transport scenario and collection only, judged by the scenario, collected by the suite alone, after the probe files ($($shotCallers -join ', '))" $true (
         ($shotCallers -join ',') -ceq 'Get-HarnessCapturePlan<-Renders.psm1:Save-HarnessShots,Get-HarnessCapturePlan<-Scenarios.psm1:Invoke-HarnessTransportScenario,Get-HarnessShotFacts<-Scenarios.psm1:Invoke-HarnessTransportScenario,Save-HarnessShots<-Suite.psm1:Invoke-HarnessSuite' -and
@@ -4731,7 +4765,7 @@ function Get-WiringCases([string]$RepoRoot) {
     $holdPins = [ordered]@{
         'it lasts while shown, ten turns and hold ms'      = $holdText -cmatch '^ *local shots = \(opened == 1 and w\.capture\) and \{ list = w\.capture, k = 1, at = \{\}, wall = \{\}, got = \{\}, seen = reaper\.time_precise\(\) \} or nil\n *local more = shots ~= nil\n *local turns, loop, last = 0, 0, reaper\.time_precise\(\)\n *while \(turns < 10 or loop \* 1000 < w\.hold or more\) and shown\(\) do\n'
         'a turn checks the record bit and counts <= 100 ms' = $holdText -cmatch ' do\n *if shots then more = shoot\(shots, loop \* 1000, w\) end\n *coroutine\.yield\(\)\n *noRecord\(\)\n *turns = turns \+ 1\n *local now = reaper\.time_precise\(\)\n *loop = loop \+ math\.min\(now - last, 0\.1\)\n *last = now\n *end\n' -and @([regex]::Matches($holdText, 'coroutine\.yield\(\)')).Count -eq 1
-        'the shortest hold is kept'                         = $holdText -cmatch '\n *end\n *held = math\.min\(held or math\.huge, loop \* 1000\)\n *if shots then\n *--[^\n]*\n *for k = shots\.k, #shots\.list do shots\.got\[k\] = "gone" end\n *cap = shots\n *end$'
+        'the shortest hold is kept'                         = $holdText -cmatch '\n *end\n *held = math\.min\(held or math\.huge, loop \* 1000\)\n *if shots then\n(?: *--[^\n]*\n)+ *if shots\.since then shoot\(shots, 0, w\) end\n *for k = shots\.k, #shots\.list do shots\.got\[k\] = "gone" end\n *cap = shots\n *end$'
         'ten turns without a hold'                          = $holdAt.Groups[3].Value -cmatch '^ *for _ = 1, 10 do coroutine\.yield\(\) noRecord\(\) end$'
         '0 when none opened'                                = $winBody -cmatch '\n *local opened, closed, held, cap = 0, 0, nil, nil\n' -and $winBody -cmatch '\n *return opened, closed, held or 0, cap\n'
         'sent only with a hold, rounded'                    = $driverLf -cmatch '\n *local o, c, h, cap = windows\(st\.windows\)\n *put\(p \.\. "win_open", o\)\n *put\(p \.\. "win_closed", c\)\n *if st\.windows\.hold then put\(p \.\. "win_held", int\(h\)\) end\n' -and
@@ -4754,11 +4788,12 @@ function Get-WiringCases([string]$RepoRoot) {
         'a request that cannot be written is skipped'       = $shootBody -cmatch '\n *local f = io\.open\(s\.req, "w"\)\n *if not f then cap\.k = cap\.k \+ 1 return cap\.list\[cap\.k\] ~= nil end\n *f:write\("1"\)\n *f:close\(\)\n' -and $shootBody -cnotmatch 'assert'
         'the hold and the wall clock at the request'         = $shootBody -cmatch '\n *local now = reaper\.time_precise\(\)\n *cap\.at\[cap\.k\], cap\.wall\[cap\.k\], cap\.since = int\(ms\), int\(\(now - cap\.seen\) \* 1000\), now\n *end\n *return true\n *end\n$'
         'the hold runs on while a shot is pending or to come' = $holdText -cmatch 'while \(turns < 10 or loop \* 1000 < w\.hold or more\) and shown\(\) do'
-        'what was pending when the window went is gone'     = $holdText -cmatch 'for k = shots\.k, #shots\.list do shots\.got\[k\] = "gone" end'
+        'a pending shot answered when the window went counts, the rest is gone' = $holdText -cmatch '\n *if shots\.since then shoot\(shots, 0, w\) end\n *for k = shots\.k, #shots\.list do shots\.got\[k\] = "gone" end\n' -and
+            @([regex]::Matches($holdText, 'shoot\(')).Count -eq 2
         'every shot is put, none when never asked'          = $driverLf -cmatch 'if st\.windows\.hold then put\(p \.\. "win_held", int\(h\)\) end\n *for k in ipairs\(st\.windows\.capture or \{\}\) do\n *put\(p \.\. "shot" \.\. k, cap and cap\.got\[k\] or "none"\)\n *if cap and cap\.at\[k\] then put\(p \.\. "shot" \.\. k \.\. "_held", cap\.at\[k\]\) end\n *if cap and cap\.wall\[k\] then put\(p \.\. "shot" \.\. k \.\. "_wall", cap\.wall\[k\]\) end\n *end\n'
     }
     $shotMissing = @($shotPins.get_Keys() | Where-Object { -not $shotPins[$_] })
-    & $add "driver: shots are taken in the first window that opened, one at a time when the hold time reaches each offset, never past the hold, answered within 10 s of wall-clock time, and each is reported (not as pinned: $($shotMissing -join ' | '))" $true (
+    & $add "driver: shots are taken in the first window that opened, one at a time when the hold time reaches each offset, never past the hold, answered within 10 s of wall-clock time, a pending one whose answer is there when the window goes counts, and each is reported (not as pinned: $($shotMissing -join ' | '))" $true (
         $shootBody.Length -gt 0 -and $shotMissing.Count -eq 0)
     # Every project with plugins and every read-back carries the preference: a scenario cannot lose it on the way (the
     # dry reference has no plugin to tell)

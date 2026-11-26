@@ -28,7 +28,9 @@
 #                               run<k>/<id>.shots/<name>, and its facts get the path (relative to the result directory),
 #                               bytes and sha256 of the moved file. A launch that failed as a whole (no state judged)
 #                               still has every image whose answer checks out moved, listed in the facts' shots. Nothing
-#                               from a directory this round did not make, nor through a link. Never throws; $null for a
+#                               from a directory this round did not make, nor through a link; nothing is read from one
+#                               whose capture service did not stop in time (Ctx.CaptureLeft) or that was replaced by a
+#                               link (INCOMPLETE, the facts as given). Never throws; $null for a
 #                               scenario without shots or nothing to say, else Status, Detail (a shot not kept is
 #                               INCOMPLETE, FAIL stays FAIL) and Seen (the outcome's facts with the shots)
 #   Move-HarnessKeptFile        one file, only to a place under the result directory, never over another (pure on files);
@@ -392,6 +394,18 @@ function Save-HarnessShots {
     try {
         $shotPlan = Get-HarnessCapturePlan -Scenario $s -Work $Ctx.Work
         if ($null -eq $shotPlan -or -not $Ctx.Dirs.Contains($shotPlan.Dir)) { return $null }
+        $leaf = Split-Path -Leaf $shotPlan.Dir
+        # The directory itself is never followed: $null when it is not there, else whether it is a link, no directory,
+        # or a directory that resolves elsewhere
+        $swapped = {
+            $attr = try { [IO.File]::GetAttributes($shotPlan.Dir) } catch { $null }
+            ($null -eq $attr) ? $null : [bool](($attr -band [IO.FileAttributes]::ReparsePoint) -or -not ($attr -band [IO.FileAttributes]::Directory) -or
+                (Resolve-HarnessRealPath $shotPlan.Dir) -ine [IO.Path]::Join((Resolve-HarnessRealPath $Ctx.Work), $leaf))
+        }
+        # Before anything is read or moved: a service that did not stop may still write there, a link leads elsewhere
+        $early = if (@($Ctx['CaptureLeft']) -icontains $shotPlan.Dir) { 'the capture service did not stop in time' }
+        elseif (& $swapped) { 'the shot directory was replaced by a link or junction' }
+        if ($early) { return [pscustomobject]@{ Status = (Get-HarnessWorse $Status 'INCOMPLETE'); Detail = "$Detail; shots: nothing collected: $early"; Seen = $Seen } }
         $byName = @{}
         foreach ($x in $shotPlan.Shots) { $byName[$x.Name] = $x }
         # The shots the states list, or for a launch that failed as a whole what the service answered: every image whose
@@ -412,14 +426,12 @@ function Save-HarnessShots {
             if ($null -eq $Seen) { $Seen = [ordered]@{} }
             $Seen['shots'] = $moving
         }
-        $leaf = Split-Path -Leaf $shotPlan.Dir
-        $attr = try { [IO.File]::GetAttributes($shotPlan.Dir) } catch { $null }
-        # The directory itself is never followed: a link, or a directory that resolves elsewhere, gives nothing
+        # The directory is looked at once more just before the move
+        $now = $moving.Count ? (& $swapped) : $false
         $stop = if (-not $moving.Count) { $null }
         elseif ($Ctx.StillRunning) { 'nothing collected: a REAPER of this round could not be ended' }
-        elseif ($null -eq $attr) { 'nothing collected: the shot directory is not there any more' }
-        elseif (($attr -band [IO.FileAttributes]::ReparsePoint) -or -not ($attr -band [IO.FileAttributes]::Directory) -or
-            (Resolve-HarnessRealPath $shotPlan.Dir) -ine [IO.Path]::Join((Resolve-HarnessRealPath $Ctx.Work), $leaf)) { 'nothing collected: the shot directory was replaced by a link or junction' }
+        elseif ($null -eq $now) { 'nothing collected: the shot directory is not there any more' }
+        elseif ($now) { 'nothing collected: the shot directory was replaced by a link or junction' }
         else { $null }
         $notKept = [Collections.Generic.List[string]]::new()
         $refused = ($moving.Count -and -not $stop) ? (Get-HarnessKeepClaim $Keep) : ''

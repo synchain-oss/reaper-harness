@@ -12,9 +12,11 @@ stays backward compatible or raises that number, and the entry of that version s
   with `PrintWindow` during that launch only. The line adds ` shots=T/N`, the state's facts `shots` (per shot its
   offset, the hold and wall-clock times it was asked at, the file's path, size and hash, the image size, where the
   plugin's view is and the DPI); the images move to `renders/<run stamp>/run<round>/<id>.shots/` with or without
-  `keep`. A shot not taken makes the state INCOMPLETE, a FAIL stays FAIL, and nothing in an image is judged. The
-  step's time limit grows by 10 s a shot. A configuration without `capture` is as before and never loads the capture
-  code. The configuration and the result stay `schema: 1`.
+  `keep`, but nothing is read from a shot directory whose capture service did not stop in time or that was replaced by
+  a link or junction (the row is INCOMPLETE and says so), and the harness writes nothing through such a link. A shot
+  not taken makes the state INCOMPLETE, a FAIL stays FAIL, and nothing in an image is judged. The step's time limit
+  grows by 10 s a shot. A configuration without `capture` is as before and never loads the capture code. The
+  configuration and the result stay `schema: 1`.
 - `windows.holdMs` on a transport state (0 … 60000, default 0) keeps each floating window open for ten turns of the
   message loop and at least that many ms of message-loop time (a turn counts at most 100 ms) before it is closed, so
   that an editor that needs seconds to start, a web view for one, has them. A window that closes itself ends its hold.

@@ -561,7 +561,9 @@ function steps.transport()
                     end
                     held = math.min(held or math.huge, loop * 1000)
                     if shots then
-                        -- The window went away first: what was pending or still to come is gone
+                        -- The window went away first: a pending shot whose answer is there already counts as
+                        -- answered; what is still pending or still to come is gone
+                        if shots.since then shoot(shots, 0, w) end
                         for k = shots.k, #shots.list do shots.got[k] = "gone" end
                         cap = shots
                     end

@@ -111,6 +111,7 @@ function New-HarnessContext {
         ProbeFiles = @{} # probe file key -> the file checked before the start (Read-HarnessProbeFiles)
         ProbeRuns = @{} # scenario id -> @{ From }: its probe run was made, after From processes had been started
         Dirs = [Collections.Generic.List[string]]::new() # probe and shot directories made in the work directory
+        CaptureLeft = [Collections.Generic.List[string]]::new() # shot directories whose capture service did not stop in time
         StillRunning = $null # set when the watchdog could not end a process: Pid, Label, Lock
         Launcher = $null; ModuleSampler = $null; Stopper = $null # self-test only
         Api = $null # filled in below
@@ -272,6 +273,9 @@ function Invoke-HarnessLaunchOnce {
         if ($Ctx.Stopper) { $extra.Stopper = $Ctx.Stopper }
         $Run = Invoke-HarnessHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work -Lock $lock @HostArgs @extra
         $Ctx.LaunchLog.Add([pscustomobject]@{ Label = $Label; Status = $Run.Status; Modules = $Run.Modules; PluginModules = @($Run.PluginModules) })
+        # A capture service that did not stop may still write: collection reads nothing from its directory (the one of
+        # all the launch's shot files, Test-HarnessLaunchCaptures sees to that)
+        if ($shotFiles.Count -and $null -ne $Ctx['CaptureLeft'] -and $Run.PSObject.Properties['CaptureStopped'] -and $false -eq $Run.CaptureStopped) { $Ctx.CaptureLeft.Add([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$shotFiles[0].Png))) }
         if ($Run.StillRunning) {
             $keepLock = $true
             $script:KeptLocks.Add($lock)

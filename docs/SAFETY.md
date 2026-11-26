@@ -266,16 +266,18 @@ keeps that contained:
 - **The handshake.** The driver asks for a shot with a file in the work directory that names nothing; the harness
   answers only the file names it planned, each once, and writes only those files, each through a `.part` file and a
   rename, never over a file that is there, all inside the work directory: a launch whose shot files would lie
-  elsewhere is not started. The shot directory is looked at before each answer: one that was replaced by a link or
-  junction during the launch gets no image and no answer with sizes, and its error answer, of fixed text
-  (`reason=link`), is then the one file written where the link leads. The window stays open while a request is
-  pending, at most 10 s.
+  elsewhere is not started. The shot directory is looked at before each answer, before any window: one that was
+  replaced by a link or junction during the launch gets no answer at all, and nothing is written through it; the
+  driver reports such a shot as not answered within 10 s, and collection names the replaced directory. The window
+  stays open while a request is pending, at most 10 s.
 - **The images.** They show what REAPER and the plugin draw in that window, which may be anything the plugin shows: a
   file path, a user name, an account. The harness never reads or masks what is in them; the result has their names,
   sizes, hashes, pixel sizes, the view rectangle and the DPI. They are your results: moved to
   `renders/<run stamp>/run<round>/<id>.shots/` with or without `keep`, under the rules of kept renders
   ([below](#source-files-and-kept-renders)), never overwritten, never following a link, at most 64 MiB each. Nothing
-  uploads them. Keep them out of repositories, like the work files ([INTEGRATING.md](INTEGRATING.md)).
+  is read from a shot directory whose capture service did not stop in time (it may still be writing there) or that was
+  replaced by a link or junction: that row is INCOMPLETE and says so. Nothing uploads them. Keep them out of
+  repositories, like the work files ([INTEGRATING.md](INTEGRATING.md)).
 - **Outcomes.** A shot asked for and not taken makes its state INCOMPLETE with the reason; a FAIL stays FAIL. What is
   in an image is never judged: a black or an unfinished image is a taken shot.
 
@@ -494,7 +496,9 @@ any run.
 - A render that asks for a probe directory and gets fewer files than `min` (default 1) is `INCOMPLETE`, and so is one
   whose directory could not be looked at: replaced by a link or junction, more than 10000 entries, or a process of the
   round still running.
-- A `transport` state that asks for shots and does not get each one is `INCOMPLETE`, with the reason per shot.
+- A `transport` state that asks for shots and does not get each one is `INCOMPLETE`, with the reason per shot, and so
+  is a row whose shots could not be collected: the capture service did not stop in time, the shot directory was
+  replaced by a link or junction or is not there any more, or a process of the round is still running.
 
 ## Scripts
 
