@@ -80,8 +80,11 @@ editor-start: blocks=1061/1061 silent=1061 signal=0 left=0 right=0 same=0 transp
   | 8000 | 8009 | 8082 | 455970 | `4d3e9cab996b` |
 
 - **`held` against `at`.** The hold's clock read 24, 2 and 9 ms past the offset when the driver asked. `wallMs`, the wall
-  clock from when the window was first seen shown, read 73 ms more than `held` in all three: the two clocks start a little
-  apart and run alike, and the offset between them was the same for every shot of a run.
+  clock from when the window was first seen shown, read 73 ms more than `held` in all three, the same for every shot of
+  a run. Both are what the driver's rule gives: a shot is asked for in the first turn of the message loop whose hold
+  time has reached its offset, and a turn counts at most 100 ms of the hold. While the editor starts, the turns are
+  long: the hold then moves in steps of up to 100 ms (so the shot at 300 ms came up to one step late) and falls behind
+  the wall clock by what those turns took beyond 100 ms, which `wallMs` keeps ahead for the rest of the hold.
 - **The work directory.** After the green round without `-KeepWork` the work directory was empty: no `editor-shots.shots`
   and no request or answer file was left behind.
 
@@ -213,10 +216,9 @@ No statement of the documents was contradicted.
   shots that were taken are shown here. The limits of 8 offsets a state (refused, section 4), 32 a scenario, 4096 x 4096
   pixels, 10 s an answer and 64 MiB a file were not run to the end.
 - The claim that a window in front of the held one is not in the image was not tried here: nothing was put in front of it.
-- The hold's clock and the wall clock were 73 to 84 ms apart in the shots that were looked at, the same for every shot of a
-  run; the notes do not say where that offset comes from. The 300 ms shot was asked for latest (24 and 95 ms after its
-  offset), while the editor was still starting; whether that is the editor's work on the message thread was not looked
-  into.
+- The lengths of the message loop's turns were not measured: that the 300 ms shot came latest (24 and 95 ms after its
+  offset) and that `wallMs` ran 73 to 84 ms ahead of `held` is explained in section 1 by the driver's rule, not shown
+  turn by turn.
 - Two rows with shots and two without: the cost in time is a few tenths of a second at most and not more exactly known.
 - The built-in negative cases ran with the first run only; the others used `-NoNegative`.
 - The images, the build's report fields and variable, and the build itself are not part of the repository.

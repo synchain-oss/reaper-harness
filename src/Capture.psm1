@@ -20,8 +20,8 @@
 # that PID only: visible, of the dialog class, with a title of the shot rule; exactly one, or no shot. PrintWindow
 # with PW_CLIENTONLY | PW_RENDERFULLCONTENT draws the client area into a bitmap of the harness, then the PNG (8-bit
 # RGB) and the answer are written, each through <file>.part and a rename, never over a file that is there. Inside the
-# window it reads only the class names and rectangles of that PID's own child windows, to find the plugin's view; it
-# sends nothing to any window and moves, sizes, shows or focuses nothing.
+# window it reads only the class names and rectangles of that PID's own child windows, to find the plugin's view. Apart
+# from PrintWindow's request to draw, it sends nothing to any window and moves, sizes, shows or focuses nothing.
 # It leaves its loop when stopped, when that process has exited, or at its deadline, and nothing escapes its thread.
 
 Set-StrictMode -Version Latest

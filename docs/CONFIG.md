@@ -769,7 +769,10 @@ test build ([validation record](validation/2026-11-25-window-capture.md)): the t
 reached the bottom of the image; the shot at 300 ms showed the view not drawn yet, the ones at 2000 and 8000 ms the editor
 complete, and all three were taken (` shots=3/3`), their `bytes` and `sha256` those of the moved files. A shot's `held`
 read 2 to 13 ms past its `at` (24 and 95 ms for the one at 300 ms, while the editor was still starting), and its `wallMs`
-73 to 84 ms more than its `held`, the same for every shot of a run. In a scenario with a warm-up state, a state of three
+73 to 84 ms more than its `held`, the same for every shot of a run. Both follow from how the hold is counted: a
+shot is asked for in the first turn of the message loop whose hold time has reached its offset, and a turn counts at
+most 100 ms, so while the editor starts and the turns are long the hold moves in steps of up to 100 ms and falls
+behind the wall clock by what those turns took beyond that. In a scenario with a warm-up state, a state of three
 windows held 5 s with `capture` `[4000]` gave one image, from its first window, and `windows=3/3 of 3`. Three shots made the
 row of a 10 s hold 0.1 to 0.5 s longer (21.4 and 21.7 s, against 21.2 and 21.3 s without `capture`), the hold did not get
 longer, and the chain and the device ran the same number of blocks in every state; after a green round the work directory

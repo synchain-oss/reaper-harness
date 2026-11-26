@@ -257,8 +257,8 @@ keeps that contained:
   `VST3i: `, `VST: `, `VSTi: `, `CLAP: `, `CLAPi: `, `JS: `, case-sensitive; not `FX: `, a chain window). Exactly one,
   or no shot. It never finds a process by name or by a window's title, and never looks at another process's windows,
   the screen or the desktop. Inside the window it reads only the class names and rectangles of the child windows that
-  process owns, to find where the plugin's view is; it sends no window anything.
-- **How.** `PrintWindow` with `PW_CLIENTONLY | PW_RENDERFULLCONTENT`: the window draws its client area into the
+  process owns, to find where the plugin's view is; apart from the request to draw below, it sends no window anything.
+- **How.** `PrintWindow` with `PW_CLIENTONLY | PW_RENDERFULLCONTENT` asks the window to draw its client area into the
   harness's memory. A window in front of it is not in the image, the title bar is not either, and nothing is moved,
   resized, focused, raised, shown, clicked or typed into. This runs REAPER's and the plugin's own drawing code once per
   shot, in REAPER's process, under your account, like opening the editor; for a web view that drawing can reach the
