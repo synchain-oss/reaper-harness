@@ -4045,16 +4045,16 @@ function Get-ReportCases([string]$Tmp, [string]$RepoRoot) {
         (Get-HarnessRenderGap $wavFile @() 10) -clike 'the render gap.wav cannot be read: WAV: *' -and $null -eq (Get-HarnessRenderGap $wavFile @($stemFile) 0))
     # The time the step gets, and what the driver is told
     $timed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $win }, [pscustomobject]@{ Samples = 9600; Windows = $null }) }
-    & $add 'transport timeout: 20 s more for every window opened and closed, 60 s a state with reports' $false (
-        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 501.5) -lt 1e-9 -and [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60 -Reports) - 621.5) -lt 1e-9)
+    & $add 'transport timeout: 20 s more for every window opened and closed, 60 s a state with reports' $false (& $holds {
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60) - 501.5) -lt 1e-9 -and [Math]::Abs((Get-HarnessTransportTimeout -Scenario $timed -LuaTimeoutSec 60 -Reports) - 621.5) -lt 1e-9 })
     $heldTimed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = [pscustomobject]@{ Plugin = 'rec'; Count = 2; HoldMs = 5000; MaxBlockDiff = 4; Fx = 1 } }) }
     $unwindowed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = $null }) }
-    & $add 'transport timeout: 2 windows held 5000 ms each add 2 x (20 + 3 x 5) s' $false (
-        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $heldTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $unwindowed -LuaTimeoutSec 60) - 70) -lt 1e-9)
+    & $add 'transport timeout: 2 windows held 5000 ms each add 2 x (20 + 3 x 5) s' $false (& $holds {
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $heldTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $unwindowed -LuaTimeoutSec 60) - 70) -lt 1e-9 })
     $shotTimed = [pscustomobject]@{ sr = 48000; settleSamples = 4800; states = @([pscustomobject]@{ Samples = 4800; Windows = [pscustomobject]@{ Plugin = 'rec'; Count = 2; HoldMs = 5000; MaxBlockDiff = 4; Fx = 1; Capture = [int[]]@(0, 300, 5000) } }) }
-    & $add 'transport timeout: three shots add 10 s each, on top of 2 x (20 + 3 x 5) s for the two windows held 5000 ms; held windows without Capture add none' $false (
+    & $add 'transport timeout: three shots add 10 s each, on top of 2 x (20 + 3 x 5) s for the two windows held 5000 ms; held windows without Capture add none' $false (& $holds {
         [Math]::Abs((Get-HarnessTransportTimeout -Scenario $shotTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $unwindowed -LuaTimeoutSec 60) - 100) -lt 1e-9 -and
-        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $shotTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $heldTimed -LuaTimeoutSec 60) - 30) -lt 1e-9)
+        [Math]::Abs((Get-HarnessTransportTimeout -Scenario $shotTimed -LuaTimeoutSec 60) - (Get-HarnessTransportTimeout -Scenario $heldTimed -LuaTimeoutSec 60) - 30) -lt 1e-9 })
     # What a configuration makes of reports and windows
     $cfgText = @'
 { "schema": 1, "name": "t",
@@ -4394,37 +4394,39 @@ function Get-CaptureCases([string]$Tmp, [string]$RepoRoot) {
         @{ Ctx = $c; Plan = $p; Seen = [ordered]@{ track = 'Voice'; states = @([ordered]@{ name = 's'; status = 'PASS'; shots = $judgedShots }) } }
     }
     $saved = { param($m, [string]$stamp, [string]$verdict = 'PASS', $given = 'given') Save-HarnessShots -Keep (New-HarnessKeep -ResultDir $saveRes -Stamp $stamp) -Ctx $m.Ctx -Scenario $saveScen -Round 1 -Status $verdict -Detail 'ok' -Seen (($given -ceq 'given') ? $m.Seen : $given) }
+    # What a collection said, for a label: nothing is said when it gave nothing
+    $toldBy = { param($r) try { "$($r.Status): $($r.Detail)" } catch { 'nothing' } }
     $m1 = & $made 'save1'
     $r1 = & $saved $m1 'c1'
     $kept1 = Join-Path $saveRes 'renders/c1/run1/sv.shots/s-0.png'
-    $shot1 = $r1.Seen.states[0].shots[0]
-    & $add "shot collection: a shot taken moves to run1/<id>.shots/<name>, with the moved file's path, size and hash; one not taken stays ($($r1.Status): $($r1.Detail))" $false (& $holds {
+    $shot1 = try { $r1.Seen.states[0].shots[0] } catch { $null }
+    & $add "shot collection: a shot taken moves to run1/<id>.shots/<name>, with the moved file's path, size and hash; one not taken stays ($(& $toldBy $r1))" $false (& $holds {
             $r1.Status -ceq 'PASS' -and $r1.Detail -ceq 'ok' -and (Test-Path -LiteralPath $kept1) -and -not (Test-Path -LiteralPath $m1.Plan.Shots[0].Png) -and
             $shot1.path -ceq 'renders/c1/run1/sv.shots/s-0.png' -and $shot1.sha256 -ceq (Get-HarnessSha256 $kept1) -and $shot1.bytes -eq ([IO.FileInfo]::new($kept1)).Length -and
             (Test-Path -LiteralPath $m1.Plan.Shots[1].Png) -and -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c1/run1/sv.shots/s-300.png')) -and $null -eq $r1.Seen.states[0].shots[1].path })
     $m2 = & $made 'save2'
     $r2 = & $saved $m2 'c1'
-    & $add "shot collection: a run directory another run claimed moves nothing ($($r2.Status): $($r2.Detail))" $true (
-        $r2.Status -ceq 'INCOMPLETE' -and $r2.Detail -ceq 'ok; shots: not kept: renders/c1/manifest.jsonl is there already (a run started in the same second)' -and (Test-Path -LiteralPath $m2.Plan.Shots[0].Png))
+    & $add "shot collection: a run directory another run claimed moves nothing ($(& $toldBy $r2))" $true (& $holds {
+        $r2.Status -ceq 'INCOMPLETE' -and $r2.Detail -ceq 'ok; shots: not kept: renders/c1/manifest.jsonl is there already (a run started in the same second)' -and (Test-Path -LiteralPath $m2.Plan.Shots[0].Png) })
     $r2f = & $saved $m2 'c1' 'FAIL'
-    & $add "shot collection: a FAIL stays FAIL, with the reason added ($($r2f.Status): $($r2f.Detail))" $true ($r2f.Status -ceq 'FAIL' -and $r2f.Detail -clike 'ok; shots: not kept: *')
+    & $add "shot collection: a FAIL stays FAIL, with the reason added ($(& $toldBy $r2f))" $true (& $holds { $r2f.Status -ceq 'FAIL' -and $r2f.Detail -clike 'ok; shots: not kept: *' })
     $m3 = & $made 'save3'
     $m3.Ctx.StillRunning = [pscustomobject]@{ Pid = 1; Label = 'x'; Lock = $null }
     $r3 = & $saved $m3 'c3'
-    & $add "shot collection: with a REAPER of the round still running nothing is moved ($($r3.Detail))" $true (
-        $r3.Status -ceq 'INCOMPLETE' -and $r3.Detail -ceq 'ok; shots: nothing collected: a REAPER of this round could not be ended' -and (Test-Path -LiteralPath $m3.Plan.Shots[0].Png))
+    & $add "shot collection: with a REAPER of the round still running nothing is moved ($(& $toldBy $r3))" $true (& $holds {
+        $r3.Status -ceq 'INCOMPLETE' -and $r3.Detail -ceq 'ok; shots: nothing collected: a REAPER of this round could not be ended' -and (Test-Path -LiteralPath $m3.Plan.Shots[0].Png) })
     $m4 = & $made 'save4'
     $taken4 = Join-Path $saveRes 'renders/c4/run1/sv.shots/s-0.png'
     $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $taken4)
     [IO.File]::WriteAllText($taken4, 'there first')
     $r4 = & $saved $m4 'c4'
-    & $add "shot collection: a place already taken is never overwritten; that shot has no path and the row is INCOMPLETE ($($r4.Detail))" $true (& $holds {
+    & $add "shot collection: a place already taken is never overwritten; that shot has no path and the row is INCOMPLETE ($(& $toldBy $r4))" $true (& $holds {
             $r4.Status -ceq 'INCOMPLETE' -and $r4.Detail -ceq 'ok; shots: not kept: s-0.png is there already and is never overwritten' -and [IO.File]::ReadAllText($taken4) -ceq 'there first' -and
             $null -eq $r4.Seen.states[0].shots[0].path -and $r4.Seen.states[0].shots[0].problem -ceq 'could not be kept: s-0.png is there already and is never overwritten' -and (Test-Path -LiteralPath $m4.Plan.Shots[0].Png) })
     $m5 = & $made 'save5'
     $big = [IO.File]::Open($m5.Plan.Shots[0].Png, [IO.FileMode]::Open); try { $big.SetLength(64MB + 1) } finally { $big.Dispose() }
     $r5 = & $saved $m5 'c5'
-    & $add "shot collection: an image larger than 64 MiB is not moved ($($r5.Detail))" $true ($r5.Status -ceq 'INCOMPLETE' -and $r5.Detail -ceq "ok; shots: not kept: s-0.png is larger than $(64MB) bytes" -and (Test-Path -LiteralPath $m5.Plan.Shots[0].Png))
+    & $add "shot collection: an image larger than 64 MiB is not moved ($(& $toldBy $r5))" $true (& $holds { $r5.Status -ceq 'INCOMPLETE' -and $r5.Detail -ceq "ok; shots: not kept: s-0.png is larger than $(64MB) bytes" -and (Test-Path -LiteralPath $m5.Plan.Shots[0].Png) })
     Remove-Item -LiteralPath $m5.Plan.Shots[0].Png -Force
     # The shot directory replaced by a junction to another directory with an image and an answer of its own
     $m6 = & $made 'save6'
@@ -4434,15 +4436,15 @@ function Get-CaptureCases([string]$Tmp, [string]$RepoRoot) {
     Remove-Item -LiteralPath $m6.Plan.Dir -Force
     $junctionMade = try { $null = New-Item -ItemType Junction -Path $m6.Plan.Dir -Target $elsewhere; $true } catch { $false }
     $r6 = & $saved $m6 'c6'
-    & $add "shot collection: a shot directory replaced by a junction gives nothing, and the files behind it stay ($($r6.Detail))" $true (
+    & $add "shot collection: a shot directory replaced by a junction gives nothing, and the files behind it stay ($(& $toldBy $r6))" $true (& $holds {
         $junctionMade -and $r6.Status -ceq 'INCOMPLETE' -and $r6.Detail -ceq 'ok; shots: nothing collected: the shot directory was replaced by a link or junction' -and (Test-Path -LiteralPath (Join-Path $elsewhere 's-0.png')) -and
-        -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c6/run1')))
+        -not (Test-Path -LiteralPath (Join-Path $saveRes 'renders/c6/run1')) })
     if ($junctionMade) { [IO.Directory]::Delete($m6.Plan.Dir) }
     # A launch that failed as a whole (no facts): every image whose answer checks out is moved and listed all the same
     $m7 = & $made 'save7'
     $r7 = & $saved $m7 'c7' 'INCOMPLETE' $null
-    $shot7 = @($r7.Seen.shots)
-    & $add "shot collection: a launch without facts still has every image whose answer checks out moved and listed, without the driver's times ($($r7.Status): $($r7.Detail))" $false (& $holds {
+    $shot7 = @(@(try { $r7.Seen.shots } catch { $null }) | Where-Object { $_ })
+    & $add "shot collection: a launch without facts still has every image whose answer checks out moved and listed, without the driver's times ($(& $toldBy $r7))" $false (& $holds {
             $r7.Status -ceq 'INCOMPLETE' -and $r7.Detail -ceq 'ok' -and $shot7.Count -eq 1 -and $shot7[0].state -ceq 's' -and $shot7[0].name -ceq 's-0.png' -and $shot7[0].taken -and $null -eq $shot7[0].held -and
             $null -eq $shot7[0].wallMs -and $shot7[0].path -ceq 'renders/c7/run1/sv.shots/s-0.png' -and $shot7[0].width -eq 640 -and $shot7[0].view.y -eq 27 -and
             $shot7[0].sha256 -ceq (Get-HarnessSha256 (Join-Path $saveRes 'renders/c7/run1/sv.shots/s-0.png')) -and (Test-Path -LiteralPath $m7.Plan.Shots[1].Png) })

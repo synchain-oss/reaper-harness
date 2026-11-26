@@ -414,6 +414,9 @@ else { Write-Case '(no interactive desktop in this session: the real message box
 # Printing a window needs a desktop; without one these cases say they did not run, and the parent fails when they are
 # missing although this session has one. Each stand-in (tests/FakeShots.ps1) shows its window without taking the focus
 # and closes it once its mark file is there; every stand-in started here is ended before its block returns.
+# A row, a fact or a file that is missing makes the case false, not the child stop: a condition that looks into a result
+# or a file runs here
+$holds = { param([scriptblock]$Condition) try { [bool](& $Condition) } catch { $false } }
 $captureCases = {
     param($guiLock)
     $null = $guiLock
@@ -510,12 +513,12 @@ $captureCases = {
         $a1 = & $ask $svc $r1[0]
         $answer1 = ($a1 -ceq 'done') ? (Read-HarnessShotAnswer -Path $r1[0].Done -Kind done) : $null
         $parts1 = @(Get-ChildItem -LiteralPath (Split-Path -Parent $r1[0].Png) -Filter '*.part' -Force)
-        Write-Case "capture: one plugin window: a PNG of its 640 x 427 client area, then the answer with the view at 0,27 640 x 400 and the DPI; no .part left ($a1)" $true (
+        Write-Case "capture: one plugin window: a PNG of its 640 x 427 client area, then the answer with the view at 0,27 640 x 400 and the DPI; no .part left ($a1)" $true (& $holds {
             $null -ne $answer1 -and $answer1.Width -eq 640 -and $answer1.Height -eq 427 -and $null -ne $answer1.View -and $answer1.View.x -eq 0 -and $answer1.View.y -eq 27 -and $answer1.View.w -eq 640 -and
             $answer1.View.h -eq 400 -and $answer1.Dpi -ge 96 -and (Test-HarnessShotImage -Path $r1[0].Png -Answer $answer1) -and (& $pngOk $r1[0].Png 640 427) -and $parts1.Count -eq 0 -and
-            ([IO.File]::GetLastWriteTimeUtc($r1[0].Done) -ge [IO.File]::GetLastWriteTimeUtc($r1[0].Png)) -and -not (Test-Path -LiteralPath $r1[0].Err))
+            ([IO.File]::GetLastWriteTimeUtc($r1[0].Done) -ge [IO.File]::GetLastWriteTimeUtc($r1[0].Png)) -and -not (Test-Path -LiteralPath $r1[0].Err) })
         # A request answered is never answered again; a request file of a name not in the plan is no request
-        Remove-Item -LiteralPath $r1[0].Done, $r1[0].Png -Force
+        foreach ($f in $r1[0].Done, $r1[0].Png) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
         [IO.File]::WriteAllText($r1[0].Req, '2')
         $stray = Join-Path (Split-Path -Parent $r1[0].Png) 'stray-1.req'
         [IO.File]::WriteAllText($stray, '1')
@@ -566,7 +569,7 @@ $captureCases = {
         $a5 = & $ask $svc $r5[0]
         $null = $svc.Stop(5000)
         $answer5 = ($a5 -ceq 'done') ? (Read-HarnessShotAnswer -Path $r5[0].Done -Kind done) : $null
-        Write-Case "capture: a plugin window without the view child is shot all the same, its view none ($a5)" $true ($null -ne $answer5 -and $null -eq $answer5.View -and $answer5.Width -eq 640 -and (Test-HarnessShotImage -Path $r5[0].Png -Answer $answer5))
+        Write-Case "capture: a plugin window without the view child is shot all the same, its view none ($a5)" $true (& $holds { $null -ne $answer5 -and $null -eq $answer5.View -and $answer5.Width -eq 640 -and (Test-HarnessShotImage -Path $r5[0].Png -Answer $answer5) })
         # Only windows of the PID it was given: a process without a window gets nowindow while another's is on screen
         $loneInfo = [Diagnostics.ProcessStartInfo]::new($pwshExe, '-NoProfile -Command Start-Sleep -Seconds 30')
         $loneInfo.CreateNoWindow = $true
@@ -1851,8 +1854,6 @@ $reportRun = {
     finally { Set-FakeReaper @{ Pwsh = $pwshExe; CfgDir = $pinned.Dir; Plugins = $plugins; Seen = $seenArgs } }
     [pscustomobject]@{ Run = $run; Row = @($run.runs[0].scenarios | Where-Object { $_.id -ceq 'monitor-states' })[0]; Env = @($envSeen) }
 }
-# A row or a fact that is missing makes the case false, not the child stop: a condition that looks into a result runs here
-$holds = { param([scriptblock]$Condition) try { [bool](& $Condition) } catch { $false } }
 $stateOf = { param($ResultRow) try { @($ResultRow.facts.states | Where-Object { $_.name -ceq 'stopped-armed-on' })[0] } catch { $null } }
 $rp = & $reportRun
 $armedState = & $stateOf $rp.Row
