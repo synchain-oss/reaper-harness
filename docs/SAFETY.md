@@ -260,9 +260,9 @@ keeps that contained:
   process owns, to find where the plugin's view is; apart from the request to draw below, it sends no window anything.
 - **How.** `PrintWindow` with `PW_CLIENTONLY | PW_RENDERFULLCONTENT` asks the window to draw its client area into the
   harness's memory. A window in front of it is not in the image, the title bar is not either, and nothing is moved,
-  resized, focused, raised, shown, clicked or typed into. This runs REAPER's and the plugin's own drawing code once per
-  shot, in REAPER's process, under your account, like opening the editor; for a web view that drawing can reach the
-  web view's own processes.
+  resized, focused, raised, shown, clicked or typed into. This runs REAPER's and the plugin's own drawing code once
+  per shot, in REAPER's process, under your account, like opening the editor; for a web view that drawing can reach
+  the web view's own processes.
 - **The handshake.** The driver asks for a shot with a file in the work directory that names nothing; the harness
   answers only the file names it planned, each once, and writes only those files, each through a `.part` file and a
   rename, never over a file that is there, all inside the work directory: a launch whose shot files would lie
@@ -276,8 +276,8 @@ keeps that contained:
   `renders/<run stamp>/run<round>/<id>.shots/` with or without `keep`, under the rules of kept renders
   ([below](#source-files-and-kept-renders)), never overwritten, never following a link, at most 64 MiB each. Nothing
   uploads them. Keep them out of repositories, like the work files ([INTEGRATING.md](INTEGRATING.md)).
-- **Outcomes.** A shot asked for and not taken makes its state INCOMPLETE with the reason; a FAIL stays FAIL. What is in
-  an image is never judged: a black or an unfinished image is a taken shot.
+- **Outcomes.** A shot asked for and not taken makes its state INCOMPLETE with the reason; a FAIL stays FAIL. What is
+  in an image is never judged: a black or an unfinished image is a taken shot.
 
 The launch path, the locks, the watchdog and its window rule, and the module check are unchanged: the shots ride on
 the guarded launch, which is no new way to start REAPER.

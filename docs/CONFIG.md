@@ -677,23 +677,21 @@ stopped-armed-on: blocks=94/94 silent=0 signal=94 left=94 right=94 same=0 transp
 `transport` and `monitoring` as read back at the end of the window; with `windows`, ` windows=O/C of N`: how often the
 window opened and closed, and with `holdMs` then ` held=H/<holdMs>ms`: the shortest time a window was held open, and
 with `capture` then ` shots=T/N`: T of its N shots were taken; with report criteria,
-` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state that fails adds
-`; failed: ...`. A state whose numbers describe another state than the one asked for is INCOMPLETE
-(`; no evidence: ...`): the device ran less than the window, or the transport, the arm or the monitoring mode did not
-read back as asked. So is an armed state of a scenario with a feed in whose window the feed played no block: its chain
-would be silent for the wrong reason. So is a state of which the driver got no clean reading (`<name>: not observed`):
-the tool JSFX write their counts one at a time on the audio thread, so the driver takes them only when a generation
-value around them shows no write under way, and after a bounded number of tries it reports nothing rather than
-half-written numbers. The row is INCOMPLETE as well when a probe or the feed is not the tool's own copy, the probe is
-not first in the chain, the record path could not be set, the feed could not open its file, the feed never ran
-although a state arms the track, or not every state was observed; it is FAIL, whatever the states say, when any file
-appeared in the record directory. Facts: `track`, `runFxWhenStopped`, `runFxAfterStopMs`, `settleSamples`, `feed`
-(`source`, `sha256`, `channels`) and per state its settings, `status`, `problems` and the numbers, among them `fed`
-and `fed_samples`: the blocks and frames the feed played in the window, `win_open` and `win_closed` with `windows`,
-`win_held` with `holdMs`, `shots` with `capture` (below), and `report` with a report: per plugin and field its `start`,
-`end` and `delta`. A plugin of
-the layout that declares a [report](#reports) is read around every state, so a state without `expect.report` has those
-too.
+` report <plugin>.<field>=<end> (+<growth>)` per judged field. A state that fails adds `; failed: ...`. A state whose
+numbers describe another state than the one asked for is INCOMPLETE (`; no evidence: ...`): the device ran less than
+the window, or the transport, the arm or the monitoring mode did not read back as asked. So is an armed state of a
+scenario with a feed in whose window the feed played no block: its chain would be silent for the wrong reason. So is a
+state of which the driver got no clean reading (`<name>: not observed`): the tool JSFX write their counts one at a
+time on the audio thread, so the driver takes them only when a generation value around them shows no write under way,
+and after a bounded number of tries it reports nothing rather than half-written numbers. The row is INCOMPLETE as well
+when a probe or the feed is not the tool's own copy, the probe is not first in the chain, the record path could not be
+set, the feed could not open its file, the feed never ran although a state arms the track, or not every state was
+observed; it is FAIL, whatever the states say, when any file appeared in the record directory. Facts: `track`,
+`runFxWhenStopped`, `runFxAfterStopMs`, `settleSamples`, `feed` (`source`, `sha256`, `channels`) and per state its
+settings, `status`, `problems` and the numbers, among them `fed` and `fed_samples`: the blocks and frames the feed
+played in the window, `win_open` and `win_closed` with `windows`, `win_held` with `holdMs`, `shots` with `capture`
+(below), and `report` with a report: per plugin and field its `start`, `end` and `delta`. A plugin of the layout that
+declares a [report](#reports) is read around every state, so a state without `expect.report` has those too.
 
 Windows: the plugin must be on the tested track exactly once. While the state's window runs, the driver opens the
 plugin's floating window (`TrackFX_Show`, 3), waits until `TrackFX_GetFloatingWindow` returns it, gives the editor ten
@@ -763,20 +761,21 @@ stays FAIL. Nothing in an image is judged: a black or an unfinished image is a t
 
 A configuration without `capture` is as before, and never loads the code that takes shots.
 
-Measured on REAPER 7.82 (x64, Dummy Audio 48 kHz / 512 samples, 96 DPI, the private configuration directory) with the same
-test build ([validation record](validation/2026-11-25-window-capture.md)): the three shots of the state above were PNGs of
-1120 x 727 pixels at 96 DPI with `view` at 0, 27, 1120 x 700, so REAPER's row of controls was 27 pixels high and the view
-reached the bottom of the image; the shot at 300 ms showed the view not drawn yet, the ones at 2000 and 8000 ms the editor
-complete, and all three were taken (` shots=3/3`), their `bytes` and `sha256` those of the moved files. A shot's `held`
-read 2 to 13 ms past its `at` (24 and 95 ms for the one at 300 ms, while the editor was still starting), and its `wallMs`
-73 to 84 ms more than its `held`, the same for every shot of a run. Both follow from how the hold is counted: a
-shot is asked for in the first turn of the message loop whose hold time has reached its offset, and a turn counts at
-most 100 ms, so while the editor starts and the turns are long the hold moves in steps of up to 100 ms and falls
-behind the wall clock by what those turns took beyond that. In a scenario with a warm-up state, a state of three
-windows held 5 s with `capture` `[4000]` gave one image, from its first window, and `windows=3/3 of 3`. Three shots made the
-row of a 10 s hold 0.1 to 0.5 s longer (21.4 and 21.7 s, against 21.2 and 21.3 s without `capture`), the hold did not get
-longer, and the chain and the device ran the same number of blocks in every state; after a green round the work directory
-had no shot directory, and with `-KeepWork` it kept the request and answer files of the shots but no image.
+Measured on REAPER 7.82 (x64, Dummy Audio 48 kHz / 512 samples, 96 DPI, the private configuration directory) with the
+same test build ([validation record](validation/2026-11-25-window-capture.md)): the three shots of the state above
+were PNGs of 1120 x 727 pixels at 96 DPI with `view` at 0, 27, 1120 x 700, so REAPER's row of controls was 27 pixels
+high and the view reached the bottom of the image; the shot at 300 ms showed the view not drawn yet, the ones at 2000
+and 8000 ms the editor complete, and all three were taken (` shots=3/3`), their `bytes` and `sha256` those of the
+moved files. A shot's `held` read 2 to 13 ms past its `at` (24 and 95 ms for the one at 300 ms, while the editor was
+still starting), and its `wallMs` 73 to 84 ms more than its `held`, the same for every shot of a run. Both follow from
+how the hold is counted: a shot is asked for in the first turn of the message loop whose hold time has reached its
+offset, and a turn counts at most 100 ms, so while the editor starts and the turns are long the hold moves in steps of
+up to 100 ms and falls behind the wall clock by what those turns took beyond that. In a scenario with a warm-up state,
+a state of three windows held 5 s with `capture` `[4000]` gave one image, from its first window, and
+`windows=3/3 of 3`. Three shots made the row of a 10 s hold 0.1 to 0.5 s longer (21.4 and 21.7 s, against 21.2 and
+21.3 s without `capture`), the hold did not get longer, and the chain and the device ran the same number of blocks in
+every state; after a green round the work directory had no shot directory, and with `-KeepWork` it kept the request
+and answer files of the shots but no image.
 
 ```json
 { "id": "monitor-states", "kind": "transport", "layout": "vocal", "feed": { "channels": "different" },
