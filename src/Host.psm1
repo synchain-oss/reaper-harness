@@ -90,8 +90,10 @@ $script:KnownModals = [ordered]@{
 # left alone it would only end at the timeout, and the outcome would not name it. A floating FX window has the dialog
 # class too; REAPER titles it with the plugin type and its name ("VST3: Name (Vendor) - Track 1 [1/2]"), or "FX: " for
 # a chain, anchored at the start and in that case. A dialog a plugin opens itself has a title of its own, so it is
-# still unknown, and stuck.
-$script:PluginWindow = '^(?:VST3i?|VSTi?|CLAPi?|JS|FX): '
+# still unknown, and stuck. The capture service (Capture.psm1) takes shots of a plugin's window only, never of a chain's.
+$script:PluginFormats = 'VST3i?|VSTi?|CLAPi?|JS'
+$script:PluginWindow = "^(?:$($script:PluginFormats)|FX): "     # the watchdog: a plugin's or a chain's window
+$script:PluginOnlyWindow = "^(?:$($script:PluginFormats)): "    # a shot: a plugin's window only
 function Get-HarnessModalVerdict {
     param([string]$Class, [bool]$Visible, [string]$Title)
     if (-not $Visible -or $Class -cne '#32770') { return [pscustomobject]@{ Action = 'Ignore'; Name = '' } }
@@ -234,6 +236,9 @@ function Stop-HostRefuse([string]$Why) { throw [System.InvalidOperationException
 # StartedList: a list of the caller; it gets one row (Pid, StartUtc) right after the start, so that the caller knows of
 # the process even when something later in here throws. Get-HarnessOwnProcessesLeft reads those rows.
 # Unset: environment variables removed from what the process inherits (Environment then sets its own).
+# Captures: the shots of a step's held windows (Capture.psm1, built by the caller first). The capture service runs on a
+# thread of its own from right after the start until the process has exited or was ended, and looks only at this PID's
+# windows. CaptureStopped: whether it stopped in time ($null without captures).
 function Invoke-HarnessHost {
     param(
         [Parameter(Mandatory)][string]$ReaperExe,
@@ -250,7 +255,8 @@ function Invoke-HarnessHost {
         [scriptblock]$ModuleSampler = $null,
         [scriptblock]$Stopper = $null,
         $StartedList = $null,
-        [string[]]$Unset = @()
+        [string[]]$Unset = @(),
+        [object[]]$Captures = @()
     )
     if (-not (Test-HarnessLockHeld -Lock $Lock -Name (Get-HarnessDefaultGuiLock))) { Stop-HostRefuse 'REAPER is only started while holding the default GUI lock: pass the object from Enter-HarnessLocks as -Lock' }
     $cfgArgs = @('-nosplash', '-newinst', '-cfgfile', (Get-HarnessCfgArgument))
@@ -283,7 +289,19 @@ function Invoke-HarnessHost {
     $plugSeen = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $modScans = 0
     $hostError = $null
+    $service = $null
+    $captureStopped = $null
+    $stillRunning = $false
     try {
+        # The PID cannot name another process while the service runs: $proc holds the handle of the process started here
+        # until after the stop below, and Windows does not hand out the number of a process while a handle to it is open.
+        # The service checks the start time as well, and leaves by itself once the process is gone or at its deadline
+        if ($Captures.Count) {
+            $startUtc = Get-HarnessProcessStartUtc $proc
+            $service = [HarnessCapture]::new([uint32]$ownPid, [long]($startUtc ? $startUtc.ToFileTimeUtc() : 0), $script:PluginOnlyWindow, [string[]]@($Captures.Req), [string[]]@($Captures.Png),
+                [string[]]@($Captures.Done), [string[]]@($Captures.Err), [int](($TimeoutSec + 30) * 1000))
+            $service.Start()
+        }
         while (-not $proc.HasExited) {
             Start-Sleep -Milliseconds 250
             $now = $sw.Elapsed.TotalSeconds
@@ -331,14 +349,20 @@ function Invoke-HarnessHost {
         # The process runs on and nobody else knows it: treated like a timeout below, and the status says what happened
         $status = 'Error'
         $hostError = $_.Exception.Message -replace '\s+', ' '
-    }
-    $stillRunning = $false
-    if ($status) {
-        # Only the PID started here is ever ended. A stop that fails is not judged here: what counts is whether the process
-        # is still there afterwards, so a failed stop of a live process shows up below and one that had already exited
-        # is no failure
-        try { if ($Stopper) { & $Stopper $ownPid } else { Stop-Process -Id $ownPid -Force -ErrorAction Stop } } catch { $null = $_ }
-        $stillRunning = -not $proc.WaitForExit(5000)
+    } finally {
+        try {
+            if ($status) {
+                # Only the PID started here is ever ended. A stop that fails is not judged here: what counts is whether the
+                # process is still there afterwards, so a failed stop of a live process shows up below and one that had
+                # already exited is no failure
+                try { if ($Stopper) { & $Stopper $ownPid } else { Stop-Process -Id $ownPid -Force -ErrorAction Stop } } catch { $null = $_ }
+                $stillRunning = -not $proc.WaitForExit(5000)
+            }
+        } finally {
+            # After the process has exited or was ended, whatever ended the watch (a stopped pipeline too): a PrintWindow
+            # that waits on a hung REAPER returns once that process is gone. Stop never throws
+            if ($service) { $captureStopped = $service.Stop(5000) }
+        }
     }
     $exit = ($proc.HasExited -and -not $status) ? $proc.ExitCode : $null
     # When the process exited. If the reported ExitTime cannot be read (the process has not exited, a stand-in has
@@ -352,7 +376,7 @@ function Invoke-HarnessHost {
     [pscustomobject]@{
         Status = $status ?? 'Exited'; ExitCode = $exit; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Pid = $ownPid; StartedUtc = $startedUtc; ExitedUtc = $exitedUtc
         Modal = $modal; Dismissed = $dismissed.ToArray(); Windows = @($titles); Marks = $marks; SampleLost = $lost.ToArray(); Modules = $modules; ModuleScans = $modScans
-        PluginModules = @($plugSeen); StillRunning = $stillRunning; Error = $hostError
+        PluginModules = @($plugSeen); StillRunning = $stillRunning; Error = $hostError; CaptureStopped = $captureStopped
     }
 }
 

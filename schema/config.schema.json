@@ -874,6 +874,18 @@
               "maximum": 60000,
               "description": "keep each window open at least this long before it is closed, in ms of message-loop time; default 0: ten turns of the message loop. count x holdMs is at most 600000"
             },
+            "capture": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 60000
+              },
+              "minItems": 1,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "description": "shots of the held window, in ms of the hold: each a PNG of its client area, taken when the hold time reaches it (rising, at most holdMs; needs holdMs above 0); in the first window of the state that opened; at most 32 in a scenario; not in a negative case; never judged"
+            },
             "maxBlockDiff": {
               "type": "integer",
               "minimum": 0,
